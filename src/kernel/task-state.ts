@@ -4,6 +4,7 @@ export type ReadyReason =
   | 'submitted'
   | 'capacity_available'
   | 'model_retry'
+  | 'subagent_result_available'
   | 'tool_result_available'
   | 'restored';
 
@@ -25,6 +26,11 @@ export type Termination =
   | {
       kind: 'cancelled';
       reason: string;
+    }
+  | {
+      kind: 'needs_parent_action';
+      requiredWork: string;
+      partialOutput?: JsonValue;
     };
 
 export type ReadyState = {

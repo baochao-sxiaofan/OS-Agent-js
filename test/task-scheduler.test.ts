@@ -2,12 +2,15 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   AdmissionController,
+  AgentPool,
   FakeModelProvider,
   InMemoryTaskStore,
+  ReadyQueue,
   TaskScheduler,
   ToolRegistry,
   type Clock,
   type JsonValue,
+  type TaskStore,
   type Tool,
 } from '../src/index.js';
 
@@ -30,8 +33,10 @@ class ManualClock implements Clock {
 }
 
 function createRuntime(options?: {
+  agentPool?: AgentPool;
   clock?: Clock;
   maxConcurrentRequests?: number;
+  readyQueue?: ReadyQueue;
   requestsPerMinute?: number;
 }) {
   const provider = new FakeModelProvider();
@@ -50,6 +55,12 @@ function createRuntime(options?: {
     tools,
     store,
     admission,
+    ...(options?.agentPool === undefined
+      ? {}
+      : { agentPool: options.agentPool }),
+    ...(options?.readyQueue === undefined
+      ? {}
+      : { readyQueue: options.readyQueue }),
   });
   return { admission, provider, scheduler, store, tools };
 }
@@ -355,5 +366,245 @@ describe('TaskScheduler', () => {
 
     expect(maxActiveExecutions).toBe(1);
     expect(mutationOrder).toEqual(['first', 'second']);
+  });
+
+  it('runs a three-level delegation tree and wakes parents with results', async () => {
+    const agentPool = new AgentPool({
+      maxDepth: 3,
+      maxLiveAgents: 3,
+      maxSpawnedPerRoot: 2,
+    });
+    const { provider, scheduler } = createRuntime({
+      agentPool,
+      maxConcurrentRequests: 1,
+    });
+    const root = await scheduler.submit({
+      id: 'root',
+      goal: 'Coordinate the full task.',
+    });
+    provider.setResponses('root', [
+      {
+        type: 'spawn_subagents',
+        children: [{ taskId: 'middle', goal: 'Coordinate the branch.' }],
+        usage,
+      },
+      { type: 'final', output: 'root complete', usage },
+    ]);
+    provider.setResponses('middle', [
+      {
+        type: 'spawn_subagents',
+        children: [{ taskId: 'leaf', goal: 'Complete concrete work.' }],
+        usage,
+      },
+      { type: 'final', output: 'middle complete', usage },
+    ]);
+    provider.setResponses('leaf', [
+      { type: 'final', output: 'leaf complete', usage },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    const middle = scheduler.getTask('middle');
+    const leaf = scheduler.getTask('leaf');
+    expect(middle).toMatchObject({
+      rootTaskId: 'root',
+      parentTaskId: 'root',
+      depth: 2,
+    });
+    expect(leaf).toMatchObject({
+      rootTaskId: 'root',
+      parentTaskId: 'middle',
+      depth: 3,
+    });
+    expect(provider.requests.map((request) => request.taskId)).toEqual([
+      'root',
+      'middle',
+      'leaf',
+      'middle',
+      'root',
+    ]);
+    expect(
+      root.context.some(
+        (item) =>
+          item.type === 'subagent_result' &&
+          item.childTaskId === 'middle',
+      ),
+    ).toBe(true);
+    expect(root.state.status).toBe('TERMINATED');
+    expect(scheduler.liveAgentCount).toBe(0);
+  });
+
+  it('rejects depth-four delegation and lets the leaf report upward', async () => {
+    const agentPool = new AgentPool({
+      maxDepth: 3,
+      maxLiveAgents: 4,
+      maxSpawnedPerRoot: 10,
+    });
+    const { provider, scheduler } = createRuntime({
+      agentPool,
+      maxConcurrentRequests: 1,
+    });
+    const root = await scheduler.submit({
+      id: 'root-depth',
+      goal: 'Coordinate.',
+    });
+    provider.setResponses('root-depth', [
+      {
+        type: 'spawn_subagents',
+        children: [{ taskId: 'middle-depth', goal: 'Coordinate.' }],
+        usage,
+      },
+      { type: 'final', output: 'root handled fallback', usage },
+    ]);
+    provider.setResponses('middle-depth', [
+      {
+        type: 'spawn_subagents',
+        children: [{ taskId: 'leaf-depth', goal: 'Do work.' }],
+        usage,
+      },
+      { type: 'final', output: 'middle handled fallback', usage },
+    ]);
+    provider.setResponses('leaf-depth', [
+      {
+        type: 'spawn_subagents',
+        children: [{ taskId: 'forbidden-depth', goal: 'Too deep.' }],
+        usage,
+      },
+      {
+        type: 'needs_parent_action',
+        requiredWork: 'Prepare the missing input locally.',
+        partialOutput: { inspected: true },
+        usage,
+      },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    const leaf = scheduler.getTask('leaf-depth');
+    expect(scheduler.getTask('forbidden-depth')).toBeUndefined();
+    expect(
+      leaf?.context.some(
+        (item) =>
+          item.type === 'subagent_spawn_rejected' &&
+          item.reason === 'max_depth_exceeded',
+      ),
+    ).toBe(true);
+    expect(
+      root.context.some(
+        (item) =>
+          item.type === 'subagent_result' &&
+          item.result.kind === 'completed',
+      ),
+    ).toBe(true);
+    expect(root.state.status).toBe('TERMINATED');
+  });
+
+  it('keeps a parent runnable when the live-agent pool is full', async () => {
+    const agentPool = new AgentPool({
+      maxDepth: 3,
+      maxLiveAgents: 1,
+      maxSpawnedPerRoot: 10,
+    });
+    const { provider, scheduler } = createRuntime({
+      agentPool,
+      maxConcurrentRequests: 1,
+    });
+    const root = await scheduler.submit({
+      id: 'pool-root',
+      goal: 'Attempt delegation, then complete locally.',
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'spawn_subagents',
+        children: [{ taskId: 'no-slot', goal: 'Cannot be created.' }],
+        usage,
+      },
+      { type: 'final', output: 'completed without delegation', usage },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    expect(scheduler.getTask('no-slot')).toBeUndefined();
+    expect(
+      root.events
+        .filter((event) => event.type === 'state_transitioned')
+        .map((event) => `${event.from}->${event.to.status}`),
+    ).toEqual([
+      'READY->RUNNING',
+      'RUNNING->READY',
+      'READY->RUNNING',
+      'RUNNING->TERMINATED',
+    ]);
+    expect(
+      root.context.some(
+        (item) =>
+          item.type === 'subagent_spawn_rejected' &&
+          item.reason === 'live_pool_exhausted',
+      ),
+    ).toBe(true);
+  });
+
+  it('serializes concurrent spawn attempts for one parent', async () => {
+    const backingStore = new InMemoryTaskStore();
+    let releaseChildPersistence: (() => void) | undefined;
+    const childPersistenceGate = new Promise<void>((resolve) => {
+      releaseChildPersistence = resolve;
+    });
+    const store: TaskStore = {
+      persist: async (task) => {
+        if (task.parentTaskId !== undefined) {
+          await childPersistenceGate;
+        }
+        await backingStore.persist(task);
+      },
+      load: async (taskId) => await backingStore.load(taskId),
+      events: async (taskId) => await backingStore.events(taskId),
+    };
+    const scheduler = new TaskScheduler({
+      provider: new FakeModelProvider(),
+      tools: new ToolRegistry(),
+      store,
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 10_000,
+      }),
+      agentPool: new AgentPool({
+        maxDepth: 3,
+        maxLiveAgents: 3,
+        maxSpawnedPerRoot: 2,
+      }),
+    });
+    const root = await scheduler.submit({
+      id: 'concurrent-root',
+      goal: 'Coordinate.',
+    });
+    root.transition(
+      {
+        status: 'RUNNING',
+        enteredAt: Date.now(),
+        providerId: 'fake-model',
+        requestAttempt: 1,
+      },
+      'test_model_request',
+    );
+
+    const firstSpawn = scheduler.spawnChildren(root.id, [
+      { id: 'first-child', goal: 'First branch.' },
+    ]);
+    await vi.waitFor(() => {
+      expect(scheduler.liveAgentCount).toBe(2);
+    });
+    const secondSpawn = await scheduler.spawnChildren(root.id, [
+      { id: 'second-child', goal: 'Second branch.' },
+    ]);
+
+    expect(secondSpawn).toMatchObject({
+      spawned: false,
+      reason: 'spawn_in_progress',
+    });
+    releaseChildPersistence?.();
+    expect(await firstSpawn).toMatchObject({ spawned: true });
+    expect(scheduler.getTask('second-child')).toBeUndefined();
   });
 });

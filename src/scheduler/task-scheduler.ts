@@ -1,12 +1,14 @@
 import type { ContextItem } from '../kernel/context.js';
 import {
   TaskControlBlock,
+  type CreateChildTaskOptions,
   type CreateTaskOptions,
 } from '../kernel/task-control-block.js';
 import type { TaskState, Termination } from '../kernel/task-state.js';
 import type {
   ModelProvider,
   ModelRequest,
+  SubagentSpawnRequest,
   ToolCallRequest,
 } from '../model/model-provider.js';
 import type { TaskStore } from '../persistence/task-store.js';
@@ -18,6 +20,10 @@ import {
   type AdmissionDecision,
   type AdmissionLease,
 } from './admission-controller.js';
+import {
+  AgentPool,
+  type SpawnRejectionReason,
+} from './agent-pool.js';
 import { ReadyQueue } from './ready-queue.js';
 
 export type SchedulerRunResult = {
@@ -31,17 +37,39 @@ export type TaskSchedulerOptions = {
   admission: AdmissionController;
   tools: ToolRegistry;
   store: TaskStore;
+  agentPool?: AgentPool;
+  readyQueue?: ReadyQueue;
 };
+
+export type SubagentSpawnFailureReason =
+  | SpawnRejectionReason
+  | 'capability_escalation'
+  | 'invalid_spawn_request'
+  | 'invalid_parent_state'
+  | 'spawn_in_progress';
+
+export type SpawnChildrenResult =
+  | {
+      spawned: true;
+      tasks: readonly TaskControlBlock[];
+    }
+  | {
+      spawned: false;
+      reason: SubagentSpawnFailureReason;
+      message: string;
+    };
 
 export class TaskScheduler {
   readonly #provider: ModelProvider;
   readonly #admission: AdmissionController;
   readonly #tools: ToolRegistry;
   readonly #store: TaskStore;
-  readonly #readyQueue = new ReadyQueue();
+  readonly #agentPool: AgentPool;
+  readonly #readyQueue: ReadyQueue;
   readonly #tasks = new Map<string, TaskControlBlock>();
   readonly #operations = new Map<string, Promise<void>>();
   readonly #abortControllers = new Map<string, AbortController>();
+  readonly #spawningParents = new Set<string>();
   #operationSequence = 0;
 
   constructor(options: TaskSchedulerOptions) {
@@ -49,6 +77,14 @@ export class TaskScheduler {
     this.#admission = options.admission;
     this.#tools = options.tools;
     this.#store = options.store;
+    this.#agentPool =
+      options.agentPool ??
+      new AgentPool({
+        maxDepth: 3,
+        maxLiveAgents: 20,
+        maxSpawnedPerRoot: 100,
+      });
+    this.#readyQueue = options.readyQueue ?? new ReadyQueue();
   }
 
   get readyQueueSize(): number {
@@ -59,8 +95,16 @@ export class TaskScheduler {
     return this.#operations.size;
   }
 
+  get liveAgentCount(): number {
+    return this.#agentPool.liveCount;
+  }
+
   async submit(options: CreateTaskOptions): Promise<TaskControlBlock> {
     const task = TaskControlBlock.create(options);
+    if (this.#tasks.has(task.id)) {
+      throw new Error(`Task ID has already been used: ${task.id}`);
+    }
+    this.#agentPool.registerRoot(task);
     this.#tasks.set(task.id, task);
     this.#abortControllers.set(task.id, new AbortController());
     this.#readyQueue.enqueue(task);
@@ -72,6 +116,105 @@ export class TaskScheduler {
     return this.#tasks.get(taskId);
   }
 
+  async spawnChildren(
+    parentTaskId: string,
+    childOptions: readonly CreateChildTaskOptions[],
+  ): Promise<SpawnChildrenResult> {
+    const parent = this.requireTask(parentTaskId);
+    if (parent.state.status !== 'RUNNING') {
+      return {
+        spawned: false,
+        reason: 'invalid_parent_state',
+        message: `Task ${parent.id} cannot spawn from ${parent.state.status}.`,
+      };
+    }
+    if (this.#spawningParents.has(parent.id)) {
+      return {
+        spawned: false,
+        reason: 'spawn_in_progress',
+        message: `Task ${parent.id} is already creating subagents.`,
+      };
+    }
+    if (childOptions.length === 0) {
+      return await this.rejectSubagentSpawn(
+        parent,
+        'invalid_spawn_request',
+        'At least one child task is required.',
+      );
+    }
+    const childTaskIds = childOptions
+      .map((options) => options.id)
+      .filter((taskId): taskId is string => taskId !== undefined);
+    if (
+      new Set(childTaskIds).size !== childTaskIds.length ||
+      childTaskIds.some((taskId) => this.#tasks.has(taskId))
+    ) {
+      return await this.rejectSubagentSpawn(
+        parent,
+        'invalid_spawn_request',
+        'Child task IDs must be unique and must not have been used before.',
+      );
+    }
+
+    const capabilityEscalation = childOptions
+      .flatMap((options) => options.capabilities ?? [])
+      .find((capability) => !parent.hasCapability(capability));
+    if (capabilityEscalation !== undefined) {
+      return await this.rejectSubagentSpawn(
+        parent,
+        'capability_escalation',
+        `Child requested capability not held by parent: ${capabilityEscalation}.`,
+      );
+    }
+
+    const decision = this.#agentPool.tryReserveChildren(
+      parent,
+      childOptions.length,
+    );
+    if (!decision.reserved) {
+      return await this.rejectSubagentSpawn(
+        parent,
+        decision.reason,
+        decision.message,
+      );
+    }
+
+    this.#spawningParents.add(parent.id);
+    try {
+      const children = childOptions.map((options) =>
+        TaskControlBlock.createChild(parent, options),
+      );
+      decision.reservation.commit(children);
+
+      for (const child of children) {
+        this.#tasks.set(child.id, child);
+        this.#abortControllers.set(child.id, new AbortController());
+        parent.recordSubagentSpawned(child.id, child.depth);
+        await this.#store.persist(child);
+        this.#readyQueue.enqueue(child);
+      }
+
+      parent.transition(
+        {
+          status: 'BLOCKED',
+          enteredAt: Date.now(),
+          reason: 'subagent',
+          waitingFor: children.map((child) => child.id),
+        },
+        'subagents_spawned',
+      );
+      await this.#store.persist(parent);
+
+      return {
+        spawned: true,
+        tasks: children,
+      };
+    } finally {
+      decision.reservation.close();
+      this.#spawningParents.delete(parent.id);
+    }
+  }
+
   async restore(taskId: string): Promise<TaskControlBlock | undefined> {
     const snapshot = await this.#store.load(taskId);
     if (!snapshot) {
@@ -79,6 +222,7 @@ export class TaskScheduler {
     }
 
     const task = TaskControlBlock.restore(snapshot);
+    this.#agentPool.registerRestored(task);
     this.#tasks.set(task.id, task);
     this.#abortControllers.set(task.id, new AbortController());
 
@@ -130,13 +274,16 @@ export class TaskScheduler {
       return;
     }
 
+    const childTaskIds = this.#agentPool.childrenOf(taskId);
     this.#abortControllers.get(taskId)?.abort(new Error(reason));
     this.#readyQueue.remove(taskId);
-    this.terminate(task, {
+    await this.terminateTask(task, {
       kind: 'cancelled',
       reason,
     });
-    await this.#store.persist(task);
+    for (const childTaskId of childTaskIds) {
+      await this.cancel(childTaskId, `Parent task ${taskId} was cancelled.`);
+    }
   }
 
   async runUntilIdle(): Promise<SchedulerRunResult> {
@@ -166,6 +313,14 @@ export class TaskScheduler {
       if (!task) {
         break;
       }
+      if (task.modelAttempts >= task.maxModelAttempts) {
+        await this.terminateTask(task, {
+          kind: 'failed',
+          error: `Task exceeded ${task.maxModelAttempts} model attempts.`,
+        });
+        madeProgress = true;
+        continue;
+      }
 
       const pendingRequest = this.buildModelRequest(
         task,
@@ -180,7 +335,6 @@ export class TaskScheduler {
       if (!decision.admitted) {
         await this.handleAdmissionDenied(task, decision);
         if (!decision.retryable) {
-          this.#readyQueue.dequeue();
           madeProgress = true;
           continue;
         }
@@ -213,10 +367,11 @@ export class TaskScheduler {
   ): Promise<void> {
     task.recordCapacityWait(decision.reasons, decision.retryAt);
     if (!decision.retryable) {
-      this.terminate(task, {
+      await this.terminateTask(task, {
         kind: 'failed',
         error: `Request admission failed: ${decision.reasons.join(', ')}`,
       });
+      return;
     }
     await this.#store.persist(task);
   }
@@ -246,18 +401,47 @@ export class TaskScheduler {
       }
 
       task.recordModelResponse(response.type, response.usage);
-      if (response.type === 'final') {
-        this.terminate(task, {
-          kind: 'completed',
-          output: response.output,
-        });
-        await this.#store.persist(task);
-        return;
+      switch (response.type) {
+        case 'final':
+          await this.terminateTask(task, {
+            kind: 'completed',
+            output: response.output,
+          });
+          return;
+        case 'needs_parent_action':
+          await this.terminateTask(task, {
+            kind: 'needs_parent_action',
+            requiredWork: response.requiredWork,
+            ...(response.partialOutput === undefined
+              ? {}
+              : { partialOutput: response.partialOutput }),
+          });
+          return;
+        case 'spawn_subagents':
+          if (response.children.length === 0) {
+            throw new Error(
+              'Model requested subagent spawning without child tasks.',
+            );
+          }
+          await this.spawnChildren(
+            task.id,
+            response.children.map((child) =>
+              this.toCreateChildTaskOptions(child),
+            ),
+          );
+          return;
+        case 'tool_calls':
+          this.blockForToolCalls(task, response.calls);
+          await this.#store.persist(task);
+          this.launchToolCalls(task, response.calls);
+          return;
+        default: {
+          const exhaustiveResponse: never = response;
+          throw new Error(
+            `Unhandled model response: ${String(exhaustiveResponse)}`,
+          );
+        }
       }
-
-      this.blockForToolCalls(task, response.calls);
-      await this.#store.persist(task);
-      this.launchToolCalls(task, response.calls);
     } catch (error) {
       lease.close();
       if (task.state.status === 'TERMINATED') {
@@ -362,11 +546,10 @@ export class TaskScheduler {
       if (task.state.status === 'TERMINATED') {
         return;
       }
-      this.terminate(task, {
+      await this.terminateTask(task, {
         kind: 'failed',
         error: this.errorMessage(error),
       });
-      await this.#store.persist(task);
     }
   }
 
@@ -426,15 +609,22 @@ export class TaskScheduler {
       );
       this.#readyQueue.enqueue(task);
     } else {
-      this.terminate(task, {
+      await this.terminateTask(task, {
         kind: 'failed',
         error: this.errorMessage(error),
       });
+      return;
     }
     await this.#store.persist(task);
   }
 
-  private terminate(task: TaskControlBlock, termination: Termination): void {
+  private async terminateTask(
+    task: TaskControlBlock,
+    termination: Termination,
+  ): Promise<void> {
+    if (task.state.status === 'TERMINATED') {
+      return;
+    }
     const nextState: TaskState = {
       status: 'TERMINATED',
       enteredAt: Date.now(),
@@ -442,6 +632,113 @@ export class TaskScheduler {
     };
     task.transition(nextState, `task_${termination.kind}`);
     task.recordTermination(termination);
+    this.#readyQueue.remove(task.id);
+    this.#agentPool.release(task.id);
+    await this.#store.persist(task);
+    await this.notifyParentOfTermination(task, termination);
+  }
+
+  private async rejectSubagentSpawn(
+    parent: TaskControlBlock,
+    reason: SubagentSpawnFailureReason,
+    message: string,
+  ): Promise<SpawnChildrenResult> {
+    parent.appendContext({
+      type: 'subagent_spawn_rejected',
+      reason,
+      message,
+    });
+    parent.transition(
+      {
+        status: 'READY',
+        enteredAt: Date.now(),
+        reason: 'capacity_available',
+      },
+      `subagent_spawn_rejected:${reason}`,
+    );
+    this.#readyQueue.enqueue(parent);
+    await this.#store.persist(parent);
+    return {
+      spawned: false,
+      reason,
+      message,
+    };
+  }
+
+  private async notifyParentOfTermination(
+    child: TaskControlBlock,
+    termination: Termination,
+  ): Promise<void> {
+    if (child.parentTaskId === undefined) {
+      return;
+    }
+    const parent = this.#tasks.get(child.parentTaskId);
+    if (
+      !parent ||
+      parent.state.status !== 'BLOCKED' ||
+      parent.state.reason !== 'subagent' ||
+      !parent.state.waitingFor.includes(child.id)
+    ) {
+      return;
+    }
+
+    const resultAlreadyRecorded = parent.context.some(
+      (item) =>
+        item.type === 'subagent_result' && item.childTaskId === child.id,
+    );
+    if (!resultAlreadyRecorded) {
+      parent.appendContext({
+        type: 'subagent_result',
+        childTaskId: child.id,
+        result: termination,
+      });
+      parent.recordSubagentResult(child.id, termination);
+    }
+
+    const completedChildIds = new Set(
+      parent.context
+        .filter((item) => item.type === 'subagent_result')
+        .map((item) => item.childTaskId),
+    );
+    const allChildrenCompleted = parent.state.waitingFor.every((taskId) =>
+      completedChildIds.has(taskId),
+    );
+    if (allChildrenCompleted) {
+      parent.transition(
+        {
+          status: 'READY',
+          enteredAt: Date.now(),
+          reason: 'subagent_result_available',
+        },
+        'all_subagent_results_available',
+      );
+      this.#readyQueue.enqueue(parent, {
+        parentWakeupBoost: true,
+      });
+    }
+    await this.#store.persist(parent);
+  }
+
+  private toCreateChildTaskOptions(
+    request: SubagentSpawnRequest,
+  ): CreateChildTaskOptions {
+    return {
+      goal: request.goal,
+      ...(request.taskId === undefined ? {} : { id: request.taskId }),
+      ...(request.priority === undefined
+        ? {}
+        : { priority: request.priority }),
+      ...(request.capabilities === undefined
+        ? {}
+        : { capabilities: request.capabilities }),
+      ...(request.context === undefined ? {} : { context: request.context }),
+      ...(request.maxModelAttempts === undefined
+        ? {}
+        : { maxModelAttempts: request.maxModelAttempts }),
+      ...(request.maxCostUsd === undefined
+        ? {}
+        : { budget: { maxCostUsd: request.maxCostUsd } }),
+    };
   }
 
   private buildModelRequest(
@@ -454,6 +751,12 @@ export class TaskScheduler {
       context: task.context,
       tools: this.#tools.descriptorsFor(task.capabilities),
       attempt,
+      delegation: {
+        canSpawnSubagents: this.#agentPool.canTaskSpawn(task),
+        currentDepth: task.depth,
+        maxDepth: this.#agentPool.policy.maxDepth,
+        availableAgentSlots: this.#agentPool.availableLiveSlots,
+      },
     };
   }
 

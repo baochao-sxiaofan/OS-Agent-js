@@ -1,6 +1,6 @@
 {
   "name": "os-agent-js",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "An operating-system-inspired runtime and scheduler for LLM agent tasks.",
   "type": "module",
@@ -20,6 +20,7 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "demo": "tsx examples/basic-runtime.ts",
+    "demo:hierarchy": "tsx examples/hierarchical-runtime.ts",
     "test": "vitest run"
   },
   "engines": {

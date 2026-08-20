@@ -30,7 +30,11 @@ export type CapacityWaitRecordedEvent = TaskEventBase & {
 
 export type ModelResponseRecordedEvent = TaskEventBase & {
   type: 'model_response_recorded';
-  responseType: 'final' | 'tool_calls';
+  responseType:
+    | 'final'
+    | 'needs_parent_action'
+    | 'spawn_subagents'
+    | 'tool_calls';
   usage: ModelUsage;
 };
 
@@ -52,10 +56,24 @@ export type TaskTerminatedEvent = TaskEventBase & {
   termination: Termination;
 };
 
+export type SubagentSpawnedEvent = TaskEventBase & {
+  type: 'subagent_spawned';
+  childTaskId: string;
+  childDepth: number;
+};
+
+export type SubagentResultRecordedEvent = TaskEventBase & {
+  type: 'subagent_result_recorded';
+  childTaskId: string;
+  result: Termination;
+};
+
 export type TaskEvent =
   | CapacityWaitRecordedEvent
   | ModelResponseRecordedEvent
   | StateTransitionedEvent
+  | SubagentResultRecordedEvent
+  | SubagentSpawnedEvent
   | TaskCreatedEvent
   | TaskTerminatedEvent
   | ToolCallRecordedEvent

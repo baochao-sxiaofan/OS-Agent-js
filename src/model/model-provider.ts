@@ -18,6 +18,16 @@ export type ModelUsage = {
   costUsd: number;
 };
 
+export type SubagentSpawnRequest = {
+  taskId?: string;
+  goal: string;
+  priority?: number;
+  capabilities?: string[];
+  context?: ContextItem[];
+  maxModelAttempts?: number;
+  maxCostUsd?: number;
+};
+
 export type ModelResponse =
   | {
       type: 'final';
@@ -28,6 +38,17 @@ export type ModelResponse =
       type: 'tool_calls';
       calls: ToolCallRequest[];
       usage: ModelUsage;
+    }
+  | {
+      type: 'spawn_subagents';
+      children: SubagentSpawnRequest[];
+      usage: ModelUsage;
+    }
+  | {
+      type: 'needs_parent_action';
+      requiredWork: string;
+      partialOutput?: JsonValue;
+      usage: ModelUsage;
     };
 
 export type ModelRequest = {
@@ -36,6 +57,12 @@ export type ModelRequest = {
   context: readonly ContextItem[];
   tools: readonly ToolDescriptor[];
   attempt: number;
+  delegation: {
+    canSpawnSubagents: boolean;
+    currentDepth: number;
+    maxDepth: number;
+    availableAgentSlots: number;
+  };
 };
 
 export type ModelRequestEstimate = {

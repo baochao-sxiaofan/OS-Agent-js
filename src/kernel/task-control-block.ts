@@ -30,8 +30,18 @@ export type CreateTaskOptions = {
   createdAt?: number;
 };
 
+export type CreateChildTaskOptions = Omit<
+  CreateTaskOptions,
+  'createdAt' | 'priority'
+> & {
+  priority?: number;
+};
+
 export type TaskSnapshot = {
   id: string;
+  rootTaskId: string;
+  parentTaskId?: string;
+  depth: number;
   goal: string;
   priority: number;
   capabilities: string[];
@@ -47,6 +57,9 @@ export type TaskSnapshot = {
 
 export class TaskControlBlock {
   readonly id: string;
+  readonly rootTaskId: string;
+  readonly parentTaskId: string | undefined;
+  readonly depth: number;
   readonly goal: string;
   readonly priority: number;
   readonly createdAt: number;
@@ -62,6 +75,9 @@ export class TaskControlBlock {
 
   private constructor(snapshot: TaskSnapshot) {
     this.id = snapshot.id;
+    this.rootTaskId = snapshot.rootTaskId;
+    this.parentTaskId = snapshot.parentTaskId;
+    this.depth = snapshot.depth;
     this.goal = snapshot.goal;
     this.priority = snapshot.priority;
     this.createdAt = snapshot.createdAt;
@@ -95,8 +111,53 @@ export class TaskControlBlock {
 
     return new TaskControlBlock({
       id: taskId,
+      rootTaskId: taskId,
+      depth: 1,
       goal: options.goal,
       priority: options.priority ?? 0,
+      capabilities: [...(options.capabilities ?? [])],
+      context: [...(options.context ?? [])],
+      state: initialState,
+      budget: {
+        maxCostUsd: options.budget?.maxCostUsd ?? Number.MAX_VALUE,
+        spentCostUsd: 0,
+      },
+      modelAttempts: 0,
+      maxModelAttempts: options.maxModelAttempts ?? 3,
+      createdAt,
+      updatedAt: createdAt,
+      events: [createdEvent],
+    });
+  }
+
+  static createChild(
+    parent: TaskControlBlock,
+    options: CreateChildTaskOptions,
+  ): TaskControlBlock {
+    const createdAt = Date.now();
+    const taskId = options.id ?? randomUUID();
+    const initialState: TaskState = {
+      status: 'READY',
+      enteredAt: createdAt,
+      reason: 'submitted',
+    };
+    const createdEvent: TaskEvent = {
+      type: 'task_created',
+      eventId: randomUUID(),
+      taskId,
+      occurredAt: createdAt,
+      sequence: 1,
+      goal: options.goal,
+      initialState,
+    };
+
+    return new TaskControlBlock({
+      id: taskId,
+      rootTaskId: parent.rootTaskId,
+      parentTaskId: parent.id,
+      depth: parent.depth + 1,
+      goal: options.goal,
+      priority: options.priority ?? parent.priority,
       capabilities: [...(options.capabilities ?? [])],
       context: [...(options.context ?? [])],
       state: initialState,
@@ -187,7 +248,14 @@ export class TaskControlBlock {
     });
   }
 
-  recordModelResponse(responseType: 'final' | 'tool_calls', usage: ModelUsage) {
+  recordModelResponse(
+    responseType:
+      | 'final'
+      | 'needs_parent_action'
+      | 'spawn_subagents'
+      | 'tool_calls',
+    usage: ModelUsage,
+  ) {
     this.#budget.spentCostUsd += usage.costUsd;
     this.recordEvent({
       type: 'model_response_recorded',
@@ -224,9 +292,30 @@ export class TaskControlBlock {
     });
   }
 
+  recordSubagentSpawned(childTaskId: string, childDepth: number): void {
+    this.recordEvent({
+      type: 'subagent_spawned',
+      childTaskId,
+      childDepth,
+    });
+  }
+
+  recordSubagentResult(childTaskId: string, result: Termination): void {
+    this.recordEvent({
+      type: 'subagent_result_recorded',
+      childTaskId,
+      result,
+    });
+  }
+
   snapshot(): TaskSnapshot {
     return {
       id: this.id,
+      rootTaskId: this.rootTaskId,
+      ...(this.parentTaskId === undefined
+        ? {}
+        : { parentTaskId: this.parentTaskId }),
+      depth: this.depth,
       goal: this.goal,
       priority: this.priority,
       capabilities: [...this.#capabilities],
