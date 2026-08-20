@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AdmissionController,
   AgentPool,
+  FakeContextCompactor,
   FakeModelProvider,
   InMemoryTaskStore,
   ReadyQueue,
@@ -10,6 +11,7 @@ import {
   ToolRegistry,
   type Clock,
   type JsonValue,
+  type ModelRequest,
   type TaskStore,
   type Tool,
 } from '../src/index.js';
@@ -606,5 +608,355 @@ describe('TaskScheduler', () => {
     releaseChildPersistence?.();
     expect(await firstSpawn).toMatchObject({ spawned: true });
     expect(scheduler.getTask('second-child')).toBeUndefined();
+  });
+
+  it('stores piggyback summaries separately and sends a hybrid context', async () => {
+    const provider = new FakeModelProvider({
+      contextWindowTokens: 100,
+      estimate: (request: ModelRequest) => ({
+        inputTokens: request.context.reduce((total, item) => {
+          switch (item.type) {
+            case 'user':
+              return total + item.content.length;
+            case 'tool_call':
+              return total + 10;
+            case 'tool_result':
+              return total + 35;
+            case 'context_summary':
+              return total + 5;
+            default:
+              return total + 5;
+          }
+        }, 0),
+        maxOutputTokens: 10,
+        estimatedCostUsd: 0.001,
+      }),
+    });
+    const inspectTool: Tool = {
+      name: 'inspect_context',
+      description: 'Return a large context item.',
+      requiredCapability: 'context:inspect',
+      effect: 'read_only',
+      validateInput: () => ({ valid: true }),
+      execute: async () => ({ content: 'x'.repeat(100) }),
+    };
+    const tools = new ToolRegistry();
+    tools.register(inspectTool);
+    const scheduler = new TaskScheduler({
+      provider,
+      tools,
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 10_000,
+      }),
+    });
+    const task = await scheduler.submit({
+      id: 'hybrid-context',
+      goal: 'Inspect and report.',
+      capabilities: ['context:inspect'],
+      context: [{ type: 'user', content: 'u'.repeat(40) }],
+    });
+    provider.setResponses(task.id, [
+      {
+        type: 'tool_calls',
+        calls: [
+          {
+            callId: 'inspect-context-1',
+            toolName: 'inspect_context',
+            input: {},
+          },
+        ],
+        turnSummary: {
+          request: 'Inspect the context source.',
+          outcome: 'Requested the context inspection tool.',
+        },
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'inspection complete',
+        turnSummary: {
+          request: 'Report the inspection result.',
+          outcome: 'Returned the final inspection report.',
+        },
+        usage,
+      },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[0]?.summaryProtocol).toMatchObject({
+      responseField: 'turnSummary',
+      requiredFields: ['request', 'outcome'],
+    });
+    expect(provider.requests[1]?.context.map((item) => item.type)).toEqual([
+      'context_summary',
+      'tool_result',
+    ]);
+    expect(task.context.map((item) => item.type)).toEqual([
+      'user',
+      'tool_call',
+      'tool_result',
+    ]);
+    expect(task.contextSummaries).toHaveLength(2);
+    expect(task.contextSummaries[0]).toMatchObject({
+      kind: 'turn',
+      sourceStartIndex: 0,
+      sourceEndIndex: 2,
+    });
+  });
+
+  it('runs secondary compaction before queueing an oversized request', async () => {
+    const provider = new FakeModelProvider({
+      contextWindowTokens: 100,
+      estimate: (request: ModelRequest) => ({
+        inputTokens: request.context.reduce(
+          (total, item) =>
+            total + (item.type === 'context_summary' ? 5 : 30),
+          0,
+        ),
+        maxOutputTokens: 10,
+        estimatedCostUsd: 0.001,
+      }),
+    });
+    const compactor = new FakeContextCompactor({
+      contextWindowTokens: 200,
+      estimate: {
+        inputTokens: 50,
+        maxOutputTokens: 10,
+        estimatedCostUsd: 0.002,
+      },
+    });
+    const scheduler = new TaskScheduler({
+      provider,
+      contextCompactor: compactor,
+      tools: new ToolRegistry(),
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 10_000,
+      }),
+    });
+    const task = await scheduler.submit({
+      id: 'secondary-compaction',
+      goal: 'Process a large history.',
+      context: [
+        { type: 'user', content: 'first large turn' },
+        { type: 'assistant', content: 'second large turn' },
+        { type: 'user', content: 'third large turn' },
+      ],
+    });
+    compactor.setResults(task.id, [
+      {
+        summary: {
+          request: 'Process the accumulated history.',
+          outcome: 'The earlier history was compressed.',
+        },
+        usage: {
+          inputTokens: 50,
+          outputTokens: 8,
+          costUsd: 0.002,
+        },
+      },
+    ]);
+    provider.setResponses(task.id, [
+      {
+        type: 'final',
+        output: 'done',
+        usage,
+      },
+    ]);
+
+    expect(scheduler.readyQueueSize).toBe(0);
+    expect(provider.requests).toHaveLength(0);
+
+    await scheduler.runUntilIdle();
+
+    expect(compactor.requests).toHaveLength(1);
+    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests[0]?.context).toEqual([
+      {
+        type: 'context_summary',
+        request: 'Process the accumulated history.',
+        outcome: 'The earlier history was compressed.',
+      },
+    ]);
+    expect(task.context).toHaveLength(3);
+    expect(task.contextSummaries).toContainEqual(
+      expect.objectContaining({
+        kind: 'secondary',
+        sourceStartIndex: 0,
+        sourceEndIndex: 3,
+      }),
+    );
+    expect(task.budget.spentCostUsd).toBeCloseTo(0.003);
+  });
+
+  it('fails before queueing when oversized context cannot be compacted', async () => {
+    const provider = new FakeModelProvider({
+      contextWindowTokens: 100,
+      estimate: {
+        inputTokens: 90,
+        maxOutputTokens: 10,
+        estimatedCostUsd: 0.001,
+      },
+    });
+    const scheduler = new TaskScheduler({
+      provider,
+      tools: new ToolRegistry(),
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 10_000,
+      }),
+    });
+
+    const task = await scheduler.submit({
+      id: 'missing-compactor',
+      goal: 'This request must not reach the model.',
+      context: [{ type: 'user', content: 'oversized context' }],
+    });
+
+    expect(scheduler.readyQueueSize).toBe(0);
+    expect(provider.requests).toHaveLength(0);
+    expect(task.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'failed',
+        error: expect.stringContaining('no context compactor'),
+      },
+    });
+  });
+
+  it('wakes a parent when a child fails context preflight', async () => {
+    const provider = new FakeModelProvider({
+      contextWindowTokens: 100,
+      estimate: (request: ModelRequest) => ({
+        inputTokens: request.taskId === 'oversized-child' ? 90 : 10,
+        maxOutputTokens: 10,
+        estimatedCostUsd: 0.001,
+      }),
+    });
+    const scheduler = new TaskScheduler({
+      provider,
+      tools: new ToolRegistry(),
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 10_000,
+      }),
+    });
+    const root = await scheduler.submit({
+      id: 'context-parent',
+      goal: 'Delegate and handle a child preflight failure.',
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'spawn_subagents',
+        children: [
+          {
+            taskId: 'oversized-child',
+            goal: 'Cannot fit.',
+            context: [{ type: 'user', content: 'oversized child context' }],
+          },
+        ],
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'parent handled the failure',
+        usage,
+      },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    expect(scheduler.getTask('oversized-child')?.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: { kind: 'failed' },
+    });
+    expect(
+      root.context.some(
+        (item) =>
+          item.type === 'subagent_result' &&
+          item.childTaskId === 'oversized-child' &&
+          item.result.kind === 'failed',
+      ),
+    ).toBe(true);
+    expect(root.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'completed',
+        output: 'parent handled the failure',
+      },
+    });
+  });
+
+  it('fails deterministically when secondary compaction is still too large', async () => {
+    const provider = new FakeModelProvider({
+      contextWindowTokens: 100,
+      estimate: {
+        inputTokens: 90,
+        maxOutputTokens: 10,
+        estimatedCostUsd: 0.001,
+      },
+    });
+    const compactor = new FakeContextCompactor({
+      estimate: {
+        inputTokens: 50,
+        maxOutputTokens: 10,
+        estimatedCostUsd: 0.002,
+      },
+    });
+    const scheduler = new TaskScheduler({
+      provider,
+      contextCompactor: compactor,
+      tools: new ToolRegistry(),
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 10_000,
+      }),
+    });
+    const task = await scheduler.submit({
+      id: 'ineffective-compaction',
+      goal: 'Fail without an infinite compaction loop.',
+      context: [{ type: 'user', content: 'large context' }],
+    });
+    compactor.setResults(task.id, [
+      {
+        summary: {
+          request: 'Compress the large context.',
+          outcome: 'The result remained too large.',
+        },
+        usage: {
+          inputTokens: 50,
+          outputTokens: 10,
+          costUsd: 0.002,
+        },
+      },
+    ]);
+
+    const result = await scheduler.runUntilIdle();
+
+    expect(compactor.requests).toHaveLength(1);
+    expect(provider.requests).toHaveLength(0);
+    expect(result.stalled).toBe(false);
+    expect(task.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'failed',
+        error: expect.stringContaining(
+          'remains above the target after secondary compaction',
+        ),
+      },
+    });
   });
 });

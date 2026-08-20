@@ -1,4 +1,27 @@
-export type { ContextItem } from './kernel/context.js';
+export type {
+  ContextItem,
+  ContextSummaryKind,
+  ContextSummaryRecord,
+  TurnSummary,
+} from './kernel/context.js';
+export type {
+  ContextCompactionRequest,
+  ContextCompactionResult,
+  ContextCompactor,
+} from './context/context-compactor.js';
+export {
+  SECONDARY_COMPACTION_INSTRUCTION,
+  createContextCompactionRequest,
+} from './context/context-compactor.js';
+export {
+  FakeContextCompactor,
+  type FakeContextCompactorOptions,
+} from './context/fake-context-compactor.js';
+export {
+  ContextWindowManager,
+  type ContextSelection,
+  type ContextWindowPolicy,
+} from './context/context-window-manager.js';
 export {
   TaskControlBlock,
   type CreateChildTaskOptions,
@@ -30,7 +53,9 @@ export type {
   SubagentSpawnRequest,
   ToolCallRequest,
   ToolDescriptor,
+  TurnSummaryProtocol,
 } from './model/model-provider.js';
+export { TURN_SUMMARY_PROTOCOL } from './model/model-provider.js';
 export {
   InMemoryTaskStore,
   type TaskStore,

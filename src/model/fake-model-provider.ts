@@ -7,19 +7,26 @@ import type {
 
 export type FakeModelProviderOptions = {
   id?: string;
-  estimate?: ModelRequestEstimate;
+  contextWindowTokens?: number;
+  estimate?:
+    | ModelRequestEstimate
+    | ((request: ModelRequest) => ModelRequestEstimate);
   latencyMs?: number;
 };
 
 export class FakeModelProvider implements ModelProvider {
   readonly id: string;
-  readonly #estimate: ModelRequestEstimate;
+  readonly contextWindowTokens: number;
+  readonly #estimate:
+    | ModelRequestEstimate
+    | ((request: ModelRequest) => ModelRequestEstimate);
   readonly #latencyMs: number;
   readonly #responses = new Map<string, ModelResponse[]>();
   readonly #requests: ModelRequest[] = [];
 
   constructor(options: FakeModelProviderOptions = {}) {
     this.id = options.id ?? 'fake-model';
+    this.contextWindowTokens = options.contextWindowTokens ?? 128_000;
     this.#estimate = options.estimate ?? {
       inputTokens: 100,
       maxOutputTokens: 100,
@@ -36,8 +43,10 @@ export class FakeModelProvider implements ModelProvider {
     this.#responses.set(taskId, structuredClone([...responses]));
   }
 
-  estimate(_request: ModelRequest): ModelRequestEstimate {
-    return { ...this.#estimate };
+  estimate(request: ModelRequest): ModelRequestEstimate {
+    return typeof this.#estimate === 'function'
+      ? this.#estimate(request)
+      : { ...this.#estimate };
   }
 
   async invoke(

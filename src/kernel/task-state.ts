@@ -3,6 +3,7 @@ import type { JsonValue } from '../types/json.js';
 export type ReadyReason =
   | 'submitted'
   | 'capacity_available'
+  | 'context_compacted'
   | 'model_retry'
   | 'subagent_result_available'
   | 'tool_result_available'
@@ -44,6 +45,7 @@ export type RunningState = {
   enteredAt: number;
   providerId: string;
   requestAttempt: number;
+  operation?: 'context_compaction' | 'model';
 };
 
 export type BlockedState = {

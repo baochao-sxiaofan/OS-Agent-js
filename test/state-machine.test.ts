@@ -100,13 +100,29 @@ describe('TaskControlBlock state machine', () => {
       capabilities: ['resource:read'],
       context: [{ type: 'user', content: 'Persist this.' }],
     });
+    task.completeModelTurn({
+      request: 'Persist the task context.',
+      outcome: 'The context was persisted.',
+    });
     const snapshot = task.snapshot();
     const restored = TaskControlBlock.restore(snapshot);
 
     snapshot.context.push({ type: 'assistant', content: 'mutated snapshot' });
+    snapshot.contextSummaries?.push({
+      id: 'mutated-summary',
+      kind: 'turn',
+      sourceStartIndex: 0,
+      sourceEndIndex: 1,
+      summary: {
+        request: 'Mutate the snapshot.',
+        outcome: 'The snapshot was mutated.',
+      },
+      createdAt: 1,
+    });
 
     expect(restored.id).toBe(task.id);
     expect(restored.capabilities).toEqual(['resource:read']);
     expect(restored.context).toHaveLength(1);
+    expect(restored.contextSummaries).toHaveLength(1);
   });
 });

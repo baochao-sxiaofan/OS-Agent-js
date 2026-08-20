@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`0.2.0`
+当前版本：`0.3.0`
 
 ## 核心状态模型
 
@@ -102,6 +102,40 @@ Q3, Q3, Q3, Q3, Q2, Q2, Q1, ...
 请求获准后获得一个 `AdmissionLease`；请求结束后释放并发槽位。可恢复的速率限制让
 任务保持 `READY`，永久不满足的预算或单次 Token 限制会终止任务，避免无限等待。
 
+## 双通道上下文压缩
+
+所有任务在进入 Ready Queue 前都会先完成上下文窗口预检。Provider 必须提供模型上下文
+窗口大小和请求 Token 估算，默认策略为：
+
+```text
+warning = contextWindowTokens * 0.8
+target  = contextWindowTokens * 0.6
+```
+
+每次正常模型请求都会携带 `TURN_SUMMARY_PROTOCOL`。Provider Adapter 应把该协议映射为
+Prompt 追加指令和严格结构化输出，使模型在正常结果之外同时返回：
+
+```text
+turnSummary.request  # 一句话描述本轮需求
+turnSummary.outcome  # 一句话描述本轮工作结果
+```
+
+这不会增加正常模型请求次数。完整上下文继续只追加保存；摘要以带源索引区间的独立记录
+持久化，形成完整记录和压缩记录两个通道。
+
+当上下文超过预警值时，运行时按以下顺序处理：
+
+1. 从最早的轮次开始，用对应摘要替换旧完整记录；
+2. 达到目标值后停止替换，因此近期记录仍保留完整内容；
+3. 如果“早期摘要 + 近期原文”仍超过目标值，则交给 `ContextCompactor` Adapter
+   对混合上下文做二次语义压缩；
+4. 二次压缩请求同样经过 RPM、TPM、并发和预算准入；
+5. 二次压缩后仍无法达到目标时，任务以明确错误终止，不会进入 Ready Queue
+   无限等待或循环压缩。
+
+`FakeContextCompactor` 用于测试该边界。真实 Provider 和压缩 Adapter 尚未接入，
+内核不绑定具体模型厂商。
+
 ## 工具与权限
 
 工具声明：
@@ -123,6 +157,11 @@ Q3, Q3, Q3, Q3, Q2, Q2, Q1, ...
 - 三级深度感知加权 Ready Queue
 - Aging 与父任务唤醒加速
 - RPM、TPM、并发额度和任务预算准入控制
+- 入队前上下文窗口预检
+- 正常响应搭载结构化轮次摘要
+- 完整上下文与摘要上下文双通道快照
+- 早期摘要与近期原文混合构造
+- 可替换的二次 `ContextCompactor` Adapter
 - 与模型服务商无关的 `ModelProvider`
 - 行为确定的 `FakeModelProvider`
 - 子任务创建、阻塞、结果回传和父任务唤醒
@@ -135,6 +174,7 @@ Q3, Q3, Q3, Q3, Q2, Q2, Q1, ...
 
 ```text
 src/
+├── context/      # 上下文窗口策略与二次压缩 Adapter
 ├── kernel/       # 状态、任务控制块、上下文和事件
 ├── model/        # Provider 接口与 Fake Provider
 ├── persistence/  # 任务快照和事件存储
@@ -172,15 +212,17 @@ root -> middle -> leaf -> middle -> root
 - Agent 池与任务存储仍为单进程内存实现。
 - Agent 池运行态计数尚未持久化，数据库恢复将在后续版本实现。
 - 人工审批和资源锁已预留状态，但尚未完成协议。
-- RAG 和上下文压缩将在后续通过 Adapter 接入成熟方案。
+- 轮次摘要和二次压缩已定义 Provider/Adapter 协议，但尚未连接真实模型服务。
+- RAG 仍将在后续通过 Adapter 接入成熟方案。
 
 ## 后续方向
 
 1. 为 RPM/TPM 配额增加自动唤醒定时器。
 2. 增加持久化数据库 Adapter、Agent 池快照和崩溃恢复测试。
 3. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-4. 增加真实 OpenAI Provider Adapter。
-5. 通过独立 Adapter 接入成熟的 RAG 和上下文压缩方案。
+4. 增加真实 OpenAI Provider Adapter，并映射结构化轮次摘要协议。
+5. 增加 OpenAI Responses Compaction 等真实 `ContextCompactor` Adapter。
+6. 通过独立 Adapter 接入成熟的 RAG 方案。
 
 完整的项目约束与设计规则见 [AGENT.md](./AGENT.md)，版本变更见
 [CHANGELOG.md](./CHANGELOG.md)。

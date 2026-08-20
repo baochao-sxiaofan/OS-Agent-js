@@ -1,4 +1,13 @@
 import type { ContextItem } from '../kernel/context.js';
+import type {
+  ContextCompactionRequest,
+  ContextCompactor,
+} from '../context/context-compactor.js';
+import { createContextCompactionRequest } from '../context/context-compactor.js';
+import {
+  ContextWindowManager,
+  type ContextWindowPolicy,
+} from '../context/context-window-manager.js';
 import {
   TaskControlBlock,
   type CreateChildTaskOptions,
@@ -11,6 +20,7 @@ import type {
   SubagentSpawnRequest,
   ToolCallRequest,
 } from '../model/model-provider.js';
+import { TURN_SUMMARY_PROTOCOL } from '../model/model-provider.js';
 import type { TaskStore } from '../persistence/task-store.js';
 import type { JsonValue } from '../types/json.js';
 import { ToolNotFoundError, ToolRegistry } from '../tools/tool-registry.js';
@@ -38,6 +48,8 @@ export type TaskSchedulerOptions = {
   tools: ToolRegistry;
   store: TaskStore;
   agentPool?: AgentPool;
+  contextCompactor?: ContextCompactor;
+  contextWindowPolicy?: ContextWindowPolicy;
   readyQueue?: ReadyQueue;
 };
 
@@ -59,6 +71,12 @@ export type SpawnChildrenResult =
       message: string;
     };
 
+type PendingContextCompaction = {
+  context: readonly ContextItem[];
+  parentWakeupBoost: boolean;
+  sourceEndIndex: number;
+};
+
 export class TaskScheduler {
   readonly #provider: ModelProvider;
   readonly #admission: AdmissionController;
@@ -66,9 +84,16 @@ export class TaskScheduler {
   readonly #store: TaskStore;
   readonly #agentPool: AgentPool;
   readonly #readyQueue: ReadyQueue;
+  readonly #contextCompactor: ContextCompactor | undefined;
+  readonly #contextWindowManager: ContextWindowManager;
   readonly #tasks = new Map<string, TaskControlBlock>();
   readonly #operations = new Map<string, Promise<void>>();
   readonly #abortControllers = new Map<string, AbortController>();
+  readonly #pendingContextCompactions = new Map<
+    string,
+    PendingContextCompaction
+  >();
+  readonly #preparedContexts = new Map<string, readonly ContextItem[]>();
   readonly #spawningParents = new Set<string>();
   #operationSequence = 0;
 
@@ -77,6 +102,11 @@ export class TaskScheduler {
     this.#admission = options.admission;
     this.#tools = options.tools;
     this.#store = options.store;
+    this.#contextCompactor = options.contextCompactor;
+    this.#contextWindowManager = new ContextWindowManager(
+      options.provider.contextWindowTokens,
+      options.contextWindowPolicy,
+    );
     this.#agentPool =
       options.agentPool ??
       new AgentPool({
@@ -107,7 +137,7 @@ export class TaskScheduler {
     this.#agentPool.registerRoot(task);
     this.#tasks.set(task.id, task);
     this.#abortControllers.set(task.id, new AbortController());
-    this.#readyQueue.enqueue(task);
+    await this.prepareTaskForQueue(task);
     await this.#store.persist(task);
     return task;
   }
@@ -191,7 +221,6 @@ export class TaskScheduler {
         this.#abortControllers.set(child.id, new AbortController());
         parent.recordSubagentSpawned(child.id, child.depth);
         await this.#store.persist(child);
-        this.#readyQueue.enqueue(child);
       }
 
       parent.transition(
@@ -204,6 +233,10 @@ export class TaskScheduler {
         'subagents_spawned',
       );
       await this.#store.persist(parent);
+
+      for (const child of children) {
+        await this.prepareTaskForQueue(child);
+      }
 
       return {
         spawned: true,
@@ -238,7 +271,7 @@ export class TaskScheduler {
       await this.#store.persist(task);
     }
     if (task.state.status === 'READY' && !this.#readyQueue.has(task.id)) {
-      this.#readyQueue.enqueue(task);
+      await this.prepareTaskForQueue(task);
     }
     return task;
   }
@@ -264,7 +297,7 @@ export class TaskScheduler {
       },
       reason,
     );
-    this.#readyQueue.enqueue(task);
+    await this.prepareTaskForQueue(task);
     await this.#store.persist(task);
   }
 
@@ -277,6 +310,8 @@ export class TaskScheduler {
     const childTaskIds = this.#agentPool.childrenOf(taskId);
     this.#abortControllers.get(taskId)?.abort(new Error(reason));
     this.#readyQueue.remove(taskId);
+    this.#pendingContextCompactions.delete(taskId);
+    this.#preparedContexts.delete(taskId);
     await this.terminateTask(task, {
       kind: 'cancelled',
       reason,
@@ -288,16 +323,20 @@ export class TaskScheduler {
 
   async runUntilIdle(): Promise<SchedulerRunResult> {
     while (true) {
+      const compactionProgress = await this.scheduleContextCompactions();
       const schedulingProgress = await this.scheduleReadyTasks();
+      const madeProgress = compactionProgress || schedulingProgress;
+      const pendingTasks =
+        this.#readyQueue.size + this.#pendingContextCompactions.size;
 
       if (this.#operations.size === 0) {
-        if (this.#readyQueue.size > 0 && schedulingProgress) {
+        if (pendingTasks > 0 && madeProgress) {
           continue;
         }
         return {
           activeOperations: 0,
-          pendingReadyTasks: this.#readyQueue.size,
-          stalled: this.#readyQueue.size > 0 && !schedulingProgress,
+          pendingReadyTasks: pendingTasks,
+          stalled: pendingTasks > 0 && !madeProgress,
         };
       }
 
@@ -322,9 +361,17 @@ export class TaskScheduler {
         continue;
       }
 
+      const preparedContext = this.#preparedContexts.get(task.id);
+      if (!preparedContext) {
+        this.#readyQueue.remove(task.id);
+        await this.prepareTaskForQueue(task);
+        madeProgress = true;
+        continue;
+      }
       const pendingRequest = this.buildModelRequest(
         task,
         task.modelAttempts + 1,
+        preparedContext,
       );
       const estimate = this.#provider.estimate(pendingRequest);
       const decision = this.#admission.tryAcquire(
@@ -342,14 +389,16 @@ export class TaskScheduler {
       }
 
       this.#readyQueue.dequeue();
+      this.#preparedContexts.delete(task.id);
       const attempt = task.startModelAttempt();
-      const request = this.buildModelRequest(task, attempt);
+      const request = this.buildModelRequest(task, attempt, preparedContext);
       task.transition(
         {
           status: 'RUNNING',
           enteredAt: Date.now(),
           providerId: this.#provider.id,
           requestAttempt: attempt,
+          operation: 'model',
         },
         'model_request_admitted',
       );
@@ -403,12 +452,14 @@ export class TaskScheduler {
       task.recordModelResponse(response.type, response.usage);
       switch (response.type) {
         case 'final':
+          task.completeModelTurn(response.turnSummary);
           await this.terminateTask(task, {
             kind: 'completed',
             output: response.output,
           });
           return;
         case 'needs_parent_action':
+          task.completeModelTurn(response.turnSummary);
           await this.terminateTask(task, {
             kind: 'needs_parent_action',
             requiredWork: response.requiredWork,
@@ -423,6 +474,7 @@ export class TaskScheduler {
               'Model requested subagent spawning without child tasks.',
             );
           }
+          task.completeModelTurn(response.turnSummary);
           await this.spawnChildren(
             task.id,
             response.children.map((child) =>
@@ -432,6 +484,7 @@ export class TaskScheduler {
           return;
         case 'tool_calls':
           this.blockForToolCalls(task, response.calls);
+          task.completeModelTurn(response.turnSummary);
           await this.#store.persist(task);
           this.launchToolCalls(task, response.calls);
           return;
@@ -540,7 +593,7 @@ export class TaskScheduler {
         },
         'all_tool_results_available',
       );
-      this.#readyQueue.enqueue(task);
+      await this.prepareTaskForQueue(task);
       await this.#store.persist(task);
     } catch (error) {
       if (task.state.status === 'TERMINATED') {
@@ -607,7 +660,7 @@ export class TaskScheduler {
         },
         `model_request_failed:${this.errorMessage(error)}`,
       );
-      this.#readyQueue.enqueue(task);
+      await this.prepareTaskForQueue(task);
     } else {
       await this.terminateTask(task, {
         kind: 'failed',
@@ -633,6 +686,8 @@ export class TaskScheduler {
     task.transition(nextState, `task_${termination.kind}`);
     task.recordTermination(termination);
     this.#readyQueue.remove(task.id);
+    this.#pendingContextCompactions.delete(task.id);
+    this.#preparedContexts.delete(task.id);
     this.#agentPool.release(task.id);
     await this.#store.persist(task);
     await this.notifyParentOfTermination(task, termination);
@@ -656,7 +711,7 @@ export class TaskScheduler {
       },
       `subagent_spawn_rejected:${reason}`,
     );
-    this.#readyQueue.enqueue(parent);
+    await this.prepareTaskForQueue(parent);
     await this.#store.persist(parent);
     return {
       spawned: false,
@@ -712,7 +767,7 @@ export class TaskScheduler {
         },
         'all_subagent_results_available',
       );
-      this.#readyQueue.enqueue(parent, {
+      await this.prepareTaskForQueue(parent, {
         parentWakeupBoost: true,
       });
     }
@@ -744,13 +799,15 @@ export class TaskScheduler {
   private buildModelRequest(
     task: TaskControlBlock,
     attempt: number,
+    context: readonly ContextItem[],
   ): ModelRequest {
     return {
       taskId: task.id,
       goal: task.goal,
-      context: task.context,
+      context,
       tools: this.#tools.descriptorsFor(task.capabilities),
       attempt,
+      summaryProtocol: TURN_SUMMARY_PROTOCOL,
       delegation: {
         canSpawnSubagents: this.#agentPool.canTaskSpawn(task),
         currentDepth: task.depth,
@@ -758,6 +815,229 @@ export class TaskScheduler {
         availableAgentSlots: this.#agentPool.availableLiveSlots,
       },
     };
+  }
+
+  private async prepareTaskForQueue(
+    task: TaskControlBlock,
+    options: { parentWakeupBoost?: boolean } = {},
+  ): Promise<void> {
+    if (task.state.status !== 'READY') {
+      throw new Error(
+        `Cannot prepare task ${task.id} from ${task.state.status}.`,
+      );
+    }
+    this.#readyQueue.remove(task.id);
+    this.#preparedContexts.delete(task.id);
+    this.#pendingContextCompactions.delete(task.id);
+
+    const attempt = task.modelAttempts + 1;
+    const selection = this.#contextWindowManager.select(
+      task.context,
+      task.contextSummaries,
+      (context) =>
+        this.totalRequestTokens(
+          this.#provider.estimate(
+            this.buildModelRequest(task, attempt, context),
+          ),
+        ),
+    );
+
+    if (!selection.needsSecondaryCompaction) {
+      this.#preparedContexts.set(
+        task.id,
+        structuredClone(selection.context),
+      );
+      this.#readyQueue.enqueue(task, options);
+      return;
+    }
+
+    const alreadyCompactedCurrentContext = task.contextSummaries.some(
+      (summary) =>
+        summary.kind === 'secondary' &&
+        summary.sourceStartIndex === 0 &&
+        summary.sourceEndIndex === task.context.length,
+    );
+    if (alreadyCompactedCurrentContext) {
+      await this.terminateTask(task, {
+        kind: 'failed',
+        error:
+          'Context remains above the target after secondary compaction.',
+      });
+      return;
+    }
+    if (!this.#contextCompactor) {
+      await this.terminateTask(task, {
+        kind: 'failed',
+        error:
+          'Context exceeds the warning threshold and no context compactor is configured.',
+      });
+      return;
+    }
+
+    const compactionRequest = this.buildContextCompactionRequest(
+      task,
+      selection.context,
+    );
+    const compactionEstimate =
+      this.#contextCompactor.estimate(compactionRequest);
+    if (
+      this.totalRequestTokens(compactionEstimate) >
+      this.#contextCompactor.contextWindowTokens
+    ) {
+      await this.terminateTask(task, {
+        kind: 'failed',
+        error:
+          'Locally summarized context cannot fit in the secondary compactor context window.',
+      });
+      return;
+    }
+
+    this.#pendingContextCompactions.set(task.id, {
+      context: structuredClone(selection.context),
+      parentWakeupBoost: options.parentWakeupBoost ?? false,
+      sourceEndIndex: task.context.length,
+    });
+  }
+
+  private async scheduleContextCompactions(): Promise<boolean> {
+    if (!this.#contextCompactor) {
+      return false;
+    }
+    let madeProgress = false;
+
+    for (const [
+      taskId,
+      pending,
+    ] of this.#pendingContextCompactions) {
+      const task = this.#tasks.get(taskId);
+      if (!task || task.state.status !== 'READY') {
+        this.#pendingContextCompactions.delete(taskId);
+        continue;
+      }
+      const request = this.buildContextCompactionRequest(
+        task,
+        pending.context,
+      );
+      const estimate = this.#contextCompactor.estimate(request);
+      const decision = this.#admission.tryAcquire(
+        estimate,
+        task.budget.maxCostUsd - task.budget.spentCostUsd,
+      );
+      if (!decision.admitted) {
+        await this.handleAdmissionDenied(task, decision);
+        if (!decision.retryable) {
+          this.#pendingContextCompactions.delete(taskId);
+          madeProgress = true;
+          continue;
+        }
+        break;
+      }
+
+      this.#pendingContextCompactions.delete(taskId);
+      task.transition(
+        {
+          status: 'RUNNING',
+          enteredAt: Date.now(),
+          providerId: this.#contextCompactor.id,
+          requestAttempt: task.modelAttempts + 1,
+          operation: 'context_compaction',
+        },
+        'context_compaction_admitted',
+      );
+      await this.#store.persist(task);
+      this.launchContextCompaction(
+        task,
+        request,
+        pending,
+        decision.lease,
+      );
+      madeProgress = true;
+    }
+    return madeProgress;
+  }
+
+  private launchContextCompaction(
+    task: TaskControlBlock,
+    request: ContextCompactionRequest,
+    pending: PendingContextCompaction,
+    lease: AdmissionLease,
+  ): void {
+    const operation = this.executeContextCompaction(
+      task,
+      request,
+      pending,
+      lease,
+    );
+    this.trackOperation(`context:${task.id}`, operation);
+  }
+
+  private async executeContextCompaction(
+    task: TaskControlBlock,
+    request: ContextCompactionRequest,
+    pending: PendingContextCompaction,
+    lease: AdmissionLease,
+  ): Promise<void> {
+    const compactor = this.#contextCompactor;
+    if (!compactor) {
+      lease.close();
+      return;
+    }
+    const signal = this.requireAbortController(task.id).signal;
+
+    try {
+      const result = await compactor.compact(request, signal);
+      lease.close();
+      if (task.state.status === 'TERMINATED') {
+        return;
+      }
+      task.recordSecondaryContextSummary(
+        result.summary,
+        pending.sourceEndIndex,
+        result.usage,
+      );
+      task.transition(
+        {
+          status: 'READY',
+          enteredAt: Date.now(),
+          reason: 'context_compacted',
+        },
+        'context_compaction_completed',
+      );
+      await this.prepareTaskForQueue(task, {
+        parentWakeupBoost: pending.parentWakeupBoost,
+      });
+      await this.#store.persist(task);
+    } catch (error) {
+      lease.close();
+      if (task.state.status === 'TERMINATED') {
+        return;
+      }
+      await this.terminateTask(task, {
+        kind: 'failed',
+        error: `Context compaction failed: ${this.errorMessage(error)}`,
+      });
+    }
+  }
+
+  private buildContextCompactionRequest(
+    task: TaskControlBlock,
+    context: readonly ContextItem[],
+  ): ContextCompactionRequest {
+    return createContextCompactionRequest({
+      taskId: task.id,
+      goal: task.goal,
+      context,
+      targetTokens: this.#contextWindowManager.targetTokens,
+    });
+  }
+
+  private totalRequestTokens(
+    estimate: {
+      inputTokens: number;
+      maxOutputTokens: number;
+    },
+  ): number {
+    return estimate.inputTokens + estimate.maxOutputTokens;
   }
 
   private trackOperation(keyPrefix: string, operation: Promise<void>): void {

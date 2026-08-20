@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 
 import type { ModelUsage } from '../model/model-provider.js';
 import type { JsonValue } from '../types/json.js';
-import type { ContextItem } from './context.js';
+import type {
+  ContextItem,
+  ContextSummaryKind,
+  ContextSummaryRecord,
+  TurnSummary,
+} from './context.js';
 import { assertTaskTransition } from './state-machine.js';
 import type { TaskEvent } from './task-event.js';
 import type { TaskState, Termination } from './task-state.js';
@@ -46,6 +51,8 @@ export type TaskSnapshot = {
   priority: number;
   capabilities: string[];
   context: ContextItem[];
+  contextSummaries?: ContextSummaryRecord[];
+  nextContextSummaryStartIndex?: number;
   state: TaskState;
   budget: TaskBudget;
   modelAttempts: number;
@@ -66,6 +73,8 @@ export class TaskControlBlock {
 
   #capabilities: Set<string>;
   #context: ContextItem[];
+  #contextSummaries: ContextSummaryRecord[];
+  #nextContextSummaryStartIndex: number;
   #state: TaskState;
   #budget: TaskBudget;
   #modelAttempts: number;
@@ -83,6 +92,11 @@ export class TaskControlBlock {
     this.createdAt = snapshot.createdAt;
     this.#capabilities = new Set(snapshot.capabilities);
     this.#context = structuredClone(snapshot.context);
+    this.#contextSummaries = structuredClone(
+      snapshot.contextSummaries ?? [],
+    );
+    this.#nextContextSummaryStartIndex =
+      snapshot.nextContextSummaryStartIndex ?? 0;
     this.#state = structuredClone(snapshot.state);
     this.#budget = { ...snapshot.budget };
     this.#modelAttempts = snapshot.modelAttempts;
@@ -117,6 +131,8 @@ export class TaskControlBlock {
       priority: options.priority ?? 0,
       capabilities: [...(options.capabilities ?? [])],
       context: [...(options.context ?? [])],
+      contextSummaries: [],
+      nextContextSummaryStartIndex: 0,
       state: initialState,
       budget: {
         maxCostUsd: options.budget?.maxCostUsd ?? Number.MAX_VALUE,
@@ -160,6 +176,8 @@ export class TaskControlBlock {
       priority: options.priority ?? parent.priority,
       capabilities: [...(options.capabilities ?? [])],
       context: [...(options.context ?? [])],
+      contextSummaries: [],
+      nextContextSummaryStartIndex: 0,
       state: initialState,
       budget: {
         maxCostUsd: options.budget?.maxCostUsd ?? Number.MAX_VALUE,
@@ -183,6 +201,10 @@ export class TaskControlBlock {
 
   get context(): readonly ContextItem[] {
     return this.#context;
+  }
+
+  get contextSummaries(): readonly ContextSummaryRecord[] {
+    return this.#contextSummaries;
   }
 
   get capabilities(): readonly string[] {
@@ -229,6 +251,41 @@ export class TaskControlBlock {
   appendContext(item: ContextItem): void {
     this.#context.push(structuredClone(item));
     this.#updatedAt = Date.now();
+  }
+
+  completeModelTurn(summary?: TurnSummary): void {
+    const sourceStartIndex = this.#nextContextSummaryStartIndex;
+    const sourceEndIndex = this.#context.length;
+    if (summary !== undefined) {
+      this.addContextSummary(
+        'turn',
+        sourceStartIndex,
+        sourceEndIndex,
+        summary,
+      );
+    }
+    this.#nextContextSummaryStartIndex = sourceEndIndex;
+  }
+
+  recordSecondaryContextSummary(
+    summary: TurnSummary,
+    sourceEndIndex: number,
+    usage: ModelUsage,
+  ): void {
+    if (sourceEndIndex < 0 || sourceEndIndex > this.#context.length) {
+      throw new Error('Secondary context summary range is invalid.');
+    }
+    this.#budget.spentCostUsd += usage.costUsd;
+    this.recordEvent({
+      type: 'context_compaction_recorded',
+      usage,
+    });
+    this.addContextSummary(
+      'secondary',
+      0,
+      sourceEndIndex,
+      summary,
+    );
   }
 
   startModelAttempt(): number {
@@ -320,6 +377,8 @@ export class TaskControlBlock {
       priority: this.priority,
       capabilities: [...this.#capabilities],
       context: structuredClone(this.#context),
+      contextSummaries: structuredClone(this.#contextSummaries),
+      nextContextSummaryStartIndex: this.#nextContextSummaryStartIndex,
       state: structuredClone(this.#state),
       budget: { ...this.#budget },
       modelAttempts: this.#modelAttempts,
@@ -328,6 +387,31 @@ export class TaskControlBlock {
       updatedAt: this.#updatedAt,
       events: structuredClone(this.#events),
     };
+  }
+
+  private addContextSummary(
+    kind: ContextSummaryKind,
+    sourceStartIndex: number,
+    sourceEndIndex: number,
+    summary: TurnSummary,
+  ): void {
+    const createdAt = Date.now();
+    const record: ContextSummaryRecord = {
+      id: randomUUID(),
+      kind,
+      sourceStartIndex,
+      sourceEndIndex,
+      summary: structuredClone(summary),
+      createdAt,
+    };
+    this.#contextSummaries.push(record);
+    this.recordEvent({
+      type: 'context_summary_recorded',
+      kind,
+      sourceStartIndex,
+      sourceEndIndex,
+      summary: structuredClone(summary),
+    });
   }
 
   private recordEvent(

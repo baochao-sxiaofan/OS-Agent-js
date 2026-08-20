@@ -1,6 +1,22 @@
 import type { JsonValue } from '../types/json.js';
 import type { Termination } from './task-state.js';
 
+export type TurnSummary = {
+  request: string;
+  outcome: string;
+};
+
+export type ContextSummaryKind = 'secondary' | 'turn';
+
+export type ContextSummaryRecord = {
+  id: string;
+  kind: ContextSummaryKind;
+  sourceStartIndex: number;
+  sourceEndIndex: number;
+  summary: TurnSummary;
+  createdAt: number;
+};
+
 export type SystemContextItem = {
   type: 'system';
   content: string;
@@ -14,6 +30,12 @@ export type UserContextItem = {
 export type AssistantContextItem = {
   type: 'assistant';
   content: string;
+};
+
+export type ContextSummaryItem = {
+  type: 'context_summary';
+  request: string;
+  outcome: string;
 };
 
 export type ToolCallContextItem = {
@@ -52,6 +74,7 @@ export type SubagentSpawnRejectedContextItem = {
 
 export type ContextItem =
   | AssistantContextItem
+  | ContextSummaryItem
   | SubagentResultContextItem
   | SubagentSpawnRejectedContextItem
   | SystemContextItem

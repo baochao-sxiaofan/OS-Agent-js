@@ -1,5 +1,9 @@
 import type { ModelUsage } from '../model/model-provider.js';
 import type { JsonValue } from '../types/json.js';
+import type {
+  ContextSummaryKind,
+  TurnSummary,
+} from './context.js';
 import type { TaskState, TaskStatus, Termination } from './task-state.js';
 
 type TaskEventBase = {
@@ -38,6 +42,19 @@ export type ModelResponseRecordedEvent = TaskEventBase & {
   usage: ModelUsage;
 };
 
+export type ContextSummaryRecordedEvent = TaskEventBase & {
+  type: 'context_summary_recorded';
+  kind: ContextSummaryKind;
+  sourceStartIndex: number;
+  sourceEndIndex: number;
+  summary: TurnSummary;
+};
+
+export type ContextCompactionRecordedEvent = TaskEventBase & {
+  type: 'context_compaction_recorded';
+  usage: ModelUsage;
+};
+
 export type ToolCallRecordedEvent = TaskEventBase & {
   type: 'tool_call_recorded';
   callId: string;
@@ -70,6 +87,8 @@ export type SubagentResultRecordedEvent = TaskEventBase & {
 
 export type TaskEvent =
   | CapacityWaitRecordedEvent
+  | ContextCompactionRecordedEvent
+  | ContextSummaryRecordedEvent
   | ModelResponseRecordedEvent
   | StateTransitionedEvent
   | SubagentResultRecordedEvent
