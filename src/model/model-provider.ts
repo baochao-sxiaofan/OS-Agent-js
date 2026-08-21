@@ -92,6 +92,18 @@ export type ModelResponse =
       usage: ModelUsage;
     }
   | {
+      type: 'async_work';
+      children: SubagentSpawnRequest[];
+      calls: ToolCallRequest[];
+      turnSummary?: TurnSummary;
+      usage: ModelUsage;
+    }
+  | {
+      type: 'wait_for_async_work';
+      turnSummary?: TurnSummary;
+      usage: ModelUsage;
+    }
+  | {
       type: 'needs_parent_action';
       requiredWork: string;
       partialOutput?: JsonValue;

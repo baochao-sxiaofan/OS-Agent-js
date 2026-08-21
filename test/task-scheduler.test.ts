@@ -7,6 +7,7 @@ import {
   FakeModelProvider,
   InMemoryTaskStore,
   ReadyQueue,
+  TaskControlBlock,
   TaskScheduler,
   ToolRegistry,
   type Clock,
@@ -428,8 +429,12 @@ describe('TaskScheduler', () => {
     expect(
       root.context.some(
         (item) =>
-          item.type === 'subagent_result' &&
-          item.childTaskId === 'middle',
+          item.type === 'async_work_update' &&
+          item.results.some(
+            (result) =>
+              result.kind === 'subagent' &&
+              result.workId === 'middle',
+          ),
       ),
     ).toBe(true);
     expect(root.state.status).toBe('TERMINATED');
@@ -494,8 +499,12 @@ describe('TaskScheduler', () => {
     expect(
       root.context.some(
         (item) =>
-          item.type === 'subagent_result' &&
-          item.result.kind === 'completed',
+          item.type === 'async_work_update' &&
+          item.results.some(
+            (result) =>
+              result.kind === 'subagent' &&
+              result.termination?.kind === 'completed',
+          ),
       ),
     ).toBe(true);
     expect(root.state.status).toBe('TERMINATED');
@@ -622,6 +631,8 @@ describe('TaskScheduler', () => {
               return total + 10;
             case 'tool_result':
               return total + 35;
+            case 'async_work_update':
+              return total + 35;
             case 'context_summary':
               return total + 5;
             default:
@@ -694,18 +705,19 @@ describe('TaskScheduler', () => {
     });
     expect(provider.requests[1]?.context.map((item) => item.type)).toEqual([
       'context_summary',
-      'tool_result',
+      'tool_call',
+      'async_work_update',
     ]);
     expect(task.context.map((item) => item.type)).toEqual([
       'user',
       'tool_call',
-      'tool_result',
+      'async_work_update',
     ]);
     expect(task.contextSummaries).toHaveLength(2);
     expect(task.contextSummaries[0]).toMatchObject({
       kind: 'turn',
       sourceStartIndex: 0,
-      sourceEndIndex: 2,
+      sourceEndIndex: 1,
     });
   });
 
@@ -884,9 +896,12 @@ describe('TaskScheduler', () => {
     expect(
       root.context.some(
         (item) =>
-          item.type === 'subagent_result' &&
-          item.childTaskId === 'oversized-child' &&
-          item.result.kind === 'failed',
+          item.type === 'async_work_update' &&
+          item.results.some(
+            (result) =>
+              result.workId === 'oversized-child' &&
+              result.termination?.kind === 'failed',
+          ),
       ),
     ).toBe(true);
     expect(root.state).toMatchObject({
@@ -1046,5 +1061,633 @@ describe('TaskScheduler', () => {
     expect(second.state.status).toBe('TERMINATED');
     expect(result.stalled).toBe(false);
     expect(waits.length).toBeGreaterThan(0);
+  });
+
+  it('batches partial mixed work and reports remaining work to the parent', async () => {
+    let resolveSlowTool: ((value: JsonValue) => void) | undefined;
+    const slowToolResult = new Promise<JsonValue>((resolve) => {
+      resolveSlowTool = resolve;
+    });
+    let releaseBatchWindow: (() => void) | undefined;
+    const batchWindow = new Promise<void>((resolve) => {
+      releaseBatchWindow = resolve;
+    });
+    const provider = new FakeModelProvider();
+    const tools = new ToolRegistry();
+    tools.register({
+      name: 'quick_read',
+      description: 'Return immediately.',
+      requiredCapability: 'resource:read',
+      effect: 'read_only',
+      validateInput: () => ({ valid: true }),
+      execute: async () => 'quick result',
+    });
+    tools.register({
+      name: 'slow_read',
+      description: 'Return after an external signal.',
+      requiredCapability: 'resource:read',
+      effect: 'read_only',
+      validateInput: () => ({ valid: true }),
+      execute: async () => await slowToolResult,
+    });
+    const scheduler = new TaskScheduler({
+      provider,
+      tools,
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 5,
+        requestsPerMinute: 50,
+        tokensPerMinute: 50_000,
+      }),
+      asyncWorkPolicy: { batchWindowMs: 30_000 },
+      wait: async (_ms, signal) => {
+        await Promise.race([
+          batchWindow,
+          new Promise<void>((resolve) => {
+            signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          }),
+        ]);
+      },
+    });
+    const root = await scheduler.submit({
+      id: 'mixed-root',
+      goal: 'Coordinate mixed asynchronous work.',
+      capabilities: ['resource:read'],
+      maxModelAttempts: 3,
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'async_work',
+        children: [
+          { taskId: 'mixed-a', goal: 'Complete branch A.' },
+          { taskId: 'mixed-b', goal: 'Complete branch B.' },
+        ],
+        calls: [
+          {
+            callId: 'mixed-j1',
+            toolName: 'quick_read',
+            input: {},
+          },
+          {
+            callId: 'mixed-j2',
+            toolName: 'slow_read',
+            input: {},
+          },
+        ],
+        usage,
+      },
+      {
+        type: 'wait_for_async_work',
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'mixed work complete',
+        usage,
+      },
+    ]);
+    provider.setResponses('mixed-a', [
+      { type: 'final', output: 'A done', usage },
+    ]);
+    provider.setResponses('mixed-b', [
+      { type: 'final', output: 'B done', usage },
+    ]);
+
+    const run = scheduler.runUntilIdle();
+    await vi.waitFor(() => {
+      const generation = root.activeAsyncWorkGeneration;
+      expect(
+        generation?.work.filter((work) => work.status !== 'running'),
+      ).toHaveLength(3);
+    });
+    releaseBatchWindow?.();
+    await vi.waitFor(() => {
+      expect(
+        provider.requests.filter((request) => request.taskId === root.id),
+      ).toHaveLength(2);
+    });
+
+    const partialRequest = provider.requests.filter(
+      (request) => request.taskId === root.id,
+    )[1];
+    const partialUpdate = partialRequest?.context.findLast(
+      (item) => item.type === 'async_work_update',
+    );
+    expect(partialUpdate).toMatchObject({
+      type: 'async_work_update',
+      allFinished: false,
+      pending: [
+        expect.objectContaining({
+          workId: 'mixed-j2',
+        }),
+      ],
+    });
+    if (partialUpdate?.type === 'async_work_update') {
+      expect(
+        partialUpdate.results.map((result) => result.workId),
+      ).toEqual(
+        expect.arrayContaining(['mixed-a', 'mixed-b', 'mixed-j1']),
+      );
+    }
+
+    resolveSlowTool?.('slow result');
+    await run;
+
+    const rootRequests = provider.requests.filter(
+      (request) => request.taskId === root.id,
+    );
+    expect(rootRequests).toHaveLength(3);
+    const finalUpdate = rootRequests[2]?.context.findLast(
+      (item) => item.type === 'async_work_update',
+    );
+    expect(finalUpdate).toMatchObject({
+      type: 'async_work_update',
+      allFinished: true,
+      results: [
+        expect.objectContaining({
+          workId: 'mixed-j2',
+          status: 'completed',
+        }),
+      ],
+      pending: [],
+    });
+    expect(root.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'completed',
+        output: 'mixed work complete',
+      },
+    });
+  });
+
+  it('cancels the batch timer and wakes immediately when all work finishes', async () => {
+    let resolveSlowTool: ((value: JsonValue) => void) | undefined;
+    const slowToolResult = new Promise<JsonValue>((resolve) => {
+      resolveSlowTool = resolve;
+    });
+    let timerStarted = false;
+    let timerCancelled = false;
+    const provider = new FakeModelProvider();
+    const tools = new ToolRegistry();
+    tools.register({
+      name: 'fast_job',
+      description: 'Finish immediately.',
+      requiredCapability: 'job:run',
+      effect: 'read_only',
+      validateInput: () => ({ valid: true }),
+      execute: async () => 'fast',
+    });
+    tools.register({
+      name: 'slow_job',
+      description: 'Finish when released.',
+      requiredCapability: 'job:run',
+      effect: 'read_only',
+      validateInput: () => ({ valid: true }),
+      execute: async () => await slowToolResult,
+    });
+    const scheduler = new TaskScheduler({
+      provider,
+      tools,
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 2,
+        requestsPerMinute: 20,
+        tokensPerMinute: 20_000,
+      }),
+      asyncWorkPolicy: { batchWindowMs: 30_000 },
+      wait: async (_ms, signal) => {
+        timerStarted = true;
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              timerCancelled = true;
+              resolve();
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+    const task = await scheduler.submit({
+      id: 'all-done-fast-path',
+      goal: 'Use the all-done fast path.',
+      capabilities: ['job:run'],
+    });
+    provider.setResponses(task.id, [
+      {
+        type: 'tool_calls',
+        calls: [
+          { callId: 'fast', toolName: 'fast_job', input: {} },
+          { callId: 'slow', toolName: 'slow_job', input: {} },
+        ],
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'all jobs done',
+        usage,
+      },
+    ]);
+
+    const run = scheduler.runUntilIdle();
+    await vi.waitFor(() => {
+      expect(timerStarted).toBe(true);
+    });
+    resolveSlowTool?.('slow');
+    await run;
+
+    expect(timerCancelled).toBe(true);
+    expect(provider.requests).toHaveLength(2);
+    expect(task.context).toContainEqual(
+      expect.objectContaining({
+        type: 'async_work_update',
+        allFinished: true,
+      }),
+    );
+  });
+
+  it('restores a persisted async work batch timer', async () => {
+    const clock = new ManualClock(100);
+    const store = new InMemoryTaskStore();
+    const persisted = TaskControlBlock.create({
+      id: 'restored-async-timer',
+      goal: 'Resume a persisted batch timer.',
+      createdAt: clock.now(),
+    });
+    persisted.transition(
+      {
+        status: 'RUNNING',
+        enteredAt: clock.now(),
+        providerId: 'fake-model',
+        requestAttempt: 1,
+        operation: 'model',
+      },
+      'test_setup',
+    );
+    const generationId = persisted.registerAsyncWork(
+      [
+        { workId: 'restored-done', kind: 'tool', label: 'done' },
+        { workId: 'restored-pending', kind: 'tool', label: 'pending' },
+      ],
+      clock.now(),
+    );
+    persisted.completeToolWork('restored-done', 'done', clock.now());
+    persisted.setAsyncWorkBatchDueAt(generationId, 150);
+    persisted.transition(
+      {
+        status: 'BLOCKED',
+        enteredAt: clock.now(),
+        reason: 'async_work',
+        waitingFor: ['restored-pending'],
+      },
+      'test_setup',
+    );
+    await store.persist(persisted);
+
+    const waits: number[] = [];
+    const provider = new FakeModelProvider();
+    provider.setResponses(persisted.id, [
+      { type: 'final', output: 'restored', usage },
+    ]);
+    const scheduler = new TaskScheduler({
+      provider,
+      tools: new ToolRegistry(),
+      store,
+      admission: new AdmissionController(
+        {
+          maxConcurrentRequests: 1,
+          requestsPerMinute: 10,
+          tokensPerMinute: 10_000,
+        },
+        clock,
+      ),
+      clock,
+      wait: async (ms) => {
+        waits.push(ms);
+        clock.advance(ms);
+      },
+    });
+
+    const restored = await scheduler.restore(persisted.id);
+    await scheduler.runUntilIdle();
+
+    expect(waits).toEqual([50]);
+    expect(restored?.state.status).toBe('TERMINATED');
+    expect(provider.requests[0]?.context).toContainEqual(
+      expect.objectContaining({
+        type: 'async_work_update',
+        allFinished: false,
+        pending: [
+          expect.objectContaining({
+            workId: 'restored-pending',
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('delivers an expired async work batch when its timer deadline was cleared before persistence', async () => {
+    const clock = new ManualClock(200);
+    const store = new InMemoryTaskStore();
+    const persisted = TaskControlBlock.create({
+      id: 'restored-expired-batch',
+      goal: 'Recover an expired delivery.',
+      createdAt: clock.now(),
+    });
+    persisted.transition(
+      {
+        status: 'RUNNING',
+        enteredAt: clock.now(),
+        providerId: 'fake-model',
+        requestAttempt: 1,
+        operation: 'model',
+      },
+      'test_setup',
+    );
+    persisted.registerAsyncWork(
+      [
+        { workId: 'expired-done', kind: 'tool', label: 'done' },
+        { workId: 'expired-pending', kind: 'tool', label: 'pending' },
+      ],
+      clock.now(),
+    );
+    persisted.completeToolWork('expired-done', 'done', clock.now());
+    persisted.transition(
+      {
+        status: 'BLOCKED',
+        enteredAt: clock.now(),
+        reason: 'async_work',
+        waitingFor: ['expired-pending'],
+      },
+      'test_setup',
+    );
+    await store.persist(persisted);
+
+    const provider = new FakeModelProvider();
+    provider.setResponses(persisted.id, [
+      { type: 'final', output: 'recovered', usage },
+    ]);
+    const scheduler = new TaskScheduler({
+      provider,
+      tools: new ToolRegistry(),
+      store,
+      admission: new AdmissionController(
+        {
+          maxConcurrentRequests: 1,
+          requestsPerMinute: 10,
+          tokensPerMinute: 10_000,
+        },
+        clock,
+      ),
+      clock,
+    });
+
+    const restored = await scheduler.restore(persisted.id);
+    expect(restored?.state.status).toBe('READY');
+
+    await scheduler.runUntilIdle();
+
+    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests[0]?.context).toContainEqual(
+      expect.objectContaining({
+        type: 'async_work_update',
+        results: [
+          expect.objectContaining({
+            workId: 'expired-done',
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('queues results that finish while the parent model request is running', async () => {
+    let resolveSlowTool: ((value: JsonValue) => void) | undefined;
+    const slowToolResult = new Promise<JsonValue>((resolve) => {
+      resolveSlowTool = resolve;
+    });
+    let releaseBatchWindow: (() => void) | undefined;
+    const batchWindow = new Promise<void>((resolve) => {
+      releaseBatchWindow = resolve;
+    });
+    const provider = new FakeModelProvider({ latencyMs: 50 });
+    const tools = new ToolRegistry();
+    tools.register({
+      name: 'running_fast',
+      description: 'Finish immediately.',
+      requiredCapability: 'job:run',
+      effect: 'read_only',
+      validateInput: () => ({ valid: true }),
+      execute: async () => 'fast',
+    });
+    tools.register({
+      name: 'running_slow',
+      description: 'Finish during the next model turn.',
+      requiredCapability: 'job:run',
+      effect: 'read_only',
+      validateInput: () => ({ valid: true }),
+      execute: async () => await slowToolResult,
+    });
+    const scheduler = new TaskScheduler({
+      provider,
+      tools,
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 2,
+        requestsPerMinute: 20,
+        tokensPerMinute: 20_000,
+      }),
+      asyncWorkPolicy: { batchWindowMs: 30_000 },
+      wait: async (_ms, signal) => {
+        await Promise.race([
+          batchWindow,
+          new Promise<void>((resolve) => {
+            signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          }),
+        ]);
+      },
+    });
+    const task = await scheduler.submit({
+      id: 'result-during-model',
+      goal: 'Handle an interrupt during a model request.',
+      capabilities: ['job:run'],
+    });
+    provider.setResponses(task.id, [
+      {
+        type: 'tool_calls',
+        calls: [
+          { callId: 'running-fast', toolName: 'running_fast', input: {} },
+          { callId: 'running-slow', toolName: 'running_slow', input: {} },
+        ],
+        usage,
+      },
+      { type: 'wait_for_async_work', usage },
+      { type: 'final', output: 'done', usage },
+    ]);
+
+    const run = scheduler.runUntilIdle();
+    await vi.waitFor(() => {
+      expect(
+        task.activeAsyncWorkGeneration?.work.find(
+          (work) => work.workId === 'running-fast',
+        )?.status,
+      ).toBe('completed');
+    });
+    releaseBatchWindow?.();
+    await vi.waitFor(() => {
+      expect(provider.requests).toHaveLength(2);
+      expect(task.state.status).toBe('RUNNING');
+    });
+    resolveSlowTool?.('slow');
+    await run;
+
+    expect(provider.requests).toHaveLength(3);
+    expect(
+      task.events
+        .filter(
+          (event) =>
+            event.type === 'state_transitioned' &&
+            event.from === 'RUNNING' &&
+            event.to.status === 'BLOCKED',
+        ),
+    ).toHaveLength(1);
+    expect(provider.requests[2]?.context).toContainEqual(
+      expect.objectContaining({
+        type: 'async_work_update',
+        allFinished: true,
+      }),
+    );
+  });
+
+  it('cancels live descendants when a parent finishes with work still pending', async () => {
+    let releaseBatchWindow: (() => void) | undefined;
+    const batchWindow = new Promise<void>((resolve) => {
+      releaseBatchWindow = resolve;
+    });
+    let queuedSideEffectExecutions = 0;
+    const provider = new FakeModelProvider();
+    const tools = new ToolRegistry();
+    tools.register({
+      name: 'parent_quick',
+      description: 'Give the parent a partial result.',
+      requiredCapability: 'job:run',
+      effect: 'read_only',
+      validateInput: () => ({ valid: true }),
+      execute: async () => 'partial',
+    });
+    tools.register({
+      name: 'child_wait',
+      description: 'Wait until cancellation.',
+      requiredCapability: 'job:run',
+      effect: 'read_only',
+      validateInput: () => ({ valid: true }),
+      execute: async (_input, context) =>
+        await new Promise<JsonValue>((_resolve, reject) => {
+          context.signal.addEventListener(
+            'abort',
+            () => reject(context.signal.reason),
+            { once: true },
+          );
+        }),
+    });
+    tools.register({
+      name: 'child_side_effect',
+      description: 'Must not start after the child is cancelled.',
+      requiredCapability: 'job:run',
+      effect: 'side_effect',
+      validateInput: () => ({ valid: true }),
+      execute: async () => {
+        queuedSideEffectExecutions += 1;
+        return 'unexpected';
+      },
+    });
+    const scheduler = new TaskScheduler({
+      provider,
+      tools,
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 2,
+        requestsPerMinute: 20,
+        tokensPerMinute: 20_000,
+      }),
+      asyncWorkPolicy: { batchWindowMs: 30_000 },
+      wait: async (_ms, signal) => {
+        await Promise.race([
+          batchWindow,
+          new Promise<void>((resolve) => {
+            signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          }),
+        ]);
+      },
+    });
+    const root = await scheduler.submit({
+      id: 'terminating-parent',
+      goal: 'Finish after one partial result.',
+      capabilities: ['job:run'],
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'async_work',
+        children: [
+          {
+            taskId: 'cancelled-child',
+            goal: 'Wait for a local operation.',
+            capabilities: ['job:run'],
+          },
+        ],
+        calls: [
+          {
+            callId: 'parent-partial',
+            toolName: 'parent_quick',
+            input: {},
+          },
+        ],
+        usage,
+      },
+      { type: 'final', output: 'parent done', usage },
+    ]);
+    provider.setResponses('cancelled-child', [
+      {
+        type: 'tool_calls',
+        calls: [
+          {
+            callId: 'child-pending',
+            toolName: 'child_wait',
+            input: {},
+          },
+          {
+            callId: 'child-side-effect',
+            toolName: 'child_side_effect',
+            input: {},
+          },
+        ],
+        usage,
+      },
+    ]);
+
+    const run = scheduler.runUntilIdle();
+    await vi.waitFor(() => {
+      expect(scheduler.getTask('cancelled-child')?.state.status).toBe(
+        'BLOCKED',
+      );
+    });
+    releaseBatchWindow?.();
+    await run;
+
+    expect(root.state.status).toBe('TERMINATED');
+    expect(scheduler.getTask('cancelled-child')?.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'cancelled',
+      },
+    });
+    expect(queuedSideEffectExecutions).toBe(0);
+    expect(scheduler.liveAgentCount).toBe(0);
   });
 });

@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`0.3.1`
+当前版本：`0.4.0`
 
 ## 核心状态模型
 
@@ -62,6 +62,50 @@ completed            # 已完成
 failed               # 执行失败
 cancelled            # 被取消
 needs_parent_action  # 需要父任务先完成某项前置工作
+```
+
+## 增量异步工作任务板
+
+工具调用和子 Agent 委派统一登记到父任务持久化的 `AsyncWorkGeneration` 中。模型可以
+通过一次 `async_work` 响应同时启动多个子 Agent 和多个长时工具，不再需要按类型拆成
+不同轮次，也不必等待整批工作全部结束。
+
+每个父任务使用按需创建的一次性批处理定时器，默认窗口为 30 秒：
+
+```text
+没有新结果
+-> 不创建定时器
+
+第一个结果完成
+-> 写入 Completion Mailbox
+-> 启动一次性 batch timer
+
+窗口内更多结果完成
+-> 只追加任务板，不重复创建 timer
+
+所有工作提前进入终态
+-> 取消 timer
+-> 立即唤醒父任务
+
+timer 到期但仍有工作运行
+-> 一次投递窗口内全部新结果
+-> 同时列出仍在运行的工作
+```
+
+投递给模型的 `async_work_update` 包含本批 `results`、当前 `pending` 和
+`allFinished`。父 Agent 处理部分结果后，可以返回 `wait_for_async_work` 继续等待；
+如果后台结果恰好在父模型运行期间到达，结果会留在 Mailbox，当前模型轮次结束后立即
+重新入队，不会并发修改同一个父任务。
+
+Work Table、已投递标记和 `batchDueAt` 都进入任务快照。恢复时会重建尚未到期的 timer；
+如果快照位于“timer 已到期、结果尚未投递”的间隙，则立即补做投递。批处理窗口可通过
+以下选项调整：
+
+```ts
+const scheduler = new TaskScheduler({
+  // 其他运行时依赖
+  asyncWorkPolicy: { batchWindowMs: 30_000 },
+});
 ```
 
 ## 三级深度感知调度
@@ -159,6 +203,11 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 - RPM、TPM、并发额度和任务预算准入控制
 - 限流任务基于 `retryAt` 的自动唤醒（`run()`）
 - 单任务完成 Promise（`waitForTermination()`）
+- 工具与子 Agent 同轮混合启动（`async_work`）
+- 持久化 Work Table 与 Completion Mailbox
+- 部分结果批量投递和全部完成快速唤醒
+- 父模型运行期间的异步结果合并与任务级串行化
+- 异步批处理 timer 快照恢复
 - 入队前上下文窗口预检
 - 正常响应搭载结构化轮次摘要
 - 完整上下文与摘要上下文双通道快照
@@ -213,6 +262,8 @@ root -> middle -> leaf -> middle -> root
 - 模型仍使用 Fake Provider，尚未连接真实 LLM。
 - Agent 池与任务存储仍为单进程内存实现。
 - Agent 池运行态计数尚未持久化，数据库恢复将在后续版本实现。
+- Work Table 和 timer deadline 可以从快照恢复，但进程退出后，内存中的工具 Promise
+  和外部子进程仍需未来的持久化执行器 Adapter 负责重连或重启。
 - 人工审批和资源锁已预留状态，但尚未完成协议。
 - 轮次摘要和二次压缩已定义 Provider/Adapter 协议，但尚未连接真实模型服务。
 - RAG 仍将在后续通过 Adapter 接入成熟方案。

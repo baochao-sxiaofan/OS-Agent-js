@@ -1,4 +1,15 @@
 export type {
+  AsyncWorkPending,
+  AsyncWorkGeneration,
+  AsyncWorkKind,
+  AsyncWorkRecord,
+  AsyncWorkRegistration,
+  AsyncWorkResult,
+  AsyncWorkStatus,
+  AsyncWorkTerminalStatus,
+} from './kernel/async-work.js';
+export type {
+  AsyncWorkUpdateContextItem,
   ContextItem,
   ContextSummaryKind,
   ContextSummaryRecord,
@@ -83,6 +94,7 @@ export {
 } from './scheduler/ready-queue.js';
 export {
   TaskScheduler,
+  type AsyncWorkPolicy,
   type SchedulerRunOptions,
   type SchedulerRunResult,
   type SpawnChildrenResult,

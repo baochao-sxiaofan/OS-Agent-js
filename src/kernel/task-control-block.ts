@@ -3,6 +3,13 @@ import { randomUUID } from 'node:crypto';
 import type { ModelUsage } from '../model/model-provider.js';
 import type { JsonValue } from '../types/json.js';
 import type {
+  AsyncWorkGeneration,
+  AsyncWorkRecord,
+  AsyncWorkRegistration,
+  AsyncWorkTerminalStatus,
+} from './async-work.js';
+import type {
+  AsyncWorkUpdateContextItem,
   ContextItem,
   ContextSummaryKind,
   ContextSummaryRecord,
@@ -51,6 +58,7 @@ export type TaskSnapshot = {
   priority: number;
   capabilities: string[];
   context: ContextItem[];
+  asyncWorkGenerations?: AsyncWorkGeneration[];
   contextSummaries?: ContextSummaryRecord[];
   nextContextSummaryStartIndex?: number;
   state: TaskState;
@@ -73,6 +81,7 @@ export class TaskControlBlock {
 
   #capabilities: Set<string>;
   #context: ContextItem[];
+  #asyncWorkGenerations: AsyncWorkGeneration[];
   #contextSummaries: ContextSummaryRecord[];
   #nextContextSummaryStartIndex: number;
   #state: TaskState;
@@ -92,6 +101,9 @@ export class TaskControlBlock {
     this.createdAt = snapshot.createdAt;
     this.#capabilities = new Set(snapshot.capabilities);
     this.#context = structuredClone(snapshot.context);
+    this.#asyncWorkGenerations = structuredClone(
+      snapshot.asyncWorkGenerations ?? [],
+    );
     this.#contextSummaries = structuredClone(
       snapshot.contextSummaries ?? [],
     );
@@ -131,6 +143,7 @@ export class TaskControlBlock {
       priority: options.priority ?? 0,
       capabilities: [...(options.capabilities ?? [])],
       context: [...(options.context ?? [])],
+      asyncWorkGenerations: [],
       contextSummaries: [],
       nextContextSummaryStartIndex: 0,
       state: initialState,
@@ -176,6 +189,7 @@ export class TaskControlBlock {
       priority: options.priority ?? parent.priority,
       capabilities: [...(options.capabilities ?? [])],
       context: [...(options.context ?? [])],
+      asyncWorkGenerations: [],
       contextSummaries: [],
       nextContextSummaryStartIndex: 0,
       state: initialState,
@@ -201,6 +215,17 @@ export class TaskControlBlock {
 
   get context(): readonly ContextItem[] {
     return this.#context;
+  }
+
+  get asyncWorkGenerations(): readonly AsyncWorkGeneration[] {
+    return structuredClone(this.#asyncWorkGenerations);
+  }
+
+  get activeAsyncWorkGeneration(): AsyncWorkGeneration | undefined {
+    const generation = this.#asyncWorkGenerations.findLast(
+      (candidate) => candidate.closedAt === undefined,
+    );
+    return generation ? structuredClone(generation) : undefined;
   }
 
   get contextSummaries(): readonly ContextSummaryRecord[] {
@@ -251,6 +276,192 @@ export class TaskControlBlock {
   appendContext(item: ContextItem): void {
     this.#context.push(structuredClone(item));
     this.#updatedAt = Date.now();
+  }
+
+  registerAsyncWork(
+    registrations: readonly AsyncWorkRegistration[],
+    now: number,
+  ): string {
+    if (registrations.length === 0) {
+      throw new Error('At least one asynchronous work item is required.');
+    }
+    const registrationIds = registrations.map(
+      (registration) => registration.workId,
+    );
+    if (new Set(registrationIds).size !== registrationIds.length) {
+      throw new Error('Asynchronous work IDs must be unique.');
+    }
+    const usedWorkIds = new Set(
+      this.#asyncWorkGenerations.flatMap((generation) =>
+        generation.work.map((work) => work.workId),
+      ),
+    );
+    const reusedWorkId = registrationIds.find((workId) =>
+      usedWorkIds.has(workId),
+    );
+    if (reusedWorkId !== undefined) {
+      throw new Error(`Asynchronous work ID has already been used: ${reusedWorkId}`);
+    }
+
+    let generation = this.#asyncWorkGenerations.findLast(
+      (candidate) => candidate.closedAt === undefined,
+    );
+    if (!generation) {
+      generation = {
+        generationId: randomUUID(),
+        createdAt: now,
+        work: [],
+      };
+      this.#asyncWorkGenerations.push(generation);
+    }
+    generation.work.push(
+      ...registrations.map(
+        (registration): AsyncWorkRecord => ({
+          ...structuredClone(registration),
+          status: 'running',
+          startedAt: now,
+        }),
+      ),
+    );
+    this.recordEvent({
+      type: 'async_work_registered',
+      generationId: generation.generationId,
+      work: registrations.map(({ workId, kind }) => ({ workId, kind })),
+    });
+    return generation.generationId;
+  }
+
+  completeToolWork(
+    workId: string,
+    output: JsonValue,
+    now: number,
+  ): void {
+    this.completeAsyncWork(
+      workId,
+      'completed',
+      now,
+      { output: structuredClone(output) },
+    );
+  }
+
+  failToolWork(workId: string, error: string, now: number): void {
+    this.completeAsyncWork(workId, 'failed', now, { error });
+  }
+
+  completeSubagentWork(
+    workId: string,
+    termination: Termination,
+    now: number,
+  ): void {
+    const status: AsyncWorkTerminalStatus =
+      termination.kind === 'failed'
+        ? 'failed'
+        : termination.kind === 'cancelled'
+          ? 'cancelled'
+          : 'completed';
+    this.completeAsyncWork(workId, status, now, {
+      termination: structuredClone(termination),
+    });
+  }
+
+  activeAsyncWorkPendingIds(): string[] {
+    return (
+      this.activeAsyncWorkGeneration?.work
+        .filter((work) => work.status === 'running')
+        .map((work) => work.workId) ?? []
+    );
+  }
+
+  hasUndeliveredAsyncWorkResults(): boolean {
+    return (
+      this.activeAsyncWorkGeneration?.work.some(
+        (work) =>
+          work.status !== 'running' && work.deliveredAt === undefined,
+      ) ?? false
+    );
+  }
+
+  isActiveAsyncWorkComplete(): boolean {
+    const generation = this.activeAsyncWorkGeneration;
+    return (
+      generation !== undefined &&
+      generation.work.length > 0 &&
+      generation.work.every((work) => work.status !== 'running')
+    );
+  }
+
+  setAsyncWorkBatchDueAt(
+    generationId: string,
+    dueAt: number | undefined,
+  ): void {
+    const generation = this.requireOpenAsyncWorkGeneration(generationId);
+    if (dueAt === undefined) {
+      delete generation.batchDueAt;
+    } else {
+      generation.batchDueAt = dueAt;
+    }
+    this.#updatedAt = Date.now();
+  }
+
+  claimAsyncWorkUpdate(now: number): AsyncWorkUpdateContextItem | undefined {
+    const generation = this.#asyncWorkGenerations.findLast(
+      (candidate) => candidate.closedAt === undefined,
+    );
+    if (!generation) {
+      return undefined;
+    }
+    const terminal = generation.work.filter(
+      (work) =>
+        work.status !== 'running' && work.deliveredAt === undefined,
+    );
+    if (terminal.length === 0) {
+      return undefined;
+    }
+    const allFinished = generation.work.every(
+      (work) => work.status !== 'running',
+    );
+    const update: AsyncWorkUpdateContextItem = {
+      type: 'async_work_update',
+      generationId: generation.generationId,
+      results: terminal.map((work) => ({
+        workId: work.workId,
+        kind: work.kind,
+        label: work.label,
+        status: work.status as AsyncWorkTerminalStatus,
+        completedAt: work.completedAt ?? now,
+        ...(work.output === undefined
+          ? {}
+          : { output: structuredClone(work.output) }),
+        ...(work.termination === undefined
+          ? {}
+          : { termination: structuredClone(work.termination) }),
+        ...(work.error === undefined ? {} : { error: work.error }),
+      })),
+      pending: generation.work
+        .filter((work) => work.status === 'running')
+        .map((work) => ({
+          workId: work.workId,
+          kind: work.kind,
+          label: work.label,
+          startedAt: work.startedAt,
+        })),
+      allFinished,
+    };
+    for (const work of terminal) {
+      work.deliveredAt = now;
+    }
+    delete generation.batchDueAt;
+    if (allFinished) {
+      generation.closedAt = now;
+    }
+    this.#context.push(structuredClone(update));
+    this.recordEvent({
+      type: 'async_work_delivered',
+      generationId: generation.generationId,
+      workIds: terminal.map((work) => work.workId),
+      allFinished,
+    });
+    return update;
   }
 
   completeModelTurn(summary?: TurnSummary): void {
@@ -307,10 +518,12 @@ export class TaskControlBlock {
 
   recordModelResponse(
     responseType:
+      | 'async_work'
       | 'final'
       | 'needs_parent_action'
       | 'spawn_subagents'
-      | 'tool_calls',
+      | 'tool_calls'
+      | 'wait_for_async_work',
     usage: ModelUsage,
   ) {
     this.#budget.spentCostUsd += usage.costUsd;
@@ -377,6 +590,7 @@ export class TaskControlBlock {
       priority: this.priority,
       capabilities: [...this.#capabilities],
       context: structuredClone(this.#context),
+      asyncWorkGenerations: structuredClone(this.#asyncWorkGenerations),
       contextSummaries: structuredClone(this.#contextSummaries),
       nextContextSummaryStartIndex: this.#nextContextSummaryStartIndex,
       state: structuredClone(this.#state),
@@ -387,6 +601,65 @@ export class TaskControlBlock {
       updatedAt: this.#updatedAt,
       events: structuredClone(this.#events),
     };
+  }
+
+  private completeAsyncWork(
+    workId: string,
+    status: AsyncWorkTerminalStatus,
+    now: number,
+    result: {
+      output?: JsonValue;
+      termination?: Termination;
+      error?: string;
+    },
+  ): void {
+    const generation = this.#asyncWorkGenerations.findLast(
+      (candidate) =>
+        candidate.closedAt === undefined &&
+        candidate.work.some((work) => work.workId === workId),
+    );
+    if (!generation) {
+      throw new Error(`Asynchronous work is not active: ${workId}`);
+    }
+    const work = generation.work.find(
+      (candidate) => candidate.workId === workId,
+    );
+    if (!work || work.status !== 'running') {
+      throw new Error(`Asynchronous work is already terminal: ${workId}`);
+    }
+    work.status = status;
+    work.completedAt = now;
+    if (result.output !== undefined) {
+      work.output = structuredClone(result.output);
+    }
+    if (result.termination !== undefined) {
+      work.termination = structuredClone(result.termination);
+    }
+    if (result.error !== undefined) {
+      work.error = result.error;
+    }
+    this.recordEvent({
+      type: 'async_work_terminal',
+      generationId: generation.generationId,
+      workId,
+      status,
+    });
+  }
+
+  private requireOpenAsyncWorkGeneration(
+    generationId: string,
+  ): AsyncWorkGeneration {
+    const generation = this.#asyncWorkGenerations.find(
+      (candidate) =>
+        candidate.generationId === generationId &&
+        candidate.closedAt === undefined,
+    );
+    if (!generation) {
+      throw new Error(
+        `Asynchronous work generation is not active: ${generationId}`,
+      );
+    }
+    return generation;
   }
 
   private addContextSummary(

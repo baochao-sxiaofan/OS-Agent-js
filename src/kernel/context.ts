@@ -1,4 +1,8 @@
 import type { JsonValue } from '../types/json.js';
+import type {
+  AsyncWorkPending,
+  AsyncWorkResult,
+} from './async-work.js';
 import type { Termination } from './task-state.js';
 
 export type TurnSummary = {
@@ -38,6 +42,14 @@ export type ContextSummaryItem = {
   outcome: string;
 };
 
+export type AsyncWorkUpdateContextItem = {
+  type: 'async_work_update';
+  generationId: string;
+  results: AsyncWorkResult[];
+  pending: AsyncWorkPending[];
+  allFinished: boolean;
+};
+
 export type ToolCallContextItem = {
   type: 'tool_call';
   callId: string;
@@ -74,6 +86,7 @@ export type SubagentSpawnRejectedContextItem = {
 
 export type ContextItem =
   | AssistantContextItem
+  | AsyncWorkUpdateContextItem
   | ContextSummaryItem
   | SubagentResultContextItem
   | SubagentSpawnRejectedContextItem

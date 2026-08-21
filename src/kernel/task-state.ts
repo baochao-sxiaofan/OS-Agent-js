@@ -1,6 +1,7 @@
 import type { JsonValue } from '../types/json.js';
 
 export type ReadyReason =
+  | 'async_work_result_available'
   | 'submitted'
   | 'capacity_available'
   | 'context_compacted'
@@ -10,6 +11,7 @@ export type ReadyReason =
   | 'restored';
 
 export type BlockedReason =
+  | 'async_work'
   | 'human_approval'
   | 'resource_lock'
   | 'subagent'

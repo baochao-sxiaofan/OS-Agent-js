@@ -1,6 +1,10 @@
 import type { ModelUsage } from '../model/model-provider.js';
 import type { JsonValue } from '../types/json.js';
 import type {
+  AsyncWorkKind,
+  AsyncWorkTerminalStatus,
+} from './async-work.js';
+import type {
   ContextSummaryKind,
   TurnSummary,
 } from './context.js';
@@ -35,11 +39,36 @@ export type CapacityWaitRecordedEvent = TaskEventBase & {
 export type ModelResponseRecordedEvent = TaskEventBase & {
   type: 'model_response_recorded';
   responseType:
+    | 'async_work'
     | 'final'
     | 'needs_parent_action'
     | 'spawn_subagents'
-    | 'tool_calls';
+    | 'tool_calls'
+    | 'wait_for_async_work';
   usage: ModelUsage;
+};
+
+export type AsyncWorkRegisteredEvent = TaskEventBase & {
+  type: 'async_work_registered';
+  generationId: string;
+  work: {
+    workId: string;
+    kind: AsyncWorkKind;
+  }[];
+};
+
+export type AsyncWorkTerminalEvent = TaskEventBase & {
+  type: 'async_work_terminal';
+  generationId: string;
+  workId: string;
+  status: AsyncWorkTerminalStatus;
+};
+
+export type AsyncWorkDeliveredEvent = TaskEventBase & {
+  type: 'async_work_delivered';
+  generationId: string;
+  workIds: string[];
+  allFinished: boolean;
 };
 
 export type ContextSummaryRecordedEvent = TaskEventBase & {
@@ -86,6 +115,9 @@ export type SubagentResultRecordedEvent = TaskEventBase & {
 };
 
 export type TaskEvent =
+  | AsyncWorkDeliveredEvent
+  | AsyncWorkRegisteredEvent
+  | AsyncWorkTerminalEvent
   | CapacityWaitRecordedEvent
   | ContextCompactionRecordedEvent
   | ContextSummaryRecordedEvent

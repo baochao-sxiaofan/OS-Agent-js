@@ -75,6 +75,10 @@ File Search 等成熟方案。
   不能直接销毁原始历史。
 - 所有任务进入 Ready Queue 前必须完成上下文窗口预检。二次语义压缩必须通过独立
   Adapter 接入，并和普通模型请求共享准入与预算约束。
+- 长时工具和子 Agent 必须以可序列化 Work Record 保存，禁止把 JavaScript `Promise`
+  当作持久化任务状态。结果投递必须带 generation 和已投递标记，避免恢复后重复注入。
+- 异步结果采用按父任务按需创建的一次性批处理 timer；部分结果批量投递，全部工作进入
+  终态时立即走快速路径，不得受批处理窗口限制。
 - 优先使用职责单一的小模块，不提前构建缺乏实际需求的抽象。
 
 ## 可靠性规则
@@ -128,7 +132,7 @@ File Search 等成熟方案。
 
 ## 当前状态
 
-当前 `0.3.1` 内核已经实现：
+当前 `0.4.0` 内核已经实现：
 
 1. 任务状态、事件和合法状态转换规则。
 2. 可序列化的 `TaskControlBlock` 快照和只追加事件历史。
@@ -150,10 +154,16 @@ File Search 等成熟方案。
 18. 可替换的二次 `ContextCompactor` Adapter，并受 RPM、TPM、并发和预算控制。
 19. 压缩失败、压缩后仍超限和子任务预检失败的确定性终止/回传路径。
 20. 限流任务基于 `retryAt` 的自动唤醒（`run()`）与单任务完成 Promise（`waitForTermination()`）。
+21. 工具与子 Agent 同轮混合创建的 `async_work` 协议。
+22. 持久化 Work Table、Completion Mailbox、generation 和结果去重标记。
+23. 默认 30 秒的按父任务一次性批处理 timer，以及全部完成立即唤醒快速路径。
+24. `async_work_update` 部分结果、pending 工作和 `wait_for_async_work` 继续等待协议。
+25. 父模型运行期间的结果合并、父任务级异步状态串行化和 timer 恢复补偿。
+26. 父任务终止时中止本地工具并递归取消存活子任务。
 
 后续优先级：
 
-1. 增加持久化数据库 Adapter、Agent 池快照和进程崩溃恢复测试。
+1. 增加持久化数据库 Adapter、Agent 池快照，以及工具/外部进程重连执行器。
 2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
 3. 增加真实模型 Provider Adapter，并映射结构化摘要输出协议。
 4. 增加真实模型厂商的 `ContextCompactor` Adapter。
