@@ -1,6 +1,6 @@
 {
   "name": "os-agent-js",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "An operating-system-inspired runtime and scheduler for LLM agent tasks.",
   "type": "module",
@@ -17,10 +17,12 @@
     "README.md"
   ],
   "scripts": {
+    "benchmark:multi-agent": "tsx bench/multi-agent-runtime.ts",
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "demo": "tsx examples/basic-runtime.ts",
     "demo:gemini": "tsx examples/gemini-network.ts",
+    "demo:gemini:multi-agent": "tsx examples/gemini-multi-agent.ts",
     "demo:hierarchy": "tsx examples/hierarchical-runtime.ts",
     "test": "vitest run"
   },

@@ -63,6 +63,7 @@ export class AgentPool {
   readonly #spawnedByRoot = new Map<string, number>();
   readonly #reservedByRoot = new Map<string, number>();
   #reservedLiveSlots = 0;
+  #peakLiveCount = 0;
 
   constructor(readonly policy: AgentPoolPolicy) {
     if (
@@ -82,6 +83,10 @@ export class AgentPool {
 
   get liveCount(): number {
     return this.#liveTaskIds.size;
+  }
+
+  get peakLiveCount(): number {
+    return this.#peakLiveCount;
   }
 
   get availableLiveSlots(): number {
@@ -104,6 +109,7 @@ export class AgentPool {
       throw new Error('Agent pool has no free live slots for a root task.');
     }
     this.#liveTaskIds.add(task.id);
+    this.updatePeakLiveCount();
     this.#spawnedByRoot.set(task.rootTaskId, 0);
   }
 
@@ -115,6 +121,7 @@ export class AgentPool {
       throw new Error(`Agent pool cannot restore task ${task.id}: pool is full.`);
     }
     this.#liveTaskIds.add(task.id);
+    this.updatePeakLiveCount();
     if (task.parentTaskId !== undefined) {
       this.#parentByChild.set(task.id, task.parentTaskId);
       const children =
@@ -209,6 +216,7 @@ export class AgentPool {
             this.#parentByChild.set(child.id, parent.id);
             children.add(child.id);
           }
+          this.updatePeakLiveCount();
           this.#childrenByParent.set(parent.id, children);
           this.#spawnedByRoot.set(
             rootTaskId,
@@ -266,5 +274,12 @@ export class AgentPool {
       return;
     }
     this.#reservedByRoot.set(rootTaskId, remaining);
+  }
+
+  private updatePeakLiveCount(): void {
+    this.#peakLiveCount = Math.max(
+      this.#peakLiveCount,
+      this.#liveTaskIds.size,
+    );
   }
 }

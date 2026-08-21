@@ -53,6 +53,7 @@ describe('ReadyQueue hierarchical scheduling', () => {
       queue.enqueue(leaf);
     }
 
+    expect(queue.peakSize).toBe(7);
     expect(
       Array.from({ length: 7 }, () => queue.dequeue()?.id),
     ).toEqual([

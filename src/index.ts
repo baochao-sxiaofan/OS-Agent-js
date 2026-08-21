@@ -101,6 +101,7 @@ export {
 export {
   TaskScheduler,
   type AsyncWorkPolicy,
+  type SchedulerMetricsSnapshot,
   type SchedulerRunOptions,
   type SchedulerRunResult,
   type SpawnChildrenResult,

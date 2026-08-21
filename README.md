@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`0.5.0`
+当前版本：`0.6.0`
 
 ## 核心状态模型
 
@@ -216,7 +216,7 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 - 与模型服务商无关的 `ModelProvider`
 - 行为确定的 `FakeModelProvider`
 - 通过 HTTPS 调用 Gemini 的 `GeminiModelProvider`
-- Gemini 结构化 final 响应和轮次摘要
+- Gemini 结构化 final、子 Agent 委派、异步等待、父任务协助响应和轮次摘要
 - 子任务创建、阻塞、结果回传和父任务唤醒
 - Capability 驱动的工具权限控制
 - 工具阻塞与事件唤醒
@@ -245,6 +245,7 @@ npm test
 npm run build
 npm run demo
 npm run demo:hierarchy
+npm run benchmark:multi-agent
 ```
 
 基础示例会演示：
@@ -278,6 +279,7 @@ export GEMINI_MODEL="gemini-3.5-flash-lite"
 
 ```json
 {
+  "action": "final",
   "output": "pong",
   "turnSummary": {
     "request": "一句话需求摘要",
@@ -286,10 +288,42 @@ export GEMINI_MODEL="gemini-3.5-flash-lite"
 }
 ```
 
+真实多 Agent 冒烟测试：
+
+```bash
+export GEMINI_API_KEY="your-key"
+npm run demo:gemini:multi-agent
+```
+
+该示例执行：
+
+```text
+root -> leaf-2 + leaf-3 -> root
+```
+
+两个 leaf 并行计算 `2²` 和 `3²`，root 收到结构化 `async_work_update` 后汇总为
+`4+9=13`。
+
+### 多 Agent 调度基准
+
+```bash
+npm run benchmark:multi-agent
+```
+
+基准使用固定延迟 Fake Provider，构造 1 个 root、3 个 middle、12 个 leaf，共
+16 个 Agent 和 20 次模型请求，并分别测试并发度 1、2、4、8。它验证：
+
+- 模型请求峰值不超过准入并发上限；
+- AgentPool 存活数量不越界且任务结束后归零；
+- Ready Queue 按深度权重工作且没有任务丢失；
+- root/middle 收到完整的异步结果；
+- 完整上下文和摘要上下文分别保留；
+- 模型请求深度分布固定为 `2/6/12`。
+
 ## 当前边界
 
-- Gemini Provider 已支持真实 HTTPS 请求和结构化 final 响应，但尚未接入 Gemini
-  原生 Function Calling、子 Agent 委派响应和真实上下文压缩。
+- Gemini Provider 已支持真实 HTTPS、结构化 final、子 Agent 委派、异步等待和
+  `needs_parent_action`，但尚未接入 Gemini 原生 Function Calling 和真实上下文压缩。
 - Agent 池与任务存储仍为单进程内存实现。
 - Agent 池运行态计数尚未持久化，数据库恢复将在后续版本实现。
 - Work Table 和 timer deadline 可以从快照恢复，但进程退出后，内存中的工具 Promise
@@ -302,10 +336,11 @@ export GEMINI_MODEL="gemini-3.5-flash-lite"
 
 1. 增加持久化数据库 Adapter、Agent 池快照和崩溃恢复测试。
 2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-3. 为 Gemini Provider 增加 Function Calling 与异步工作响应映射。
+3. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。
 4. 增加其他真实模型 Provider Adapter。
 5. 增加真实 `ContextCompactor` Adapter。
 6. 通过独立 Adapter 接入成熟的 RAG 方案。
 
 完整的项目约束与设计规则见 [AGENT.md](./AGENT.md)，版本变更见
-[CHANGELOG.md](./CHANGELOG.md)。
+[CHANGELOG.md](./CHANGELOG.md)，本轮多 Agent 测试过程与结果见
+[OS-Agent-js 0.6.0 测试报告](./docs/test-report-0.6.0.md)。

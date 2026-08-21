@@ -23,6 +23,7 @@ describe('AgentPool', () => {
     });
     expect(root.state.status).toBe('READY');
     expect(pool.liveCount).toBe(1);
+    expect(pool.peakLiveCount).toBe(1);
   });
 
   it('enforces max depth even when live slots remain', () => {
@@ -59,6 +60,8 @@ describe('AgentPool', () => {
     });
     leafReservation.reservation.commit([leaf]);
 
+    expect(pool.liveCount).toBe(3);
+    expect(pool.peakLiveCount).toBe(3);
     expect(pool.tryReserveChildren(leaf, 1)).toMatchObject({
       reserved: false,
       reason: 'max_depth_exceeded',

@@ -33,6 +33,7 @@ export class ReadyQueue {
   readonly #entries: QueueEntry[] = [];
   readonly #schedule: SchedulingDepth[];
   #nextOrder = 0;
+  #peakSize = 0;
   #scheduleCursor = 0;
 
   constructor(
@@ -54,6 +55,10 @@ export class ReadyQueue {
 
   get size(): number {
     return this.#entries.length;
+  }
+
+  get peakSize(): number {
+    return this.#peakSize;
   }
 
   enqueue(task: TaskControlBlock, options: EnqueueOptions = {}): void {
@@ -79,6 +84,7 @@ export class ReadyQueue {
     });
     this.#nextOrder += 1;
     this.#taskIds.add(task.id);
+    this.#peakSize = Math.max(this.#peakSize, this.#entries.length);
   }
 
   peek(): TaskControlBlock | undefined {

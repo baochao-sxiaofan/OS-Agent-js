@@ -60,6 +60,7 @@ export class AdmissionController {
   readonly #requestTimestamps: number[] = [];
   readonly #tokenReservations: TokenReservation[] = [];
   #activeRequests = 0;
+  #peakActiveRequests = 0;
 
   constructor(
     readonly policy: AdmissionPolicy,
@@ -76,6 +77,10 @@ export class AdmissionController {
 
   get activeRequests(): number {
     return this.#activeRequests;
+  }
+
+  get peakActiveRequests(): number {
+    return this.#peakActiveRequests;
   }
 
   tryAcquire(
@@ -139,6 +144,10 @@ export class AdmissionController {
     }
 
     this.#activeRequests += 1;
+    this.#peakActiveRequests = Math.max(
+      this.#peakActiveRequests,
+      this.#activeRequests,
+    );
     this.#requestTimestamps.push(now);
     this.#tokenReservations.push({
       timestamp: now,

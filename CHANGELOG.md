@@ -2,6 +2,27 @@
 
 本项目使用语义化版本号。
 
+## 0.6.0 - 2026-08-21
+
+### 新增
+
+- Gemini 结构化响应新增 `spawn_subagents`、`wait_for_async_work` 和
+  `needs_parent_action`，可驱动真实多 Agent 委派与等待流程。
+- Gemini 请求现在携带 `delegation`、工具描述和双通道选择后的上下文。
+- 新增 Gemini Provider 的委派权限校验、子任务字段校验和异步等待前置条件校验。
+- 新增 Ready Queue 峰值、AgentPool 峰值和模型请求并发峰值观测指标。
+- 新增 16-Agent、20 次模型请求的三层 Map-Reduce 确定性基准。
+- 新增双通道上下文独立测试，验证完整历史、摘要记录、混合模型上下文和快照恢复。
+- 新增真实 Gemini `root -> 2 leaf -> root` 多 Agent 冒烟示例。
+
+### 验证
+
+- 确定性基准在模型并发 1、2、4、8 下均完成 20 次请求，未超过 AgentPool 或
+  Provider 并发限制。
+- 真实 Gemini 测试成功创建两个 leaf Agent，并行返回 `4` 和 `9`，root 收到结构化
+  `async_work_update` 后返回 `4+9=13`。
+- 真实测试中 AgentPool 峰值为 3、模型请求并发峰值为 2，任务结束后两者均归零。
+
 ## 0.5.0 - 2026-08-21
 
 ### 新增

@@ -5,6 +5,7 @@ import type {
   ModelRequest,
   ModelRequestEstimate,
   ModelResponse,
+  SubagentSpawnRequest,
 } from './model-provider.js';
 
 const DEFAULT_BASE_URL =
@@ -12,13 +13,68 @@ const DEFAULT_BASE_URL =
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 128;
 
-const FINAL_RESPONSE_JSON_SCHEMA = {
+const AGENT_RESPONSE_JSON_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    action: {
+      type: 'string',
+      enum: [
+        'final',
+        'needs_parent_action',
+        'spawn_subagents',
+        'wait_for_async_work',
+      ],
+      description: 'The next runtime action.',
+    },
     output: {
       type: 'string',
-      description: 'The concise final answer for the user.',
+      description: 'The concise final answer when action is final.',
+    },
+    children: {
+      type: 'array',
+      description:
+        'Child tasks to create when action is spawn_subagents.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          taskId: {
+            type: 'string',
+          },
+          goal: {
+            type: 'string',
+          },
+          priority: {
+            type: 'integer',
+          },
+          capabilities: {
+            type: 'array',
+            items: {
+              type: 'string',
+            },
+          },
+          maxModelAttempts: {
+            type: 'integer',
+            minimum: 1,
+          },
+          maxCostUsd: {
+            type: 'number',
+            minimum: 0,
+          },
+        },
+        required: ['goal'],
+      },
+    },
+    requiredWork: {
+      type: 'string',
+      description:
+        'Work required from the parent when action is needs_parent_action.',
+    },
+    partialOutput: {
+      type: 'string',
+      description:
+        'Optional partial result when action is needs_parent_action.',
     },
     turnSummary: {
       type: 'object',
@@ -36,7 +92,7 @@ const FINAL_RESPONSE_JSON_SCHEMA = {
       required: ['request', 'outcome'],
     },
   },
-  required: ['output', 'turnSummary'],
+  required: ['action', 'turnSummary'],
 } as const;
 
 export type GeminiPricing = {
@@ -70,14 +126,31 @@ type GeminiRequestBody = {
     temperature: number;
     maxOutputTokens: number;
     responseMimeType: 'application/json';
-    responseJsonSchema: typeof FINAL_RESPONSE_JSON_SCHEMA;
+    responseJsonSchema: typeof AGENT_RESPONSE_JSON_SCHEMA;
   };
 };
 
-type ParsedGeminiEnvelope = {
-  output: string;
-  turnSummary: TurnSummary;
-};
+type ParsedGeminiEnvelope =
+  | {
+      action: 'final';
+      output: string;
+      turnSummary: TurnSummary;
+    }
+  | {
+      action: 'needs_parent_action';
+      requiredWork: string;
+      partialOutput?: string;
+      turnSummary: TurnSummary;
+    }
+  | {
+      action: 'spawn_subagents';
+      children: SubagentSpawnRequest[];
+      turnSummary: TurnSummary;
+    }
+  | {
+      action: 'wait_for_async_work';
+      turnSummary: TurnSummary;
+    };
 
 export class GeminiProviderError extends Error {
   constructor(
@@ -163,15 +236,47 @@ export class GeminiModelProvider implements ModelProvider {
       'Gemini response body',
     );
     const text = extractCandidateText(responseObject);
-    const envelope = parseFinalEnvelope(text);
+    const envelope = parseAgentEnvelope(text, request);
     const usage = parseUsage(responseObject, this.#pricing);
 
-    return {
-      type: 'final',
-      output: envelope.output,
-      turnSummary: envelope.turnSummary,
-      usage,
-    };
+    switch (envelope.action) {
+      case 'final':
+        return {
+          type: 'final',
+          output: envelope.output,
+          turnSummary: envelope.turnSummary,
+          usage,
+        };
+      case 'needs_parent_action':
+        return {
+          type: 'needs_parent_action',
+          requiredWork: envelope.requiredWork,
+          ...(envelope.partialOutput === undefined
+            ? {}
+            : { partialOutput: envelope.partialOutput }),
+          turnSummary: envelope.turnSummary,
+          usage,
+        };
+      case 'spawn_subagents':
+        return {
+          type: 'spawn_subagents',
+          children: envelope.children,
+          turnSummary: envelope.turnSummary,
+          usage,
+        };
+      case 'wait_for_async_work':
+        return {
+          type: 'wait_for_async_work',
+          turnSummary: envelope.turnSummary,
+          usage,
+        };
+      default: {
+        const exhaustiveAction: never = envelope;
+        throw new GeminiProviderError(
+          `Unhandled Gemini action: ${String(exhaustiveAction)}`,
+        );
+      }
+    }
   }
 
   private endpoint(): string {
@@ -185,7 +290,13 @@ export class GeminiModelProvider implements ModelProvider {
           {
             text: [
               'You are the model worker for OS-Agent-js.',
-              'Complete the current task directly and concisely.',
+              'Select exactly one action allowed by the response schema.',
+              'Use final when the task is complete.',
+              'Use spawn_subagents only when delegation.canSpawnSubagents is true and the goal explicitly requires delegation.',
+              'Use wait_for_async_work only when an async_work_update has unfinished pending work.',
+              'When async_work_update.allFinished is true, synthesize its results and normally return final.',
+              'Use needs_parent_action only when a child cannot proceed without parent work.',
+              'Keep outputs, child goals, and summaries concise.',
               request.summaryProtocol.instruction,
               'The response must follow the supplied JSON schema.',
             ].join(' '),
@@ -206,7 +317,7 @@ export class GeminiModelProvider implements ModelProvider {
         temperature: 0,
         maxOutputTokens: this.#maxOutputTokens,
         responseMimeType: 'application/json',
-        responseJsonSchema: FINAL_RESPONSE_JSON_SCHEMA,
+        responseJsonSchema: AGENT_RESPONSE_JSON_SCHEMA,
       },
     };
   }
@@ -217,6 +328,8 @@ export class GeminiModelProvider implements ModelProvider {
       goal: request.goal,
       attempt: request.attempt,
       context: request.context.map(serializeContextItem),
+      tools: request.tools,
+      delegation: request.delegation,
     };
     return JSON.stringify(prompt);
   }
@@ -282,7 +395,10 @@ function extractCandidateText(response: JsonObject): string {
   return text;
 }
 
-function parseFinalEnvelope(text: string): ParsedGeminiEnvelope {
+function parseAgentEnvelope(
+  text: string,
+  request: ModelRequest,
+): ParsedGeminiEnvelope {
   let parsed: JsonValue;
   try {
     parsed = JSON.parse(text) as JsonValue;
@@ -293,23 +409,125 @@ function parseFinalEnvelope(text: string): ParsedGeminiEnvelope {
   }
 
   const envelope = requireJsonObject(parsed, 'structured output');
+  const action = requireString(
+    envelope['action'],
+    'structured output.action',
+  );
   const summary = requireJsonObject(
     envelope['turnSummary'],
     'structured output.turnSummary',
   );
-  return {
-    output: requireString(envelope['output'], 'structured output.output'),
-    turnSummary: {
-      request: requireString(
-        summary['request'],
-        'structured output.turnSummary.request',
-      ),
-      outcome: requireString(
-        summary['outcome'],
-        'structured output.turnSummary.outcome',
-      ),
-    },
+  const turnSummary = {
+    request: requireString(
+      summary['request'],
+      'structured output.turnSummary.request',
+    ),
+    outcome: requireString(
+      summary['outcome'],
+      'structured output.turnSummary.outcome',
+    ),
   };
+
+  switch (action) {
+    case 'final':
+      return {
+        action,
+        output: requireString(
+          envelope['output'],
+          'structured output.output',
+        ),
+        turnSummary,
+      };
+    case 'needs_parent_action': {
+      const partialOutput = optionalString(
+        envelope['partialOutput'],
+        'structured output.partialOutput',
+      );
+      return {
+        action,
+        requiredWork: requireString(
+          envelope['requiredWork'],
+          'structured output.requiredWork',
+        ),
+        ...(partialOutput === undefined ? {} : { partialOutput }),
+        turnSummary,
+      };
+    }
+    case 'spawn_subagents':
+      if (!request.delegation.canSpawnSubagents) {
+        throw new GeminiProviderError(
+          'Gemini requested subagents when delegation is disabled.',
+        );
+      }
+      return {
+        action,
+        children: parseChildren(envelope['children']),
+        turnSummary,
+      };
+    case 'wait_for_async_work':
+      if (!hasPendingAsyncWork(request.context)) {
+        throw new GeminiProviderError(
+          'Gemini requested async waiting without pending work.',
+        );
+      }
+      return {
+        action,
+        turnSummary,
+      };
+    default:
+      throw new GeminiProviderError(
+        `Gemini returned unsupported action: ${action}`,
+      );
+  }
+}
+
+function parseChildren(
+  value: JsonValue | undefined,
+): SubagentSpawnRequest[] {
+  const children = requireJsonArray(value, 'structured output.children');
+  if (children.length === 0) {
+    throw new GeminiProviderError(
+      'structured output.children must not be empty.',
+    );
+  }
+  return children.map((child, index) => {
+    const path = `structured output.children[${index}]`;
+    const childObject = requireJsonObject(child, path);
+    const taskId = optionalString(childObject['taskId'], `${path}.taskId`);
+    const priority = optionalInteger(
+      childObject['priority'],
+      `${path}.priority`,
+    );
+    const capabilities = optionalStringArray(
+      childObject['capabilities'],
+      `${path}.capabilities`,
+    );
+    const maxModelAttempts = optionalPositiveInteger(
+      childObject['maxModelAttempts'],
+      `${path}.maxModelAttempts`,
+    );
+    const maxCostUsd = optionalNonNegativeNumberValue(
+      childObject['maxCostUsd'],
+      `${path}.maxCostUsd`,
+    );
+    return {
+      goal: requireString(childObject['goal'], `${path}.goal`),
+      ...(taskId === undefined ? {} : { taskId }),
+      ...(priority === undefined ? {} : { priority }),
+      ...(capabilities === undefined ? {} : { capabilities }),
+      ...(maxModelAttempts === undefined ? {} : { maxModelAttempts }),
+      ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
+    };
+  });
+}
+
+function hasPendingAsyncWork(context: readonly ContextItem[]): boolean {
+  return context.some(
+    (item) =>
+      item.type === 'async_work_update' &&
+      !item.allFinished &&
+      item.pending.length > 0,
+  );
 }
 
 function parseUsage(
@@ -375,6 +593,64 @@ function requireString(value: JsonValue | undefined, path: string): string {
     throw new GeminiProviderError(`${path} must be a string.`);
   }
   return value;
+}
+
+function optionalString(
+  value: JsonValue | undefined,
+  path: string,
+): string | undefined {
+  return value === undefined ? undefined : requireString(value, path);
+}
+
+function optionalInteger(
+  value: JsonValue | undefined,
+  path: string,
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw new GeminiProviderError(`${path} must be an integer.`);
+  }
+  return value;
+}
+
+function optionalPositiveInteger(
+  value: JsonValue | undefined,
+  path: string,
+): number | undefined {
+  const integer = optionalInteger(value, path);
+  if (integer !== undefined && integer <= 0) {
+    throw new GeminiProviderError(`${path} must be greater than zero.`);
+  }
+  return integer;
+}
+
+function optionalNonNegativeNumberValue(
+  value: JsonValue | undefined,
+  path: string,
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new GeminiProviderError(
+      `${path} must be a non-negative finite number.`,
+    );
+  }
+  return value;
+}
+
+function optionalStringArray(
+  value: JsonValue | undefined,
+  path: string,
+): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return requireJsonArray(value, path).map((item, index) =>
+    requireString(item, `${path}[${index}]`),
+  );
 }
 
 function optionalNonNegativeNumber(value: JsonValue | undefined): number {

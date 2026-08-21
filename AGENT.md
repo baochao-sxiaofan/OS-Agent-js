@@ -132,7 +132,7 @@ File Search 等成熟方案。
 
 ## 当前状态
 
-当前 `0.5.0` 内核已经实现：
+当前 `0.6.0` 内核已经实现：
 
 1. 任务状态、事件和合法状态转换规则。
 2. 可序列化的 `TaskControlBlock` 快照和只追加事件历史。
@@ -162,11 +162,15 @@ File Search 等成熟方案。
 26. 父任务终止时中止本地工具并递归取消存活子任务。
 27. 首个真实模型适配器 `GeminiModelProvider`，支持 HTTPS 请求、结构化 final
     响应、轮次摘要、Token 用量、取消信号和严格边界校验。
+28. Gemini 结构化子 Agent 委派、异步等待和父任务协助响应。
+29. Ready Queue、AgentPool 和 Provider 并发峰值观测指标。
+30. 16-Agent Map-Reduce 调度基准和真实 Gemini 三任务多 Agent 冒烟验证。
+31. 双通道上下文独立验证：完整历史与摘要分别持久化，模型只接收预算内混合上下文。
 
 后续优先级：
 
 1. 增加持久化数据库 Adapter、Agent 池快照，以及工具/外部进程重连执行器。
 2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-3. 为 Gemini Provider 增加 Function Calling、子 Agent 和异步工作响应映射。
+3. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。
 4. 增加其他真实模型 Provider Adapter。
 5. 增加真实模型厂商的 `ContextCompactor` Adapter。

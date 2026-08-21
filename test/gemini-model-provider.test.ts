@@ -42,6 +42,7 @@ describe('GeminiModelProvider', () => {
                 parts: [
                   {
                     text: JSON.stringify({
+                      action: 'final',
                       output: 'pong',
                       turnSummary: {
                         request: 'The user requested a pong response.',
@@ -118,7 +119,7 @@ describe('GeminiModelProvider', () => {
       responseMimeType: 'application/json',
     });
     expect(body.generationConfig?.responseJsonSchema?.required).toEqual([
-      'output',
+      'action',
       'turnSummary',
     ]);
   });
@@ -180,6 +181,7 @@ describe('GeminiModelProvider', () => {
                   parts: [
                     {
                       text: JSON.stringify({
+                        action: 'final',
                         output: 'pong',
                       }),
                     },
@@ -234,6 +236,7 @@ describe('GeminiModelProvider', () => {
                   parts: [
                     {
                       text: JSON.stringify({
+                        action: 'final',
                         output: 'pong',
                         turnSummary: {
                           request: 'The user requested pong.',
@@ -289,5 +292,156 @@ describe('GeminiModelProvider', () => {
         },
       },
     ]);
+  });
+
+  it('parses subagent requests and preserves hybrid context in the prompt', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () => {
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      action: 'spawn_subagents',
+                      children: [
+                        {
+                          taskId: 'leaf-a',
+                          goal: 'Return the square of 2.',
+                          maxModelAttempts: 1,
+                        },
+                        {
+                          taskId: 'leaf-b',
+                          goal: 'Return the square of 3.',
+                          maxModelAttempts: 1,
+                        },
+                      ],
+                      turnSummary: {
+                        request: 'Delegate two arithmetic checks.',
+                        outcome: 'Created two leaf tasks.',
+                      },
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    const provider = new GeminiModelProvider({
+      apiKey: 'test-api-key',
+      fetchImplementation,
+    });
+    const hybridRequest: ModelRequest = {
+      ...request,
+      context: [
+        {
+          type: 'context_summary',
+          request: 'Review the earlier requirements.',
+          outcome: 'The stable constraints were preserved.',
+        },
+        {
+          type: 'user',
+          content: 'Delegate two arithmetic checks.',
+        },
+      ],
+      delegation: {
+        canSpawnSubagents: true,
+        currentDepth: 1,
+        maxDepth: 2,
+        availableAgentSlots: 2,
+      },
+    };
+
+    const response = await provider.invoke(
+      hybridRequest,
+      new AbortController().signal,
+    );
+
+    expect(response).toMatchObject({
+      type: 'spawn_subagents',
+      children: [
+        {
+          taskId: 'leaf-a',
+          goal: 'Return the square of 2.',
+          maxModelAttempts: 1,
+        },
+        {
+          taskId: 'leaf-b',
+          goal: 'Return the square of 3.',
+          maxModelAttempts: 1,
+        },
+      ],
+    });
+
+    const [, init] = fetchImplementation.mock.calls[0] ?? [];
+    const body = JSON.parse(String(init?.body)) as {
+      contents?: Array<{
+        parts?: Array<{
+          text?: string;
+        }>;
+      }>;
+    };
+    const promptText = body.contents?.[0]?.parts?.[0]?.text;
+    const prompt = JSON.parse(promptText ?? '{}') as {
+      context?: Array<{ type?: string }>;
+      delegation?: {
+        canSpawnSubagents?: boolean;
+        availableAgentSlots?: number;
+      };
+    };
+    expect(prompt.context?.map((item) => item.type)).toEqual([
+      'context_summary',
+      'user',
+    ]);
+    expect(prompt.delegation).toEqual({
+      canSpawnSubagents: true,
+      currentDepth: 1,
+      maxDepth: 2,
+      availableAgentSlots: 2,
+    });
+  });
+
+  it('rejects a subagent action when delegation is disabled', async () => {
+    const provider = new GeminiModelProvider({
+      apiKey: 'test-api-key',
+      fetchImplementation: vi.fn<typeof fetch>(async () => {
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        action: 'spawn_subagents',
+                        children: [
+                          {
+                            taskId: 'forbidden-child',
+                            goal: 'This child must not be created.',
+                          },
+                        ],
+                        turnSummary: {
+                          request: 'Attempt an invalid delegation.',
+                          outcome: 'Requested a child.',
+                        },
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }),
+    });
+
+    await expect(
+      provider.invoke(request, new AbortController().signal),
+    ).rejects.toThrow('delegation is disabled');
   });
 });

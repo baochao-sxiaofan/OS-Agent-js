@@ -45,6 +45,21 @@ export type SchedulerRunResult = {
   stalled: boolean;
 };
 
+export type SchedulerMetricsSnapshot = {
+  readyQueue: {
+    current: number;
+    peak: number;
+  };
+  liveAgents: {
+    current: number;
+    peak: number;
+  };
+  providerRequests: {
+    active: number;
+    peakActive: number;
+  };
+};
+
 export type TaskSchedulerOptions = {
   provider: ModelProvider;
   admission: AdmissionController;
@@ -207,6 +222,23 @@ export class TaskScheduler {
 
   get liveAgentCount(): number {
     return this.#agentPool.liveCount;
+  }
+
+  get metrics(): SchedulerMetricsSnapshot {
+    return {
+      readyQueue: {
+        current: this.#readyQueue.size,
+        peak: this.#readyQueue.peakSize,
+      },
+      liveAgents: {
+        current: this.#agentPool.liveCount,
+        peak: this.#agentPool.peakLiveCount,
+      },
+      providerRequests: {
+        active: this.#admission.activeRequests,
+        peakActive: this.#admission.peakActiveRequests,
+      },
+    };
   }
 
   async submit(options: CreateTaskOptions): Promise<TaskControlBlock> {

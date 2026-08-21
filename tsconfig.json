@@ -22,6 +22,7 @@
     ]
   },
   "include": [
+    "bench/**/*.ts",
     "examples/**/*.ts",
     "src/**/*.ts",
     "test/**/*.ts"
