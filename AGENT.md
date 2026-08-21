@@ -128,7 +128,7 @@ File Search 等成熟方案。
 
 ## 当前状态
 
-当前 `0.3.0` 内核已经实现：
+当前 `0.3.1` 内核已经实现：
 
 1. 任务状态、事件和合法状态转换规则。
 2. 可序列化的 `TaskControlBlock` 快照和只追加事件历史。
@@ -149,11 +149,11 @@ File Search 等成熟方案。
 17. 早期摘要与近期原文混合上下文构造。
 18. 可替换的二次 `ContextCompactor` Adapter，并受 RPM、TPM、并发和预算控制。
 19. 压缩失败、压缩后仍超限和子任务预检失败的确定性终止/回传路径。
+20. 限流任务基于 `retryAt` 的自动唤醒（`run()`）与单任务完成 Promise（`waitForTermination()`）。
 
 后续优先级：
 
-1. 为处于 `READY` 的限流任务增加基于 `retryAt` 的自动唤醒。
-2. 增加持久化数据库 Adapter、Agent 池快照和进程崩溃恢复测试。
-3. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-4. 增加真实模型 Provider Adapter，并映射结构化摘要输出协议。
-5. 增加真实模型厂商的 `ContextCompactor` Adapter。
+1. 增加持久化数据库 Adapter、Agent 池快照和进程崩溃恢复测试。
+2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
+3. 增加真实模型 Provider Adapter，并映射结构化摘要输出协议。
+4. 增加真实模型厂商的 `ContextCompactor` Adapter。

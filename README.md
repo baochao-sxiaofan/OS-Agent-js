@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`0.3.0`
+当前版本：`0.3.1`
 
 ## 核心状态模型
 
@@ -157,6 +157,8 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 - 三级深度感知加权 Ready Queue
 - Aging 与父任务唤醒加速
 - RPM、TPM、并发额度和任务预算准入控制
+- 限流任务基于 `retryAt` 的自动唤醒（`run()`）
+- 单任务完成 Promise（`waitForTermination()`）
 - 入队前上下文窗口预检
 - 正常响应搭载结构化轮次摘要
 - 完整上下文与摘要上下文双通道快照
@@ -217,12 +219,11 @@ root -> middle -> leaf -> middle -> root
 
 ## 后续方向
 
-1. 为 RPM/TPM 配额增加自动唤醒定时器。
-2. 增加持久化数据库 Adapter、Agent 池快照和崩溃恢复测试。
-3. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-4. 增加真实 OpenAI Provider Adapter，并映射结构化轮次摘要协议。
-5. 增加 OpenAI Responses Compaction 等真实 `ContextCompactor` Adapter。
-6. 通过独立 Adapter 接入成熟的 RAG 方案。
+1. 增加持久化数据库 Adapter、Agent 池快照和崩溃恢复测试。
+2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
+3. 增加真实 OpenAI Provider Adapter，并映射结构化轮次摘要协议。
+4. 增加 OpenAI Responses Compaction 等真实 `ContextCompactor` Adapter。
+5. 通过独立 Adapter 接入成熟的 RAG 方案。
 
 完整的项目约束与设计规则见 [AGENT.md](./AGENT.md)，版本变更见
 [CHANGELOG.md](./CHANGELOG.md)。

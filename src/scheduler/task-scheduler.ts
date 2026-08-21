@@ -27,8 +27,10 @@ import { ToolNotFoundError, ToolRegistry } from '../tools/tool-registry.js';
 import type { Tool } from '../tools/tool.js';
 import {
   AdmissionController,
+  SystemClock,
   type AdmissionDecision,
   type AdmissionLease,
+  type Clock,
 } from './admission-controller.js';
 import {
   AgentPool,
@@ -51,6 +53,10 @@ export type TaskSchedulerOptions = {
   contextCompactor?: ContextCompactor;
   contextWindowPolicy?: ContextWindowPolicy;
   readyQueue?: ReadyQueue;
+  // 与准入控制共享的时钟，便于测试注入。
+  clock?: Clock;
+  // 自动唤醒时使用的等待实现，默认基于 setTimeout。
+  wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
 };
 
 export type SubagentSpawnFailureReason =
@@ -77,6 +83,43 @@ type PendingContextCompaction = {
   sourceEndIndex: number;
 };
 
+// 任务完成句柄：外部可以 await 单个任务的终止结果，而不必依赖整体 runUntilIdle。
+type CompletionDeferred = {
+  promise: Promise<Termination>;
+  resolve: (termination: Termination) => void;
+};
+
+function createCompletionDeferred(): CompletionDeferred {
+  let resolve!: (termination: Termination) => void;
+  const promise = new Promise<Termination>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+// 默认的等待实现：真实时钟下用 setTimeout；测试可注入以配合 ManualClock 保持确定性。
+function defaultWait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+}
+
+export type SchedulerRunOptions = {
+  signal?: AbortSignal;
+};
+
 export class TaskScheduler {
   readonly #provider: ModelProvider;
   readonly #admission: AdmissionController;
@@ -95,6 +138,12 @@ export class TaskScheduler {
   >();
   readonly #preparedContexts = new Map<string, readonly ContextItem[]>();
   readonly #spawningParents = new Set<string>();
+  // 每个任务的完成句柄：终止时 resolve，供 waitForTermination 使用。
+  readonly #completions = new Map<string, CompletionDeferred>();
+  readonly #clock: Clock;
+  readonly #wait: (ms: number, signal?: AbortSignal) => Promise<void>;
+  // 最近一次因限流被拒的最早可重试时刻，run() 用它决定休眠多久后自动唤醒。
+  #nextRetryAt: number | undefined;
   #operationSequence = 0;
 
   constructor(options: TaskSchedulerOptions) {
@@ -102,6 +151,8 @@ export class TaskScheduler {
     this.#admission = options.admission;
     this.#tools = options.tools;
     this.#store = options.store;
+    this.#clock = options.clock ?? new SystemClock();
+    this.#wait = options.wait ?? defaultWait;
     this.#contextCompactor = options.contextCompactor;
     this.#contextWindowManager = new ContextWindowManager(
       options.provider.contextWindowTokens,
@@ -137,6 +188,7 @@ export class TaskScheduler {
     this.#agentPool.registerRoot(task);
     this.#tasks.set(task.id, task);
     this.#abortControllers.set(task.id, new AbortController());
+    this.#ensureCompletion(task.id);
     await this.prepareTaskForQueue(task);
     await this.#store.persist(task);
     return task;
@@ -144,6 +196,25 @@ export class TaskScheduler {
 
   getTask(taskId: string): TaskControlBlock | undefined {
     return this.#tasks.get(taskId);
+  }
+
+  // 返回单个任务的完成 Promise。任务尚未终止时挂起，终止后 resolve 出终止结果；
+  // 已经终止的任务会立即 resolve，避免调用方永久等待。
+  waitForTermination(taskId: string): Promise<Termination> {
+    const task = this.#tasks.get(taskId);
+    if (task && task.state.status === 'TERMINATED') {
+      return Promise.resolve(task.state.termination);
+    }
+    return this.#ensureCompletion(taskId).promise;
+  }
+
+  #ensureCompletion(taskId: string): CompletionDeferred {
+    let completion = this.#completions.get(taskId);
+    if (!completion) {
+      completion = createCompletionDeferred();
+      this.#completions.set(taskId, completion);
+    }
+    return completion;
   }
 
   async spawnChildren(
@@ -219,6 +290,7 @@ export class TaskScheduler {
       for (const child of children) {
         this.#tasks.set(child.id, child);
         this.#abortControllers.set(child.id, new AbortController());
+        this.#ensureCompletion(child.id);
         parent.recordSubagentSpawned(child.id, child.depth);
         await this.#store.persist(child);
       }
@@ -258,6 +330,9 @@ export class TaskScheduler {
     this.#agentPool.registerRestored(task);
     this.#tasks.set(task.id, task);
     this.#abortControllers.set(task.id, new AbortController());
+    if (task.state.status !== 'TERMINATED') {
+      this.#ensureCompletion(task.id);
+    }
 
     if (task.state.status === 'RUNNING') {
       task.transition(
@@ -344,6 +419,27 @@ export class TaskScheduler {
     }
   }
 
+  // 在 runUntilIdle 的基础上增加自动唤醒：当任务仅因 RPM/TPM 限流而停滞时，
+  // 休眠到最早可重试时刻后重新调度，避免限流任务被静默挂起。
+  // 只有在没有任何未来重试时刻（真正无进展）时才返回。
+  async run(options: SchedulerRunOptions = {}): Promise<SchedulerRunResult> {
+    const { signal } = options;
+    while (true) {
+      signal?.throwIfAborted();
+      const result = await this.runUntilIdle();
+      if (!result.stalled) {
+        return result;
+      }
+      const retryAt = this.#nextRetryAt;
+      if (retryAt === undefined) {
+        return result;
+      }
+      this.#nextRetryAt = undefined;
+      const delay = Math.max(0, retryAt - this.#clock.now());
+      await this.#wait(delay, signal);
+    }
+  }
+
   private async scheduleReadyTasks(): Promise<boolean> {
     let madeProgress = false;
 
@@ -421,6 +517,13 @@ export class TaskScheduler {
         error: `Request admission failed: ${decision.reasons.join(', ')}`,
       });
       return;
+    }
+    // 记录最早可重试时刻，供后台 run() 在限流窗口结束后自动唤醒。
+    if (decision.retryAt !== undefined) {
+      this.#nextRetryAt =
+        this.#nextRetryAt === undefined
+          ? decision.retryAt
+          : Math.min(this.#nextRetryAt, decision.retryAt);
     }
     await this.#store.persist(task);
   }
@@ -690,6 +793,9 @@ export class TaskScheduler {
     this.#preparedContexts.delete(task.id);
     this.#agentPool.release(task.id);
     await this.#store.persist(task);
+    // 唤醒所有等待该任务完成的调用方，避免任务终止后 waitForTermination 永久挂起。
+    this.#completions.get(task.id)?.resolve(termination);
+    this.#completions.delete(task.id);
     await this.notifyParentOfTermination(task, termination);
   }
 

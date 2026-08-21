@@ -959,4 +959,92 @@ describe('TaskScheduler', () => {
       },
     });
   });
+
+  it('resolves waitForTermination with the task termination result', async () => {
+    const { provider, scheduler } = createRuntime();
+    const task = await scheduler.submit({
+      id: 'await-complete',
+      goal: 'Complete and notify the waiter.',
+    });
+    provider.setResponses(task.id, [
+      { type: 'final', output: 'done', usage },
+    ]);
+
+    const completion = scheduler.waitForTermination(task.id);
+    await scheduler.runUntilIdle();
+    const termination = await completion;
+
+    expect(termination).toMatchObject({
+      kind: 'completed',
+      output: 'done',
+    });
+  });
+
+  it('resolves waitForTermination immediately for an already-terminated task', async () => {
+    const { provider, scheduler } = createRuntime();
+    const task = await scheduler.submit({
+      id: 'await-late',
+      goal: 'Complete before anyone waits.',
+    });
+    provider.setResponses(task.id, [
+      { type: 'final', output: 'already done', usage },
+    ]);
+
+    await scheduler.runUntilIdle();
+    const termination = await scheduler.waitForTermination(task.id);
+
+    expect(termination).toMatchObject({
+      kind: 'completed',
+      output: 'already done',
+    });
+  });
+
+  it('auto-wakes a rate-limited task after the retry window without external driving', async () => {
+    const clock = new ManualClock();
+    const provider = new FakeModelProvider();
+    const admission = new AdmissionController(
+      {
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 1,
+        tokensPerMinute: 20_000,
+      },
+      clock,
+    );
+    // 注入受控 wait：不真正休眠，只把时钟推进到重试窗口之后，保持测试确定性。
+    const waits: number[] = [];
+    const scheduler = new TaskScheduler({
+      provider,
+      tools: new ToolRegistry(),
+      store: new InMemoryTaskStore(),
+      admission,
+      clock,
+      wait: async (ms) => {
+        waits.push(ms);
+        clock.advance(ms);
+      },
+    });
+    const first = await scheduler.submit({
+      id: 'rate-first',
+      goal: 'First task.',
+      priority: 2,
+    });
+    const second = await scheduler.submit({
+      id: 'rate-second',
+      goal: 'Second task.',
+      priority: 1,
+    });
+    provider.setResponses(first.id, [
+      { type: 'final', output: 'first done', usage },
+    ]);
+    provider.setResponses(second.id, [
+      { type: 'final', output: 'second done', usage },
+    ]);
+
+    const result = await scheduler.run();
+
+    expect(first.state.status).toBe('TERMINATED');
+    expect(second.state.status).toBe('TERMINATED');
+    expect(result.stalled).toBe(false);
+    expect(waits.length).toBeGreaterThan(0);
+  });
 });

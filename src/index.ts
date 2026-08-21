@@ -83,6 +83,7 @@ export {
 } from './scheduler/ready-queue.js';
 export {
   TaskScheduler,
+  type SchedulerRunOptions,
   type SchedulerRunResult,
   type SpawnChildrenResult,
   type SubagentSpawnFailureReason,
