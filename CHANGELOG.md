@@ -2,6 +2,27 @@
 
 本项目使用语义化版本号。
 
+## 0.5.0 - 2026-08-21
+
+### 新增
+
+- 新增首个真实模型适配器 `GeminiModelProvider`，通过 Gemini
+  `generateContent` REST API 发出 HTTPS 请求。
+- 新增 Gemini 结构化输出约束，要求模型返回 `output` 和
+  `turnSummary.request/outcome`，并转换为内核 `final` 响应。
+- 新增 HTTP 状态、非 JSON 响应、候选结果缺失和结构化字段错误的边界校验。
+- 新增 Gemini Token 用量解析、可配置价格估算、取消信号透传和可注入 `fetch`
+  实现。
+- 新增 `demo:gemini` 最小真实网络示例，仅从 `GEMINI_API_KEY` 环境变量读取凭据。
+- 新增 Provider HTTP 单元测试和调度器集成测试。
+
+### 当前边界
+
+- 当前 Gemini Adapter 仅支持结构化 `final` 响应。
+- Gemini 原生 Function Calling、工具调用、子 Agent 委派和上下文二次压缩适配器
+  尚未接入。
+- API Key 不进入源码、示例默认值、测试快照或 Git 仓库。
+
 ## 0.4.0 - 2026-08-21
 
 ### 新增

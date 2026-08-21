@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`0.4.0`
+当前版本：`0.5.0`
 
 ## 核心状态模型
 
@@ -215,6 +215,8 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 - 可替换的二次 `ContextCompactor` Adapter
 - 与模型服务商无关的 `ModelProvider`
 - 行为确定的 `FakeModelProvider`
+- 通过 HTTPS 调用 Gemini 的 `GeminiModelProvider`
+- Gemini 结构化 final 响应和轮次摘要
 - 子任务创建、阻塞、结果回传和父任务唤醒
 - Capability 驱动的工具权限控制
 - 工具阻塞与事件唤醒
@@ -257,9 +259,37 @@ READY -> RUNNING -> BLOCKED -> READY -> RUNNING -> TERMINATED
 root -> middle -> leaf -> middle -> root
 ```
 
+### 最小 Gemini 网络验证
+
+Gemini API Key 只通过当前终端的环境变量传入，不写入仓库：
+
+```bash
+export GEMINI_API_KEY="your-key"
+npm run demo:gemini
+```
+
+可选指定模型：
+
+```bash
+export GEMINI_MODEL="gemini-3.5-flash-lite"
+```
+
+该示例只提交一句极短任务，并要求 Gemini 返回严格 JSON：
+
+```json
+{
+  "output": "pong",
+  "turnSummary": {
+    "request": "一句话需求摘要",
+    "outcome": "一句话结果摘要"
+  }
+}
+```
+
 ## 当前边界
 
-- 模型仍使用 Fake Provider，尚未连接真实 LLM。
+- Gemini Provider 已支持真实 HTTPS 请求和结构化 final 响应，但尚未接入 Gemini
+  原生 Function Calling、子 Agent 委派响应和真实上下文压缩。
 - Agent 池与任务存储仍为单进程内存实现。
 - Agent 池运行态计数尚未持久化，数据库恢复将在后续版本实现。
 - Work Table 和 timer deadline 可以从快照恢复，但进程退出后，内存中的工具 Promise
@@ -272,9 +302,10 @@ root -> middle -> leaf -> middle -> root
 
 1. 增加持久化数据库 Adapter、Agent 池快照和崩溃恢复测试。
 2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-3. 增加真实 OpenAI Provider Adapter，并映射结构化轮次摘要协议。
-4. 增加 OpenAI Responses Compaction 等真实 `ContextCompactor` Adapter。
-5. 通过独立 Adapter 接入成熟的 RAG 方案。
+3. 为 Gemini Provider 增加 Function Calling 与异步工作响应映射。
+4. 增加其他真实模型 Provider Adapter。
+5. 增加真实 `ContextCompactor` Adapter。
+6. 通过独立 Adapter 接入成熟的 RAG 方案。
 
 完整的项目约束与设计规则见 [AGENT.md](./AGENT.md)，版本变更见
 [CHANGELOG.md](./CHANGELOG.md)。

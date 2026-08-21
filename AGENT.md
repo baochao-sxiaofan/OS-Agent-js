@@ -132,7 +132,7 @@ File Search 等成熟方案。
 
 ## 当前状态
 
-当前 `0.4.0` 内核已经实现：
+当前 `0.5.0` 内核已经实现：
 
 1. 任务状态、事件和合法状态转换规则。
 2. 可序列化的 `TaskControlBlock` 快照和只追加事件历史。
@@ -160,10 +160,13 @@ File Search 等成熟方案。
 24. `async_work_update` 部分结果、pending 工作和 `wait_for_async_work` 继续等待协议。
 25. 父模型运行期间的结果合并、父任务级异步状态串行化和 timer 恢复补偿。
 26. 父任务终止时中止本地工具并递归取消存活子任务。
+27. 首个真实模型适配器 `GeminiModelProvider`，支持 HTTPS 请求、结构化 final
+    响应、轮次摘要、Token 用量、取消信号和严格边界校验。
 
 后续优先级：
 
 1. 增加持久化数据库 Adapter、Agent 池快照，以及工具/外部进程重连执行器。
 2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-3. 增加真实模型 Provider Adapter，并映射结构化摘要输出协议。
-4. 增加真实模型厂商的 `ContextCompactor` Adapter。
+3. 为 Gemini Provider 增加 Function Calling、子 Agent 和异步工作响应映射。
+4. 增加其他真实模型 Provider Adapter。
+5. 增加真实模型厂商的 `ContextCompactor` Adapter。

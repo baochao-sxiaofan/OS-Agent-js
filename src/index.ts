@@ -55,6 +55,12 @@ export {
   FakeModelProvider,
   type FakeModelProviderOptions,
 } from './model/fake-model-provider.js';
+export {
+  GeminiModelProvider,
+  GeminiProviderError,
+  type GeminiModelProviderOptions,
+  type GeminiPricing,
+} from './model/gemini-model-provider.js';
 export type {
   ModelProvider,
   ModelRequest,
