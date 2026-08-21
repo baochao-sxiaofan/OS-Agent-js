@@ -52,9 +52,19 @@ export type {
   Termination,
 } from './kernel/task-state.js';
 export {
+  AnthropicModelProvider,
+  AnthropicProviderError,
+  type AnthropicModelProviderOptions,
+} from './model/anthropic-model-provider.js';
+export {
   FakeModelProvider,
   type FakeModelProviderOptions,
 } from './model/fake-model-provider.js';
+export {
+  OpenAiCompatibleModelProvider,
+  OpenAiCompatibleProviderError,
+  type OpenAiCompatibleModelProviderOptions,
+} from './model/openai-compatible-model-provider.js';
 export {
   GeminiModelProvider,
   GeminiProviderError,

@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`0.6.0`
+当前版本：`1.0.0`
 
 ## 核心状态模型
 
@@ -216,12 +216,19 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 - 与模型服务商无关的 `ModelProvider`
 - 行为确定的 `FakeModelProvider`
 - 通过 HTTPS 调用 Gemini 的 `GeminiModelProvider`
+- 支持 Claude 的 `AnthropicModelProvider`
+- 支持 OpenAI-compatible 协议的通用 Provider
+- 账号级模型目录发现与运行时协议验证
+- OpenAI、Claude、Gemini、Kimi、Grok、MiniMax、GLM、DeepSeek、Qwen、
+  豆包和 Xiaomi MiMo 配置入口
 - Gemini 结构化 final、子 Agent 委派、异步等待、父任务协助响应和轮次摘要
 - 子任务创建、阻塞、结果回传和父任务唤醒
 - Capability 驱动的工具权限控制
 - 工具阻塞与事件唤醒
 - 任务快照和只追加事件历史
 - 单进程内存存储实现
+- Electron 桌面控制台与 Windows NSIS 安装包
+- Conversation 多轮对话和按轮次查看 Agent 工程拓扑
 
 ## 目录
 
@@ -234,6 +241,12 @@ src/
 ├── scheduler/    # Agent 池、分层 Ready Queue、准入控制和调度器
 ├── tools/        # 工具与 Capability 边界
 └── types/        # 通用数据类型
+
+desktop/
+├── main/         # Electron 主进程与 Runtime Service
+├── preload/      # 隔离的 IPC 白名单桥接
+├── renderer/     # React Agent 拓扑控制台
+└── shared/       # 主进程与渲染进程共享的数据契约
 ```
 
 ## 本地验证
@@ -259,6 +272,47 @@ READY -> RUNNING -> BLOCKED -> READY -> RUNNING -> TERMINATED
 ```text
 root -> middle -> leaf -> middle -> root
 ```
+
+### 桌面拓扑控制台
+
+桌面端以 Agent 拓扑而不是聊天消息作为主界面。没有任务时显示任务入口；任务运行后，
+根 Agent、子 Agent、状态和连接关系会根据 `TaskSnapshot` 实时更新。点击任意节点可
+查看该 Agent 的状态、Token、预算和事件历史。右上角可在对话流和 Agent 工程视图间
+切换；根任务完成后自动进入对话流，工程视图仍保留拓扑，并可在同一 Conversation 中
+发起下一轮任务。对话流底部也可以直接提交新任务；每轮回复都带有对应的工程图入口，
+可以在历史轮次之间独立查看各自的 Agent 执行拓扑。
+
+本地启动：
+
+```bash
+npm run desktop:dev
+```
+
+没有配置模型时，桌面端使用带网络延迟模拟的 `FakeModelProvider`，用于演示三级
+Agent 拓扑和完整状态迁移。点击左侧“模型与 API”，按以下顺序配置真实模型：
+
+```text
+选择模型厂商
+-> 填写 API Key 和厂商要求的附加参数
+-> 获取当前账号可用模型
+-> 选择模型并执行 OS-Agent 结构化协议验证
+```
+
+OpenAI、Claude、Gemini、Kimi、Grok、MiniMax、DeepSeek、Qwen 和 Xiaomi MiMo
+支持在线发现模型。GLM 和豆包因账号模型目录使用不同的管理鉴权体系，当前提供手工
+模型 ID 入口。API Key 只通过受控 IPC 进入 Electron 主进程；系统安全存储可用时加密
+保存，否则只保留在当前进程内存中。密钥不会进入任务上下文、事件日志或 URL。
+
+桌面生产构建：
+
+```bash
+npm run desktop:check
+npm run desktop:build
+```
+
+推送到 `main` 后，`.github/workflows/windows-desktop.yml` 会在 Windows Runner 上
+执行检查和测试，并生成 `OS-Agent-Setup-1.0.0-x64.exe`。也可以在 GitHub Actions
+页面手动触发该工作流。
 
 ### 最小 Gemini 网络验证
 
@@ -322,8 +376,11 @@ npm run benchmark:multi-agent
 
 ## 当前边界
 
-- Gemini Provider 已支持真实 HTTPS、结构化 final、子 Agent 委派、异步等待和
-  `needs_parent_action`，但尚未接入 Gemini 原生 Function Calling 和真实上下文压缩。
+- Gemini、Anthropic 和 OpenAI-compatible Provider 已支持真实 HTTPS 与 OS-Agent
+  结构化协议；不同厂商对 JSON Mode、模型目录和参数的兼容程度仍由保存时的真实请求
+  验证。
+- GLM 和豆包当前使用手工模型 ID；Qwen 模型目录需要华北 2 业务空间 ID。
+- 模型配置切换仅影响后续任务，存在活动 Agent 时禁止切换 Provider。
 - Agent 池与任务存储仍为单进程内存实现。
 - Agent 池运行态计数尚未持久化，数据库恢复将在后续版本实现。
 - Work Table 和 timer deadline 可以从快照恢复，但进程退出后，内存中的工具 Promise
@@ -336,8 +393,8 @@ npm run benchmark:multi-agent
 
 1. 增加持久化数据库 Adapter、Agent 池快照和崩溃恢复测试。
 2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-3. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。
-4. 增加其他真实模型 Provider Adapter。
+3. 增加 Provider 级能力探测和更细粒度的模型兼容性矩阵。
+4. 为更多非 OpenAI-compatible 厂商协议增加原生 Adapter。
 5. 增加真实 `ContextCompactor` Adapter。
 6. 通过独立 Adapter 接入成熟的 RAG 方案。
 

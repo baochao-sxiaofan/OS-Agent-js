@@ -1,5 +1,8 @@
 node_modules/
 dist/
+out/
+release/
+.desktop-runtime/
 coverage/
 .DS_Store
 .env

@@ -2,6 +2,52 @@
 
 本项目使用语义化版本号。
 
+## 1.0.0 - 2026-08-22
+
+首个可实际使用的桌面正式版本。
+
+### 桌面应用
+
+- 新增 Electron + React 桌面控制台，支持 macOS 本地开发预览和 Windows x64
+  NSIS 安装包。
+- 新增 Conversation 侧栏、对话流与 Agent 工程拓扑双视图。
+- 新增多轮 Conversation；每轮保存独立根任务和完整 Agent 拓扑，可从对应回复跳转
+  查看历史轮次工程图。
+- 新增任务入口动态光球、节点状态检查器、运行指标和 AgentPool 剩余容量仪表。
+- Agent 阻塞时保持尺寸并切换为灰色；恢复运行后变回黑色；完成后短暂变绿并收回
+  父节点，根任务最终展开结果。
+- 根任务完成后自动切换到对话流；对话流和工程视图均可发起下一轮任务。
+
+### 模型接入
+
+- 新增统一结构化 Agent 响应解析器。
+- 新增原生 `AnthropicModelProvider`。
+- 新增 `OpenAiCompatibleModelProvider`，覆盖 OpenAI、Kimi、Grok、MiniMax、GLM、
+  DeepSeek、Qwen、豆包和 Xiaomi MiMo 等兼容端点。
+- 新增 11 家厂商配置入口。OpenAI、Claude、Gemini、Kimi、Grok、MiniMax、
+  DeepSeek、Qwen 和 MiMo 支持账号级模型目录发现；GLM 和豆包提供手工模型 ID
+  兜底。
+- 模型设置采用“选择厂商 -> 填写凭据 -> 获取模型列表 -> 选择并验证”流程。
+- 选中的模型必须通过一次低成本 OS-Agent 结构化协议请求后才会启用。
+- 模型切换通过稳定 Provider 代理完成，运行中的 Agent 不允许切换模型。
+
+### 安全与工程化
+
+- API Key 只通过受控 IPC 进入 Electron 主进程，不进入 Renderer 快照、任务上下文、
+  事件日志或 URL。
+- 系统安全存储可用时使用 Electron `safeStorage` 加密保存；不可用时只保留在当前
+  进程内存中。
+- 新增 Provider Header 鉴权和结构化响应解析测试。
+- 新增 Windows GitHub Actions，自动执行类型检查、测试并上传 NSIS 安装包。
+
+### 验证
+
+- TypeScript 内核与桌面端类型检查通过。
+- 7 个测试文件、45 个测试全部通过。
+- Electron 空态、运行态、阻塞/恢复、完成回收、双视图、多轮对话及历史拓扑跳转
+  已完成实际渲染验证。
+- Windows x64 NSIS 安装包可从 macOS 跨平台构建。
+
 ## 0.6.0 - 2026-08-21
 
 ### 新增

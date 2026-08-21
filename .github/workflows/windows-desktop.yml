@@ -1,0 +1,48 @@
+name: Windows Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/windows-desktop.yml"
+      - "desktop/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify runtime and desktop
+        run: |
+          npm run check
+          npm run desktop:check
+          npm test
+
+      - name: Package Windows installer
+        run: npm run desktop:dist:win
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: os-agent-windows-x64
+          path: desktop/release/OS-Agent-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 14
