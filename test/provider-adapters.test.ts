@@ -16,9 +16,6 @@ const request: ModelRequest = {
   summaryProtocol: TURN_SUMMARY_PROTOCOL,
   delegation: {
     canSpawnSubagents: false,
-    currentDepth: 1,
-    maxDepth: 3,
-    availableAgentSlots: 19,
   },
 };
 

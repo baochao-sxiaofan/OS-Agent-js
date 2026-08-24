@@ -239,7 +239,6 @@ export type AgentNodeView = {
   stateLabel: string;
   stateDetail?: string;
   result?: string;
-  priority: number;
   capabilities: string[];
   modelAttempts: number;
   maxModelAttempts: number;

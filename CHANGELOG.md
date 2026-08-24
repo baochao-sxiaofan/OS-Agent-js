@@ -2,6 +2,32 @@
 
 本项目使用语义化版本号。
 
+## 1.1.0 - 2026-08-24
+
+### 变更
+
+- 统一子 Agent 创建入口为 `TaskControlBlock.createAgent(request, origin)`：`depth`、
+  `createdAt`、`rootTaskId`、`parentTaskId` 与初始状态全部由内核依据创建来源派生，
+  调用方无法再伪造层级或血缘。
+- 移除模型可控的任务 `priority`；同一深度的就绪任务改为纯 FIFO 调度，深度权重、
+  等待老化与父任务唤醒加速保持不变。
+- 模型请求的 `delegation` 只保留 `canSpawnSubagents`，不再暴露 `currentDepth`、
+  `maxDepth` 和 `availableAgentSlots`，落实每层 Agent 对全局深度无感知。
+
+### 并发与可靠性
+
+- 重构子 Agent 创建流程为「同步准入临界区 + 异步发送」两段：AgentPool 扣减、
+  Work Table 登记与预留提交在无 `await` 的同步段内原子完成，据此移除
+  `spawn_in_progress` 锁及其拒绝原因。
+- 子 Agent 发送（持久化并入队）失败时，自动把已占用的 live 槽位释放回 AgentPool，
+  清理登记，并向父任务回传失败结果以唤醒其重新规划，避免父任务永久等待。
+- 快照恢复时校验 `depth` 与父子关系的一致性，防止非法层级进入运行时。
+
+### 验证
+
+- 内核与桌面端 TypeScript 类型检查通过。
+- 7 个测试文件、47 个测试全部通过，新增并发创建不超卖与发送失败回滚槽位的用例。
+
 ## 1.0.0 - 2026-08-22
 
 首个可实际使用的桌面正式版本。

@@ -9,10 +9,13 @@ describe('AgentPool', () => {
       maxLiveAgents: 1,
       maxSpawnedPerRoot: 10,
     });
-    const root = TaskControlBlock.create({
-      id: 'root',
-      goal: 'Coordinate.',
-    });
+    const root = TaskControlBlock.createAgent(
+      {
+        id: 'root',
+        goal: 'Coordinate.',
+      },
+      { kind: 'root' },
+    );
     pool.registerRoot(root);
 
     const decision = pool.tryReserveChildren(root, 1);
@@ -32,10 +35,13 @@ describe('AgentPool', () => {
       maxLiveAgents: 20,
       maxSpawnedPerRoot: 10,
     });
-    const root = TaskControlBlock.create({
-      id: 'root',
-      goal: 'Coordinate.',
-    });
+    const root = TaskControlBlock.createAgent(
+      {
+        id: 'root',
+        goal: 'Coordinate.',
+      },
+      { kind: 'root' },
+    );
     pool.registerRoot(root);
 
     const middleReservation = pool.tryReserveChildren(root, 1);
@@ -43,10 +49,13 @@ describe('AgentPool', () => {
     if (!middleReservation.reserved) {
       return;
     }
-    const middle = TaskControlBlock.createChild(root, {
-      id: 'middle',
-      goal: 'Coordinate a branch.',
-    });
+    const middle = TaskControlBlock.createAgent(
+      {
+        id: 'middle',
+        goal: 'Coordinate a branch.',
+      },
+      { kind: 'child', parent: root },
+    );
     middleReservation.reservation.commit([middle]);
 
     const leafReservation = pool.tryReserveChildren(middle, 1);
@@ -54,10 +63,13 @@ describe('AgentPool', () => {
     if (!leafReservation.reserved) {
       return;
     }
-    const leaf = TaskControlBlock.createChild(middle, {
-      id: 'leaf',
-      goal: 'Do concrete work.',
-    });
+    const leaf = TaskControlBlock.createAgent(
+      {
+        id: 'leaf',
+        goal: 'Do concrete work.',
+      },
+      { kind: 'child', parent: middle },
+    );
     leafReservation.reservation.commit([leaf]);
 
     expect(pool.liveCount).toBe(3);
@@ -74,10 +86,13 @@ describe('AgentPool', () => {
       maxLiveAgents: 2,
       maxSpawnedPerRoot: 1,
     });
-    const root = TaskControlBlock.create({
-      id: 'root',
-      goal: 'Coordinate.',
-    });
+    const root = TaskControlBlock.createAgent(
+      {
+        id: 'root',
+        goal: 'Coordinate.',
+      },
+      { kind: 'root' },
+    );
     pool.registerRoot(root);
 
     const firstDecision = pool.tryReserveChildren(root, 1);
@@ -85,10 +100,13 @@ describe('AgentPool', () => {
     if (!firstDecision.reserved) {
       return;
     }
-    const child = TaskControlBlock.createChild(root, {
-      id: 'first-child',
-      goal: 'Complete one task.',
-    });
+    const child = TaskControlBlock.createAgent(
+      {
+        id: 'first-child',
+        goal: 'Complete one task.',
+      },
+      { kind: 'child', parent: root },
+    );
     firstDecision.reservation.commit([child]);
     pool.release(child.id);
 

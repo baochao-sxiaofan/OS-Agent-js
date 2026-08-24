@@ -34,9 +34,10 @@ export {
   type ContextWindowPolicy,
 } from './context/context-window-manager.js';
 export {
+  MAX_AGENT_DEPTH,
   TaskControlBlock,
-  type CreateChildTaskOptions,
-  type CreateTaskOptions,
+  type AgentCreationOrigin,
+  type CreateAgentRequest,
   type TaskBudget,
   type TaskSnapshot,
 } from './kernel/task-control-block.js';

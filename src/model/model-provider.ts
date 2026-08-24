@@ -65,7 +65,6 @@ export type ModelUsage = {
 export type SubagentSpawnRequest = {
   taskId?: string;
   goal: string;
-  priority?: number;
   capabilities?: string[];
   context?: ContextItem[];
   maxModelAttempts?: number;
@@ -120,9 +119,6 @@ export type ModelRequest = {
   summaryProtocol: TurnSummaryProtocol;
   delegation: {
     canSpawnSubagents: boolean;
-    currentDepth: number;
-    maxDepth: number;
-    availableAgentSlots: number;
   };
 };
 

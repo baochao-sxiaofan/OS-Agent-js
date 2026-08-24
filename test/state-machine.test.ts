@@ -6,12 +6,71 @@ import {
 } from '../src/index.js';
 
 describe('TaskControlBlock state machine', () => {
-  it('allows the canonical agent lifecycle', () => {
-    const task = TaskControlBlock.create({
-      id: 'lifecycle-task',
-      goal: 'Exercise the state machine.',
-      createdAt: 1,
+  it('derives lineage, depth, and creation time through one Agent factory', () => {
+    const root = TaskControlBlock.createAgent(
+      {
+        id: 'root',
+        goal: 'Coordinate the task tree.',
+      },
+      { kind: 'root' },
+      100,
+    );
+    const middle = TaskControlBlock.createAgent(
+      {
+        id: 'middle',
+        goal: 'Coordinate one branch.',
+      },
+      { kind: 'child', parent: root },
+      200,
+    );
+    const leaf = TaskControlBlock.createAgent(
+      {
+        id: 'leaf',
+        goal: 'Complete concrete work.',
+      },
+      { kind: 'child', parent: middle },
+      300,
+    );
+
+    expect(root).toMatchObject({
+      rootTaskId: 'root',
+      parentTaskId: undefined,
+      depth: 1,
+      createdAt: 100,
     });
+    expect(middle).toMatchObject({
+      rootTaskId: 'root',
+      parentTaskId: 'root',
+      depth: 2,
+      createdAt: 200,
+    });
+    expect(leaf).toMatchObject({
+      rootTaskId: 'root',
+      parentTaskId: 'middle',
+      depth: 3,
+      createdAt: 300,
+    });
+    expect(() =>
+      TaskControlBlock.createAgent(
+        {
+          id: 'too-deep',
+          goal: 'Attempt an invalid fourth level.',
+        },
+        { kind: 'child', parent: leaf },
+        400,
+      ),
+    ).toThrow('Cannot create an Agent deeper than 3 levels.');
+  });
+
+  it('allows the canonical agent lifecycle', () => {
+    const task = TaskControlBlock.createAgent(
+      {
+        id: 'lifecycle-task',
+        goal: 'Exercise the state machine.',
+      },
+      { kind: 'root' },
+      1,
+    );
 
     task.transition(
       {
@@ -75,10 +134,13 @@ describe('TaskControlBlock state machine', () => {
   });
 
   it('rejects transitions that bypass the scheduler lifecycle', () => {
-    const task = TaskControlBlock.create({
-      id: 'invalid-task',
-      goal: 'Attempt an invalid transition.',
-    });
+    const task = TaskControlBlock.createAgent(
+      {
+        id: 'invalid-task',
+        goal: 'Attempt an invalid transition.',
+      },
+      { kind: 'root' },
+    );
 
     expect(() =>
       task.transition(
@@ -94,12 +156,15 @@ describe('TaskControlBlock state machine', () => {
   });
 
   it('creates a detached snapshot that can be restored', () => {
-    const task = TaskControlBlock.create({
-      id: 'snapshot-task',
-      goal: 'Persist state.',
-      capabilities: ['resource:read'],
-      context: [{ type: 'user', content: 'Persist this.' }],
-    });
+    const task = TaskControlBlock.createAgent(
+      {
+        id: 'snapshot-task',
+        goal: 'Persist state.',
+        capabilities: ['resource:read'],
+        context: [{ type: 'user', content: 'Persist this.' }],
+      },
+      { kind: 'root' },
+    );
     task.completeModelTurn({
       request: 'Persist the task context.',
       outcome: 'The context was persisted.',

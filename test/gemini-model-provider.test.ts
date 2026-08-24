@@ -25,9 +25,6 @@ const request: ModelRequest = {
   summaryProtocol: TURN_SUMMARY_PROTOCOL,
   delegation: {
     canSpawnSubagents: false,
-    currentDepth: 0,
-    maxDepth: 3,
-    availableAgentSlots: 0,
   },
 };
 
@@ -350,9 +347,6 @@ describe('GeminiModelProvider', () => {
       ],
       delegation: {
         canSpawnSubagents: true,
-        currentDepth: 1,
-        maxDepth: 2,
-        availableAgentSlots: 2,
       },
     };
 
@@ -390,7 +384,6 @@ describe('GeminiModelProvider', () => {
       context?: Array<{ type?: string }>;
       delegation?: {
         canSpawnSubagents?: boolean;
-        availableAgentSlots?: number;
       };
     };
     expect(prompt.context?.map((item) => item.type)).toEqual([
@@ -399,9 +392,6 @@ describe('GeminiModelProvider', () => {
     ]);
     expect(prompt.delegation).toEqual({
       canSpawnSubagents: true,
-      currentDepth: 1,
-      maxDepth: 2,
-      availableAgentSlots: 2,
     });
   });
 

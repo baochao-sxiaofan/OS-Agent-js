@@ -1,4 +1,7 @@
-import type { TaskControlBlock } from '../kernel/task-control-block.js';
+import {
+  MAX_AGENT_DEPTH,
+  type TaskControlBlock,
+} from '../kernel/task-control-block.js';
 
 export type AgentPoolPolicy = {
   maxDepth: number;
@@ -71,12 +74,12 @@ export class AgentPool {
       !Number.isInteger(policy.maxLiveAgents) ||
       !Number.isInteger(policy.maxSpawnedPerRoot) ||
       policy.maxDepth <= 0 ||
-      policy.maxDepth > 3 ||
+      policy.maxDepth > MAX_AGENT_DEPTH ||
       policy.maxLiveAgents <= 0 ||
       policy.maxSpawnedPerRoot < 0
     ) {
       throw new Error(
-        'Agent pool limits must be valid integers and maxDepth must be between 1 and 3.',
+        `Agent pool limits must be valid integers and maxDepth must be between 1 and ${MAX_AGENT_DEPTH}.`,
       );
     }
   }

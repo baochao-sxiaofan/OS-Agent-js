@@ -135,32 +135,30 @@ describe('TaskScheduler', () => {
     ]);
   });
 
-  it('dispatches higher-priority ready tasks first', async () => {
+  it('dispatches same-depth ready tasks in FIFO order', async () => {
     const { provider, scheduler } = createRuntime({
       maxConcurrentRequests: 1,
     });
-    const lowPriority = await scheduler.submit({
-      id: 'low',
-      goal: 'Low priority task.',
-      priority: 1,
+    const first = await scheduler.submit({
+      id: 'first',
+      goal: 'First submitted task.',
     });
-    const highPriority = await scheduler.submit({
-      id: 'high',
-      goal: 'High priority task.',
-      priority: 10,
+    const second = await scheduler.submit({
+      id: 'second',
+      goal: 'Second submitted task.',
     });
-    provider.setResponses(lowPriority.id, [
-      { type: 'final', output: 'low done', usage },
+    provider.setResponses(first.id, [
+      { type: 'final', output: 'first done', usage },
     ]);
-    provider.setResponses(highPriority.id, [
-      { type: 'final', output: 'high done', usage },
+    provider.setResponses(second.id, [
+      { type: 'final', output: 'second done', usage },
     ]);
 
     await scheduler.runUntilIdle();
 
     expect(provider.requests.map((request) => request.taskId)).toEqual([
-      'high',
-      'low',
+      'first',
+      'second',
     ]);
   });
 
@@ -173,12 +171,10 @@ describe('TaskScheduler', () => {
     const first = await scheduler.submit({
       id: 'first',
       goal: 'First task.',
-      priority: 2,
     });
     const second = await scheduler.submit({
       id: 'second',
       goal: 'Second task.',
-      priority: 1,
     });
     provider.setResponses(first.id, [
       { type: 'final', output: 'first done', usage },
@@ -555,26 +551,11 @@ describe('TaskScheduler', () => {
     ).toBe(true);
   });
 
-  it('serializes concurrent spawn attempts for one parent', async () => {
-    const backingStore = new InMemoryTaskStore();
-    let releaseChildPersistence: (() => void) | undefined;
-    const childPersistenceGate = new Promise<void>((resolve) => {
-      releaseChildPersistence = resolve;
-    });
-    const store: TaskStore = {
-      persist: async (task) => {
-        if (task.parentTaskId !== undefined) {
-          await childPersistenceGate;
-        }
-        await backingStore.persist(task);
-      },
-      load: async (taskId) => await backingStore.load(taskId),
-      events: async (taskId) => await backingStore.events(taskId),
-    };
+  it('admits concurrent spawns for one parent without a lock', async () => {
     const scheduler = new TaskScheduler({
       provider: new FakeModelProvider(),
       tools: new ToolRegistry(),
-      store,
+      store: new InMemoryTaskStore(),
       admission: new AdmissionController({
         maxConcurrentRequests: 1,
         requestsPerMinute: 10,
@@ -600,23 +581,85 @@ describe('TaskScheduler', () => {
       'test_model_request',
     );
 
-    const firstSpawn = scheduler.spawnChildren(root.id, [
-      { id: 'first-child', goal: 'First branch.' },
-    ]);
-    await vi.waitFor(() => {
-      expect(scheduler.liveAgentCount).toBe(2);
-    });
-    const secondSpawn = await scheduler.spawnChildren(root.id, [
-      { id: 'second-child', goal: 'Second branch.' },
+    // 两次创建请求在同一事件循环中并发发起（各自的同步准入段先后原子执行）。
+    const [firstSpawn, secondSpawn] = await Promise.all([
+      scheduler.spawnChildren(root.id, [
+        { id: 'first-child', goal: 'First branch.' },
+      ]),
+      scheduler.spawnChildren(root.id, [
+        { id: 'second-child', goal: 'Second branch.' },
+      ]),
     ]);
 
-    expect(secondSpawn).toMatchObject({
-      spawned: false,
-      reason: 'spawn_in_progress',
+    expect(firstSpawn).toMatchObject({ spawned: true });
+    expect(secondSpawn).toMatchObject({ spawned: true });
+    expect(scheduler.getTask('first-child')).toBeDefined();
+    expect(scheduler.getTask('second-child')).toBeDefined();
+    // 池未超卖：root 加两个子 Agent 恰好占满 3 个存活槽位。
+    expect(scheduler.liveAgentCount).toBe(3);
+  });
+
+  it('returns the pool slot when sending a spawned child fails', async () => {
+    const backingStore = new InMemoryTaskStore();
+    const store: TaskStore = {
+      persist: async (task) => {
+        if (task.id === 'doomed-child') {
+          throw new Error('disk offline');
+        }
+        await backingStore.persist(task);
+      },
+      load: async (taskId) => await backingStore.load(taskId),
+      events: async (taskId) => await backingStore.events(taskId),
+    };
+    const scheduler = new TaskScheduler({
+      provider: new FakeModelProvider(),
+      tools: new ToolRegistry(),
+      store,
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 10_000,
+      }),
+      agentPool: new AgentPool({
+        maxDepth: 3,
+        maxLiveAgents: 3,
+        maxSpawnedPerRoot: 5,
+      }),
     });
-    releaseChildPersistence?.();
-    expect(await firstSpawn).toMatchObject({ spawned: true });
-    expect(scheduler.getTask('second-child')).toBeUndefined();
+    const root = await scheduler.submit({
+      id: 'send-fail-root',
+      goal: 'Coordinate.',
+    });
+    root.transition(
+      {
+        status: 'RUNNING',
+        enteredAt: Date.now(),
+        providerId: 'fake-model',
+        requestAttempt: 1,
+      },
+      'test_model_request',
+    );
+
+    const result = await scheduler.spawnChildren(root.id, [
+      { id: 'doomed-child', goal: 'Will fail to send.' },
+    ]);
+
+    expect(result).toMatchObject({ spawned: true });
+    // 发送失败后槽位被 V 回，只剩 root 存活。
+    expect(scheduler.liveAgentCount).toBe(1);
+    expect(scheduler.getTask('doomed-child')).toBeUndefined();
+    // 父任务收到失败结果，而不是永久等待一个未就绪的子 Agent。
+    expect(
+      root.context.some(
+        (item) =>
+          item.type === 'async_work_update' &&
+          item.results.some(
+            (workResult) =>
+              workResult.workId === 'doomed-child' &&
+              workResult.status === 'failed',
+          ),
+      ),
+    ).toBe(true);
   });
 
   it('stores piggyback summaries separately and sends a hybrid context', async () => {
@@ -1041,12 +1084,10 @@ describe('TaskScheduler', () => {
     const first = await scheduler.submit({
       id: 'rate-first',
       goal: 'First task.',
-      priority: 2,
     });
     const second = await scheduler.submit({
       id: 'rate-second',
       goal: 'Second task.',
-      priority: 1,
     });
     provider.setResponses(first.id, [
       { type: 'final', output: 'first done', usage },
@@ -1312,11 +1353,14 @@ describe('TaskScheduler', () => {
   it('restores a persisted async work batch timer', async () => {
     const clock = new ManualClock(100);
     const store = new InMemoryTaskStore();
-    const persisted = TaskControlBlock.create({
-      id: 'restored-async-timer',
-      goal: 'Resume a persisted batch timer.',
-      createdAt: clock.now(),
-    });
+    const persisted = TaskControlBlock.createAgent(
+      {
+        id: 'restored-async-timer',
+        goal: 'Resume a persisted batch timer.',
+      },
+      { kind: 'root' },
+      clock.now(),
+    );
     persisted.transition(
       {
         status: 'RUNNING',
@@ -1392,11 +1436,14 @@ describe('TaskScheduler', () => {
   it('delivers an expired async work batch when its timer deadline was cleared before persistence', async () => {
     const clock = new ManualClock(200);
     const store = new InMemoryTaskStore();
-    const persisted = TaskControlBlock.create({
-      id: 'restored-expired-batch',
-      goal: 'Recover an expired delivery.',
-      createdAt: clock.now(),
-    });
+    const persisted = TaskControlBlock.createAgent(
+      {
+        id: 'restored-expired-batch',
+        goal: 'Recover an expired delivery.',
+      },
+      { kind: 'root' },
+      clock.now(),
+    );
     persisted.transition(
       {
         status: 'RUNNING',

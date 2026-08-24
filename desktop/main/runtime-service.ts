@@ -133,9 +133,6 @@ export class RuntimeService {
           summaryProtocol: TURN_SUMMARY_PROTOCOL,
           delegation: {
             canSpawnSubagents: false,
-            currentDepth: 1,
-            maxDepth: 1,
-            availableAgentSlots: 0,
           },
         },
         controller.signal,
@@ -522,7 +519,6 @@ export class RuntimeService {
       goal: task.goal,
       status: task.state.status,
       stateLabel: state.label,
-      priority: task.priority,
       capabilities: [...task.capabilities],
       modelAttempts: task.modelAttempts,
       maxModelAttempts: task.maxModelAttempts,

@@ -19,24 +19,36 @@ class ManualClock implements Clock {
 }
 
 function createHierarchy() {
-  const root = TaskControlBlock.create({
-    id: 'root',
-    goal: 'Coordinate the task tree.',
-    createdAt: 0,
-  });
-  const middleOne = TaskControlBlock.createChild(root, {
-    id: 'middle-1',
-    goal: 'Coordinate one branch.',
-  });
-  const middleTwo = TaskControlBlock.createChild(root, {
-    id: 'middle-2',
-    goal: 'Coordinate another branch.',
-  });
+  const root = TaskControlBlock.createAgent(
+    {
+      id: 'root',
+      goal: 'Coordinate the task tree.',
+    },
+    { kind: 'root' },
+    0,
+  );
+  const middleOne = TaskControlBlock.createAgent(
+    {
+      id: 'middle-1',
+      goal: 'Coordinate one branch.',
+    },
+    { kind: 'child', parent: root },
+  );
+  const middleTwo = TaskControlBlock.createAgent(
+    {
+      id: 'middle-2',
+      goal: 'Coordinate another branch.',
+    },
+    { kind: 'child', parent: root },
+  );
   const leaves = Array.from({ length: 4 }, (_, index) =>
-    TaskControlBlock.createChild(middleOne, {
-      id: `leaf-${index + 1}`,
-      goal: `Complete leaf task ${index + 1}.`,
-    }),
+    TaskControlBlock.createAgent(
+      {
+        id: `leaf-${index + 1}`,
+        goal: `Complete leaf task ${index + 1}.`,
+      },
+      { kind: 'child', parent: middleOne },
+    ),
   );
   return { leaves, middleOne, middleTwo, root };
 }

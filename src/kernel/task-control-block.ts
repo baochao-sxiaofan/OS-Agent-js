@@ -19,85 +19,181 @@ import { assertTaskTransition } from './state-machine.js';
 import type { TaskEvent } from './task-event.js';
 import type { TaskState, Termination } from './task-state.js';
 
+/** 内核允许的最大 Agent 委派深度。 */
+export const MAX_AGENT_DEPTH = 3;
+
+/**
+ * 从 TaskEvent 判别联合中移除由 `recordEvent` 统一生成的事件信封字段。
+ *
+ * 条件类型会分发到每一种事件上，因此调用方仍需提供与 `type` 对应的业务字段，
+ * 但不需要自行维护事件 ID、任务 ID、发生时间和任务内序号。
+ */
 type TaskEventPayload<TEvent extends TaskEvent = TaskEvent> =
   TEvent extends TaskEvent
     ? Omit<TEvent, 'eventId' | 'occurredAt' | 'sequence' | 'taskId'>
     : never;
 
+/** 单个任务的模型调用费用预算。 */
 export type TaskBudget = {
+  /** 该任务允许消耗的最高美元金额。 */
   maxCostUsd: number;
+  /** 已由模型请求和上下文压缩消耗的美元金额。 */
   spentCostUsd: number;
 };
 
-export type CreateTaskOptions = {
+/**
+ * Agent 向内核提交的统一创建请求。
+ *
+ * 请求只包含任务自身的业务配置。`depth`、`createdAt`、`rootTaskId`、
+ * `parentTaskId` 和初始状态均由内核创建入口推导，调用方不能自行指定。
+ */
+export type CreateAgentRequest = {
+  /** 可选的任务 ID；未提供时由内核生成 UUID。 */
   id?: string;
+  /** Agent 需要完成的任务目标。 */
   goal: string;
-  priority?: number;
+  /** 任务允许使用的能力令牌集合。 */
   capabilities?: readonly string[];
+  /** 任务启动时携带的完整上下文。 */
   context?: readonly ContextItem[];
+  /** 模型请求最多允许尝试的次数；默认值为 3。 */
   maxModelAttempts?: number;
+  /** 任务级费用预算。 */
   budget?: {
+    /** 该任务允许消耗的最高美元金额。 */
     maxCostUsd: number;
   };
-  createdAt?: number;
 };
 
-export type CreateChildTaskOptions = Omit<
-  CreateTaskOptions,
-  'createdAt' | 'priority'
-> & {
-  priority?: number;
-};
+/**
+ * Agent 创建来源。
+ *
+ * 判别联合让统一工厂在类型层面区分根任务与子任务。子任务只提交父 TCB，
+ * 其根任务 ID、父任务 ID 和深度全部由内核计算。
+ */
+export type AgentCreationOrigin =
+  | {
+      kind: 'root';
+    }
+  | {
+      kind: 'child';
+      parent: TaskControlBlock;
+    };
 
+/**
+ * TaskControlBlock 的可序列化快照。
+ *
+ * 快照包含恢复任务所需的完整权威状态，不包含 Promise、Timer、AbortController
+ * 等进程内对象，可由 TaskStore 持久化后重新构造 TCB。
+ */
 export type TaskSnapshot = {
+  /** 当前任务的唯一 ID。 */
   id: string;
+  /** 当前任务所属任务树的根任务 ID。 */
   rootTaskId: string;
+  /** 父任务 ID；根任务不存在该字段。 */
   parentTaskId?: string;
+  /** 委派深度；根任务从 1 开始。 */
   depth: number;
+  /** 当前任务需要完成的目标。 */
   goal: string;
-  priority: number;
+  /** 当前任务持有的能力令牌。 */
   capabilities: string[];
+  /** 不经压缩销毁的完整上下文历史。 */
   context: ContextItem[];
+  /** 持久化的异步工作批次和 Work Table。 */
   asyncWorkGenerations?: AsyncWorkGeneration[];
+  /** 与完整上下文分通道保存的摘要记录。 */
   contextSummaries?: ContextSummaryRecord[];
+  /** 下一轮摘要尚未覆盖的完整上下文起始索引。 */
   nextContextSummaryStartIndex?: number;
+  /** 当前状态机状态及其进入原因。 */
   state: TaskState;
+  /** 任务预算上限和累计支出。 */
   budget: TaskBudget;
+  /** 已经启动的模型请求尝试次数。 */
   modelAttempts: number;
+  /** 模型请求允许尝试的次数上限。 */
   maxModelAttempts: number;
+  /** 任务创建时的 Unix 毫秒时间戳。 */
   createdAt: number;
+  /** 最近一次状态、上下文或事件变化的时间。 */
   updatedAt: number;
+  /** 用于审计和恢复诊断的只追加事件历史。 */
   events: TaskEvent[];
 };
 
+/**
+ * 任务控制块（Task Control Block，TCB）。
+ *
+ * 它类似操作系统中的进程控制块，是单个 Agent 任务的权威内核状态容器：
+ * 保存任务身份、状态机、上下文、预算、异步 Work Table 和事件历史。
+ * 调度器负责决定何时运行任务，TCB 负责校验并记录运行结果。
+ */
 export class TaskControlBlock {
+  /** 当前任务的唯一 ID。 */
   readonly id: string;
+  /** 当前任务所属任务树的根任务 ID。 */
   readonly rootTaskId: string;
+  /** 父任务 ID；根任务为 undefined。 */
   readonly parentTaskId: string | undefined;
+  /** 当前任务在委派树中的深度，根任务为 1。 */
   readonly depth: number;
+  /** 当前 Agent 的任务目标。 */
   readonly goal: string;
-  readonly priority: number;
+  /** 任务创建时的 Unix 毫秒时间戳。 */
   readonly createdAt: number;
 
+  /** 去重保存的能力令牌集合。 */
   #capabilities: Set<string>;
+  /** 始终保留的完整上下文历史。 */
   #context: ContextItem[];
+  /** 按 generation 分组的持久化异步 Work Table。 */
   #asyncWorkGenerations: AsyncWorkGeneration[];
+  /** 与完整上下文分开保存的摘要通道。 */
   #contextSummaries: ContextSummaryRecord[];
+  /** 下一条单轮摘要应覆盖的完整上下文起始位置。 */
   #nextContextSummaryStartIndex: number;
+  /** 当前任务状态机状态。 */
   #state: TaskState;
+  /** 当前任务的费用上限和累计支出。 */
   #budget: TaskBudget;
+  /** 已经启动的模型请求尝试次数。 */
   #modelAttempts: number;
+  /** 模型请求允许尝试的次数上限。 */
   #maxModelAttempts: number;
+  /** 最近一次可观测修改的时间。 */
   #updatedAt: number;
+  /** 只追加的任务事件历史。 */
   #events: TaskEvent[];
 
+  /**
+   * 从完整快照构造 TCB。
+   *
+   * 构造函数保持私有，确保新任务只能通过 `createAgent` 建立，
+   * 持久化任务只能通过 `restore` 恢复。可变数据会被复制，避免与快照共享引用。
+   */
   private constructor(snapshot: TaskSnapshot) {
+    if (
+      !Number.isInteger(snapshot.depth) ||
+      snapshot.depth < 1 ||
+      snapshot.depth > MAX_AGENT_DEPTH
+    ) {
+      throw new Error(
+        `Task depth must be an integer between 1 and ${MAX_AGENT_DEPTH}.`,
+      );
+    }
+    if (
+      (snapshot.depth === 1 && snapshot.parentTaskId !== undefined) ||
+      (snapshot.depth > 1 && snapshot.parentTaskId === undefined)
+    ) {
+      throw new Error('Task depth does not match its parent relationship.');
+    }
     this.id = snapshot.id;
     this.rootTaskId = snapshot.rootTaskId;
     this.parentTaskId = snapshot.parentTaskId;
     this.depth = snapshot.depth;
     this.goal = snapshot.goal;
-    this.priority = snapshot.priority;
     this.createdAt = snapshot.createdAt;
     this.#capabilities = new Set(snapshot.capabilities);
     this.#context = structuredClone(snapshot.context);
@@ -117,110 +213,90 @@ export class TaskControlBlock {
     this.#events = structuredClone(snapshot.events);
   }
 
-  static create(options: CreateTaskOptions): TaskControlBlock {
-    const createdAt = options.createdAt ?? Date.now();
-    const initialState: TaskState = {
-      status: 'READY',
-      enteredAt: createdAt,
-      reason: 'submitted',
-    };
-    const taskId = options.id ?? randomUUID();
-    const createdEvent: TaskEvent = {
-      type: 'task_created',
-      eventId: randomUUID(),
-      taskId,
-      occurredAt: createdAt,
-      sequence: 1,
-      goal: options.goal,
-      initialState,
-    };
-
-    return new TaskControlBlock({
-      id: taskId,
-      rootTaskId: taskId,
-      depth: 1,
-      goal: options.goal,
-      priority: options.priority ?? 0,
-      capabilities: [...(options.capabilities ?? [])],
-      context: [...(options.context ?? [])],
-      asyncWorkGenerations: [],
-      contextSummaries: [],
-      nextContextSummaryStartIndex: 0,
-      state: initialState,
-      budget: {
-        maxCostUsd: options.budget?.maxCostUsd ?? Number.MAX_VALUE,
-        spentCostUsd: 0,
-      },
-      modelAttempts: 0,
-      maxModelAttempts: options.maxModelAttempts ?? 3,
-      createdAt,
-      updatedAt: createdAt,
-      events: [createdEvent],
-    });
-  }
-
-  static createChild(
-    parent: TaskControlBlock,
-    options: CreateChildTaskOptions,
+  /**
+   * 通过内核统一入口创建根任务或子任务。
+   *
+   * 根任务固定为深度 1；子任务深度固定为 `parent.depth + 1`，并自动继承
+   * 父任务的 rootTaskId。调用方无法伪造层级或血缘信息。所有任务初始状态
+   * 均为 READY，并写入序号为 1 的 `task_created` 事件。
+   */
+  static createAgent(
+    request: CreateAgentRequest,
+    origin: AgentCreationOrigin,
+    createdAt = Date.now(),
   ): TaskControlBlock {
-    const createdAt = Date.now();
-    const taskId = options.id ?? randomUUID();
+    const parent = origin.kind === 'child' ? origin.parent : undefined;
+    const depth = parent === undefined ? 1 : parent.depth + 1;
+    if (depth > MAX_AGENT_DEPTH) {
+      throw new Error(
+        `Cannot create an Agent deeper than ${MAX_AGENT_DEPTH} levels.`,
+      );
+    }
     const initialState: TaskState = {
       status: 'READY',
       enteredAt: createdAt,
       reason: 'submitted',
     };
+    const taskId = request.id ?? randomUUID();
     const createdEvent: TaskEvent = {
       type: 'task_created',
       eventId: randomUUID(),
       taskId,
       occurredAt: createdAt,
       sequence: 1,
-      goal: options.goal,
+      goal: request.goal,
       initialState,
     };
 
     return new TaskControlBlock({
       id: taskId,
-      rootTaskId: parent.rootTaskId,
-      parentTaskId: parent.id,
-      depth: parent.depth + 1,
-      goal: options.goal,
-      priority: options.priority ?? parent.priority,
-      capabilities: [...(options.capabilities ?? [])],
-      context: [...(options.context ?? [])],
+      rootTaskId: parent?.rootTaskId ?? taskId,
+      ...(parent === undefined ? {} : { parentTaskId: parent.id }),
+      depth,
+      goal: request.goal,
+      capabilities: [...(request.capabilities ?? [])],
+      context: [...(request.context ?? [])],
       asyncWorkGenerations: [],
       contextSummaries: [],
       nextContextSummaryStartIndex: 0,
       state: initialState,
       budget: {
-        maxCostUsd: options.budget?.maxCostUsd ?? Number.MAX_VALUE,
+        maxCostUsd: request.budget?.maxCostUsd ?? Number.MAX_VALUE,
         spentCostUsd: 0,
       },
       modelAttempts: 0,
-      maxModelAttempts: options.maxModelAttempts ?? 3,
+      maxModelAttempts: request.maxModelAttempts ?? 3,
       createdAt,
       updatedAt: createdAt,
       events: [createdEvent],
     });
   }
 
+  /** 从持久化快照恢复一个任务，不额外生成创建事件。 */
   static restore(snapshot: TaskSnapshot): TaskControlBlock {
     return new TaskControlBlock(snapshot);
   }
 
+  /** 获取当前任务状态的只读视图。 */
   get state(): Readonly<TaskState> {
     return this.#state;
   }
 
+  /** 获取完整上下文历史的只读数组视图。 */
   get context(): readonly ContextItem[] {
     return this.#context;
   }
 
+  /** 获取全部异步工作批次的副本，防止外部直接修改 Work Table。 */
   get asyncWorkGenerations(): readonly AsyncWorkGeneration[] {
     return structuredClone(this.#asyncWorkGenerations);
   }
 
+  /**
+   * 获取当前尚未关闭的异步工作批次。
+   *
+   * 正常情况下每个任务最多只有一个开放 generation；返回副本以保护内部状态。
+   */
   get activeAsyncWorkGeneration(): AsyncWorkGeneration | undefined {
     const generation = this.#asyncWorkGenerations.findLast(
       (candidate) => candidate.closedAt === undefined,
@@ -228,38 +304,52 @@ export class TaskControlBlock {
     return generation ? structuredClone(generation) : undefined;
   }
 
+  /** 获取已经生成的上下文摘要记录。 */
   get contextSummaries(): readonly ContextSummaryRecord[] {
     return this.#contextSummaries;
   }
 
+  /** 获取能力令牌数组副本。 */
   get capabilities(): readonly string[] {
     return [...this.#capabilities];
   }
 
+  /** 获取当前任务预算的只读视图。 */
   get budget(): Readonly<TaskBudget> {
     return this.#budget;
   }
 
+  /** 获取已经启动的模型请求尝试次数。 */
   get modelAttempts(): number {
     return this.#modelAttempts;
   }
 
+  /** 获取模型请求允许尝试的次数上限。 */
   get maxModelAttempts(): number {
     return this.#maxModelAttempts;
   }
 
+  /** 获取任务最近一次更新的时间。 */
   get updatedAt(): number {
     return this.#updatedAt;
   }
 
+  /** 获取只追加事件历史的只读视图。 */
   get events(): readonly TaskEvent[] {
     return this.#events;
   }
 
+  /** 判断当前任务是否持有指定能力令牌。 */
   hasCapability(capability: string): boolean {
     return this.#capabilities.has(capability);
   }
 
+  /**
+   * 执行一次显式状态转换。
+   *
+   * 状态机先校验转换是否合法，再替换当前状态并记录 `state_transitioned` 事件。
+   * `reason` 用于解释本次转换的业务原因，不替代 `next` 中的强类型状态原因。
+   */
   transition(next: TaskState, reason: string): void {
     assertTaskTransition(this.#state, next);
     const previousStatus = this.#state.status;
@@ -273,11 +363,24 @@ export class TaskControlBlock {
     });
   }
 
+  /**
+   * 向完整上下文追加一项记录。
+   *
+   * 写入前进行深拷贝，避免调用方之后修改原对象而污染任务历史。
+   */
   appendContext(item: ContextItem): void {
     this.#context.push(structuredClone(item));
     this.#updatedAt = Date.now();
   }
 
+  /**
+   * 将一组工具调用或子 Agent 注册为持久化异步工作。
+   *
+   * 同一任务中的 workId 全局不可重复。若当前存在开放 generation，则工作并入
+   * 该批次；否则创建新批次。所有新工作以 `running` 状态进入 Work Table。
+   *
+   * @returns 工作所属的 generation ID。
+   */
   registerAsyncWork(
     registrations: readonly AsyncWorkRegistration[],
     now: number,
@@ -291,6 +394,7 @@ export class TaskControlBlock {
     if (new Set(registrationIds).size !== registrationIds.length) {
       throw new Error('Asynchronous work IDs must be unique.');
     }
+    // workId 在任务整个生命周期内只允许使用一次，防止恢复或重试后结果串线。
     const usedWorkIds = new Set(
       this.#asyncWorkGenerations.flatMap((generation) =>
         generation.work.map((work) => work.workId),
@@ -303,6 +407,7 @@ export class TaskControlBlock {
       throw new Error(`Asynchronous work ID has already been used: ${reusedWorkId}`);
     }
 
+    // 一轮模型决策产生的异步工作共享同一个开放 generation。
     let generation = this.#asyncWorkGenerations.findLast(
       (candidate) => candidate.closedAt === undefined,
     );
@@ -331,6 +436,7 @@ export class TaskControlBlock {
     return generation.generationId;
   }
 
+  /** 将工具工作标记为完成并保存 JSON 输出，但暂不投递给模型。 */
   completeToolWork(
     workId: string,
     output: JsonValue,
@@ -344,10 +450,17 @@ export class TaskControlBlock {
     );
   }
 
+  /** 将工具工作标记为失败并保存错误信息。 */
   failToolWork(workId: string, error: string, now: number): void {
     this.completeAsyncWork(workId, 'failed', now, { error });
   }
 
+  /**
+   * 根据子任务终止结果完成对应异步工作。
+   *
+   * `failed` 和 `cancelled` 保留对应终态；正常完成及
+   * `needs_parent_action` 都表示子任务已退出，因此映射为 `completed`。
+   */
   completeSubagentWork(
     workId: string,
     termination: Termination,
@@ -364,6 +477,7 @@ export class TaskControlBlock {
     });
   }
 
+  /** 返回当前开放 generation 中仍在运行的 workId。 */
   activeAsyncWorkPendingIds(): string[] {
     return (
       this.activeAsyncWorkGeneration?.work
@@ -372,6 +486,7 @@ export class TaskControlBlock {
     );
   }
 
+  /** 判断当前批次是否存在尚未注入父 Agent 上下文的终态结果。 */
   hasUndeliveredAsyncWorkResults(): boolean {
     return (
       this.activeAsyncWorkGeneration?.work.some(
@@ -381,6 +496,7 @@ export class TaskControlBlock {
     );
   }
 
+  /** 判断当前开放 generation 是否存在且全部工作都已进入终态。 */
   isActiveAsyncWorkComplete(): boolean {
     const generation = this.activeAsyncWorkGeneration;
     return (
@@ -390,6 +506,11 @@ export class TaskControlBlock {
     );
   }
 
+  /**
+   * 设置或清除当前异步批次的部分结果投递截止时间。
+   *
+   * 这里只持久化 timer 的逻辑期限；真正的一次性 Timer 由调度器负责创建。
+   */
   setAsyncWorkBatchDueAt(
     generationId: string,
     dueAt: number | undefined,
@@ -403,6 +524,17 @@ export class TaskControlBlock {
     this.#updatedAt = Date.now();
   }
 
+  /**
+   * 原子领取当前批次尚未投递的终态结果，并生成 Completion Mailbox 更新。
+   *
+   * 方法会把新结果和仍在运行的工作共同组装成 `async_work_update`，随后：
+   * 1. 为已领取结果写入 deliveredAt，防止恢复后重复注入；
+   * 2. 清除批处理期限；
+   * 3. 在全部工作完成时关闭 generation；
+   * 4. 将更新追加到父 Agent 的完整上下文并记录投递事件。
+   *
+   * 没有开放批次或没有新增终态结果时返回 undefined。
+   */
   claimAsyncWorkUpdate(now: number): AsyncWorkUpdateContextItem | undefined {
     const generation = this.#asyncWorkGenerations.findLast(
       (candidate) => candidate.closedAt === undefined,
@@ -417,6 +549,7 @@ export class TaskControlBlock {
     if (terminal.length === 0) {
       return undefined;
     }
+    // 全部完成时走立即唤醒路径；存在 pending 时则是一次部分结果批量投递。
     const allFinished = generation.work.every(
       (work) => work.status !== 'running',
     );
@@ -447,6 +580,7 @@ export class TaskControlBlock {
         })),
       allFinished,
     };
+    // 先持久化投递标记，再由后续快照保证恢复时不会重复注入同一结果。
     for (const work of terminal) {
       work.deliveredAt = now;
     }
@@ -464,6 +598,12 @@ export class TaskControlBlock {
     return update;
   }
 
+  /**
+   * 标记一轮模型决策处理完毕，并可选保存该轮搭载摘要。
+   *
+   * 摘要覆盖区间为 `[nextContextSummaryStartIndex, context.length)`。
+   * 无论模型是否提供摘要，游标都会前移，避免后续摘要错误覆盖多轮上下文。
+   */
   completeModelTurn(summary?: TurnSummary): void {
     const sourceStartIndex = this.#nextContextSummaryStartIndex;
     const sourceEndIndex = this.#context.length;
@@ -478,6 +618,12 @@ export class TaskControlBlock {
     this.#nextContextSummaryStartIndex = sourceEndIndex;
   }
 
+  /**
+   * 保存 ContextCompactor 生成的二次摘要。
+   *
+   * 二次摘要覆盖完整上下文前缀 `[0, sourceEndIndex)`；压缩请求本身也属于
+   * 模型资源消耗，因此会累计费用并记录独立的压缩事件。
+   */
   recordSecondaryContextSummary(
     summary: TurnSummary,
     sourceEndIndex: number,
@@ -499,15 +645,22 @@ export class TaskControlBlock {
     );
   }
 
+  /** 开始一次模型请求尝试，并返回递增后的尝试序号。 */
   startModelAttempt(): number {
     this.#modelAttempts += 1;
     return this.#modelAttempts;
   }
 
+  /** 判断当前失败后是否仍有剩余模型重试次数。 */
   canRetryModel(): boolean {
     return this.#modelAttempts < this.#maxModelAttempts;
   }
 
+  /**
+   * 记录任务因 RPM、TPM、并发或预算等准入条件而等待。
+   *
+   * 该方法只追加诊断事件；READY 状态和重新入队由调度器维护。
+   */
   recordCapacityWait(reasons: string[], retryAt?: number): void {
     this.recordEvent({
       type: 'capacity_wait_recorded',
@@ -516,6 +669,11 @@ export class TaskControlBlock {
     });
   }
 
+  /**
+   * 记录一次已成功解析的模型响应，并累计本次调用费用。
+   *
+   * `responseType` 描述模型选择的下一步动作，供审计和运行指标使用。
+   */
   recordModelResponse(
     responseType:
       | 'async_work'
@@ -534,6 +692,7 @@ export class TaskControlBlock {
     });
   }
 
+  /** 记录工具调用已发起；工具执行和上下文写入由其他组件负责。 */
   recordToolCall(callId: string, toolName: string): void {
     this.recordEvent({
       type: 'tool_call_recorded',
@@ -542,6 +701,7 @@ export class TaskControlBlock {
     });
   }
 
+  /** 记录工具调用结果，保留调用 ID 以便与请求关联。 */
   recordToolResult(
     callId: string,
     toolName: string,
@@ -555,6 +715,11 @@ export class TaskControlBlock {
     });
   }
 
+  /**
+   * 记录任务终止事实。
+   *
+   * 该方法不执行状态转换；调用方应先通过 `transition` 进入 TERMINATED。
+   */
   recordTermination(termination: Termination): void {
     this.recordEvent({
       type: 'task_terminated',
@@ -562,6 +727,7 @@ export class TaskControlBlock {
     });
   }
 
+  /** 记录父任务已经成功创建一个指定深度的子任务。 */
   recordSubagentSpawned(childTaskId: string, childDepth: number): void {
     this.recordEvent({
       type: 'subagent_spawned',
@@ -570,6 +736,7 @@ export class TaskControlBlock {
     });
   }
 
+  /** 记录父任务已经接收到子任务的结构化终止结果。 */
   recordSubagentResult(childTaskId: string, result: Termination): void {
     this.recordEvent({
       type: 'subagent_result_recorded',
@@ -578,6 +745,11 @@ export class TaskControlBlock {
     });
   }
 
+  /**
+   * 生成可持久化的完整任务快照。
+   *
+   * 所有可变集合和结构化值都会复制，避免 TaskStore 持有 TCB 内部引用。
+   */
   snapshot(): TaskSnapshot {
     return {
       id: this.id,
@@ -587,7 +759,6 @@ export class TaskControlBlock {
         : { parentTaskId: this.parentTaskId }),
       depth: this.depth,
       goal: this.goal,
-      priority: this.priority,
       capabilities: [...this.#capabilities],
       context: structuredClone(this.#context),
       asyncWorkGenerations: structuredClone(this.#asyncWorkGenerations),
@@ -603,6 +774,13 @@ export class TaskControlBlock {
     };
   }
 
+  /**
+   * 将指定异步工作从 `running` 推进到终态。
+   *
+   * 只允许完成开放 generation 中仍在运行的工作；重复完成会抛错，从而保证
+   * Work Record 的终态不可逆。该方法只写 Work Table，结果投递由
+   * `claimAsyncWorkUpdate` 单独完成。
+   */
   private completeAsyncWork(
     workId: string,
     status: AsyncWorkTerminalStatus,
@@ -646,6 +824,7 @@ export class TaskControlBlock {
     });
   }
 
+  /** 查找指定且尚未关闭的 generation，不存在时抛出明确错误。 */
   private requireOpenAsyncWorkGeneration(
     generationId: string,
   ): AsyncWorkGeneration {
@@ -662,6 +841,12 @@ export class TaskControlBlock {
     return generation;
   }
 
+  /**
+   * 向独立摘要通道追加一条记录，并写入对应审计事件。
+   *
+   * 原始完整上下文不会在此删除；ContextWindowManager 仅在构造模型输入时
+   * 使用摘要替换其覆盖区间。
+   */
   private addContextSummary(
     kind: ContextSummaryKind,
     sourceStartIndex: number,
@@ -687,6 +872,11 @@ export class TaskControlBlock {
     });
   }
 
+  /**
+   * 为业务事件补齐统一信封并追加到事件历史。
+   *
+   * sequence 在单个任务内单调递增；任何事件写入也会刷新 updatedAt。
+   */
   private recordEvent(
     event: TaskEventPayload,
   ): void {

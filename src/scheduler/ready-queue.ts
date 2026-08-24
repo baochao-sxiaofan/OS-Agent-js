@@ -1,7 +1,10 @@
-import type { TaskControlBlock } from '../kernel/task-control-block.js';
+import {
+  MAX_AGENT_DEPTH,
+  type TaskControlBlock,
+} from '../kernel/task-control-block.js';
 import { SystemClock, type Clock } from './admission-controller.js';
 
-const MAX_SCHEDULING_DEPTH = 3;
+const MAX_SCHEDULING_DEPTH = MAX_AGENT_DEPTH;
 
 type SchedulingDepth = 1 | 2 | 3;
 
@@ -126,7 +129,6 @@ export class ReadyQueue {
         (left, right) =>
           this.effectiveDepth(right, now) -
             this.effectiveDepth(left, now) ||
-          right.task.priority - left.task.priority ||
           left.order - right.order,
       )
       .map((entry) => entry.task);
@@ -160,7 +162,6 @@ export class ReadyQueue {
           (left, right) =>
             Number(right.entry.parentWakeupBoost) -
               Number(left.entry.parentWakeupBoost) ||
-            right.entry.task.priority - left.entry.task.priority ||
             left.entry.order - right.entry.order,
         );
       const selected = candidates[0];

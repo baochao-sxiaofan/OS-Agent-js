@@ -45,9 +45,6 @@ const AGENT_RESPONSE_JSON_SCHEMA = {
           goal: {
             type: 'string',
           },
-          priority: {
-            type: 'integer',
-          },
           capabilities: {
             type: 'array',
             items: {
@@ -494,10 +491,6 @@ function parseChildren(
     const path = `structured output.children[${index}]`;
     const childObject = requireJsonObject(child, path);
     const taskId = optionalString(childObject['taskId'], `${path}.taskId`);
-    const priority = optionalInteger(
-      childObject['priority'],
-      `${path}.priority`,
-    );
     const capabilities = optionalStringArray(
       childObject['capabilities'],
       `${path}.capabilities`,
@@ -513,7 +506,6 @@ function parseChildren(
     return {
       goal: requireString(childObject['goal'], `${path}.goal`),
       ...(taskId === undefined ? {} : { taskId }),
-      ...(priority === undefined ? {} : { priority }),
       ...(capabilities === undefined ? {} : { capabilities }),
       ...(maxModelAttempts === undefined ? {} : { maxModelAttempts }),
       ...(maxCostUsd === undefined ? {} : { maxCostUsd }),

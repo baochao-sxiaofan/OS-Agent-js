@@ -11,8 +11,8 @@ import {
 } from '../context/context-window-manager.js';
 import {
   TaskControlBlock,
-  type CreateChildTaskOptions,
-  type CreateTaskOptions,
+  type AgentCreationOrigin,
+  type CreateAgentRequest,
 } from '../kernel/task-control-block.js';
 import type { TaskState, Termination } from '../kernel/task-state.js';
 import type {
@@ -84,8 +84,7 @@ export type SubagentSpawnFailureReason =
   | SpawnRejectionReason
   | 'capability_escalation'
   | 'invalid_spawn_request'
-  | 'invalid_parent_state'
-  | 'spawn_in_progress';
+  | 'invalid_parent_state';
 
 export type SpawnChildrenResult =
   | {
@@ -169,7 +168,6 @@ export class TaskScheduler {
     PendingContextCompaction
   >();
   readonly #preparedContexts = new Map<string, readonly ContextItem[]>();
-  readonly #spawningParents = new Set<string>();
   readonly #asyncWorkTimers = new Map<string, AsyncWorkTimer>();
   readonly #asyncWorkWakeReady = new Set<string>();
   readonly #asyncWorkMutations = new Map<string, Promise<void>>();
@@ -241,8 +239,8 @@ export class TaskScheduler {
     };
   }
 
-  async submit(options: CreateTaskOptions): Promise<TaskControlBlock> {
-    const task = TaskControlBlock.create(options);
+  async submit(request: CreateAgentRequest): Promise<TaskControlBlock> {
+    const task = this.createAgent(request, { kind: 'root' });
     if (this.#tasks.has(task.id)) {
       throw new Error(`Task ID has already been used: ${task.id}`);
     }
@@ -253,6 +251,31 @@ export class TaskScheduler {
     await this.prepareTaskForQueue(task);
     await this.#store.persist(task);
     return task;
+  }
+
+  /**
+   * 所有新 Agent 的统一内核创建入口。
+   *
+   * 创建时间来自调度器 Clock；根任务和子任务的血缘与深度由 TCB 根据 origin
+   * 推导。子任务在调用这里之前仍必须先完成 AgentPool 原子预留。
+   */
+  private createAgent(
+    request: CreateAgentRequest,
+    origin: AgentCreationOrigin,
+  ): TaskControlBlock {
+    if (
+      origin.kind === 'child' &&
+      origin.parent.depth >= this.#agentPool.policy.maxDepth
+    ) {
+      throw new Error(
+        `Task depth ${origin.parent.depth} reached max depth ${this.#agentPool.policy.maxDepth}.`,
+      );
+    }
+    return TaskControlBlock.createAgent(
+      request,
+      origin,
+      this.#clock.now(),
+    );
   }
 
   getTask(taskId: string): TaskControlBlock | undefined {
@@ -280,7 +303,7 @@ export class TaskScheduler {
 
   async spawnChildren(
     parentTaskId: string,
-    childOptions: readonly CreateChildTaskOptions[],
+    childOptions: readonly CreateAgentRequest[],
   ): Promise<SpawnChildrenResult> {
     const parent = this.requireTask(parentTaskId);
     return await this.startAsyncWork(parent, [], childOptions);
@@ -289,20 +312,13 @@ export class TaskScheduler {
   private async startAsyncWork(
     parent: TaskControlBlock,
     toolCalls: readonly ToolCallRequest[],
-    childOptions: readonly CreateChildTaskOptions[],
+    childOptions: readonly CreateAgentRequest[],
   ): Promise<SpawnChildrenResult> {
     if (parent.state.status !== 'RUNNING') {
       return {
         spawned: false,
         reason: 'invalid_parent_state',
         message: `Task ${parent.id} cannot spawn from ${parent.state.status}.`,
-      };
-    }
-    if (childOptions.length > 0 && this.#spawningParents.has(parent.id)) {
-      return {
-        spawned: false,
-        reason: 'spawn_in_progress',
-        message: `Task ${parent.id} is already creating subagents.`,
       };
     }
     if (childOptions.length === 0 && toolCalls.length === 0) {
@@ -386,12 +402,14 @@ export class TaskScheduler {
       );
     }
 
-    if (childOptions.length > 0) {
-      this.#spawningParents.add(parent.id);
-    }
+    // === 同步准入临界区（对 AgentPool 的 P 操作）===
+    // 从 createAgent 到子任务登记之间没有 await，在单线程事件循环内天然原子：
+    // 池扣减、Work Table 登记与预留提交要么整体完成、要么因同步异常整体回滚。
+    // 因此并发创建彼此不会交错，无需再依赖 spawn_in_progress 锁。
+    let children: TaskControlBlock[];
     try {
-      const children = childOptions.map((options) =>
-        TaskControlBlock.createChild(parent, options),
+      children = childOptions.map((options) =>
+        this.createAgent(options, { kind: 'child', parent }),
       );
       const now = this.#clock.now();
       const work: AsyncWorkRegistration[] = [
@@ -408,21 +426,17 @@ export class TaskScheduler {
           childTaskId: child.id,
         })),
       ];
-      // 在提交 AgentPool 预留和注册子任务前先建立 Work Table，确保 ID
-      // 冲突不会留下孤立的子任务或已消耗的池槽位。
+      // 先建立 Work Table 再提交预留，确保 ID 冲突不会留下孤立子任务或漏扣槽位。
       parent.registerAsyncWork(work, now);
       if (reservationDecision?.reserved) {
         reservationDecision.reservation.commit(children);
       }
-
       for (const child of children) {
         this.#tasks.set(child.id, child);
         this.#abortControllers.set(child.id, new AbortController());
         this.#ensureCompletion(child.id);
         parent.recordSubagentSpawned(child.id, child.depth);
-        await this.#store.persist(child);
       }
-
       for (const { call } of resolvedToolCalls) {
         parent.recordToolCall(call.callId, call.toolName);
         parent.appendContext({
@@ -432,24 +446,60 @@ export class TaskScheduler {
           input: call.input,
         });
       }
-      await this.settleParentAfterAsyncWorkTurn(parent);
-
-      for (const child of children) {
-        await this.prepareTaskForQueue(child);
-      }
-      if (resolvedToolCalls.length > 0) {
-        this.launchAsyncToolCalls(parent, resolvedToolCalls);
-      }
-
-      return {
-        spawned: true,
-        tasks: children,
-      };
-    } finally {
+    } catch (error) {
+      // 同步登记阶段异常：预留尚未 commit，直接 close 释放（V），避免槽位泄漏。
       if (reservationDecision?.reserved) {
         reservationDecision.reservation.close();
       }
-      this.#spawningParents.delete(parent.id);
+      throw error;
+    }
+
+    // === 异步“发送”阶段 ===
+    // 池与 Work Table 已稳定，父任务随后阻塞。子任务的持久化与入队相当于把已
+    // 建好的子 Agent 从创建队列发送出去；任一子任务发送失败都会 V 回其槽位。
+    await this.settleParentAfterAsyncWorkTurn(parent);
+    for (const child of children) {
+      await this.sendSpawnedChild(parent, child);
+    }
+    if (resolvedToolCalls.length > 0) {
+      this.launchAsyncToolCalls(parent, resolvedToolCalls);
+    }
+
+    return {
+      spawned: true,
+      tasks: children,
+    };
+  }
+
+  /**
+   * 发送一个已经通过准入的子 Agent：持久化并加入就绪队列。
+   *
+   * 这是创建流程的“发送”阶段，与同步准入临界区解耦。若发送失败，则把已占用的
+   * live 槽位 V 回 AgentPool，清理登记，并把对应子任务工作标记为失败以唤醒父
+   * 任务重新规划，避免父任务永久等待一个并未真正就绪的子 Agent。
+   */
+  private async sendSpawnedChild(
+    parent: TaskControlBlock,
+    child: TaskControlBlock,
+  ): Promise<void> {
+    try {
+      await this.#store.persist(child);
+      await this.prepareTaskForQueue(child);
+    } catch (error) {
+      this.#agentPool.release(child.id);
+      this.#tasks.delete(child.id);
+      this.#abortControllers.delete(child.id);
+      this.#completions.delete(child.id);
+      if (parent.state.status === 'TERMINATED') {
+        return;
+      }
+      const termination: Termination = {
+        kind: 'failed',
+        error: `Failed to send subagent ${child.id}: ${this.errorMessage(error)}`,
+      };
+      parent.completeSubagentWork(child.id, termination, this.#clock.now());
+      parent.recordSubagentResult(child.id, termination);
+      await this.handleAsyncWorkProgress(parent);
     }
   }
 
@@ -743,7 +793,7 @@ export class TaskScheduler {
             task,
             [],
             response.children.map((child) =>
-              this.toCreateChildTaskOptions(child),
+              this.toCreateAgentRequest(child),
             ),
           );
           return;
@@ -768,7 +818,7 @@ export class TaskScheduler {
             task,
             response.calls,
             response.children.map((child) =>
-              this.toCreateChildTaskOptions(child),
+              this.toCreateAgentRequest(child),
             ),
           );
           return;
@@ -1245,15 +1295,12 @@ export class TaskScheduler {
     await this.handleAsyncWorkProgress(parent);
   }
 
-  private toCreateChildTaskOptions(
+  private toCreateAgentRequest(
     request: SubagentSpawnRequest,
-  ): CreateChildTaskOptions {
+  ): CreateAgentRequest {
     return {
       goal: request.goal,
       ...(request.taskId === undefined ? {} : { id: request.taskId }),
-      ...(request.priority === undefined
-        ? {}
-        : { priority: request.priority }),
       ...(request.capabilities === undefined
         ? {}
         : { capabilities: request.capabilities }),
@@ -1281,9 +1328,6 @@ export class TaskScheduler {
       summaryProtocol: TURN_SUMMARY_PROTOCOL,
       delegation: {
         canSpawnSubagents: this.#agentPool.canTaskSpawn(task),
-        currentDepth: task.depth,
-        maxDepth: this.#agentPool.policy.maxDepth,
-        availableAgentSlots: this.#agentPool.availableLiveSlots,
       },
     };
   }

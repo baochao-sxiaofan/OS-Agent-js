@@ -7,16 +7,19 @@ import {
 
 describe('dual-channel context management', () => {
   it('keeps full history while selecting summaries for the model request', () => {
-    const task = TaskControlBlock.create({
-      id: 'dual-channel',
-      goal: 'Verify dual-channel context.',
-      context: [
-        {
-          type: 'user',
-          content: 'first original turn with durable details',
-        },
-      ],
-    });
+    const task = TaskControlBlock.createAgent(
+      {
+        id: 'dual-channel',
+        goal: 'Verify dual-channel context.',
+        context: [
+          {
+            type: 'user',
+            content: 'first original turn with durable details',
+          },
+        ],
+      },
+      { kind: 'root' },
+    );
     task.completeModelTurn({
       request: 'Handle the first original turn.',
       outcome: 'Preserved the first durable result.',
