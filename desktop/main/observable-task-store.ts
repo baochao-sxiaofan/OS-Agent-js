@@ -1,46 +1,50 @@
-import type {
-  TaskControlBlock,
-  TaskSnapshot,
-  TaskStore,
+import {
+  SqliteTaskStore,
+  type TaskControlBlock,
+  type TaskSnapshot,
+  type TaskStore,
 } from '../../src/index.js';
 import type { TaskEvent } from '../../src/kernel/task-event.js';
 
+/**
+ * 桌面端任务存储：在 SqliteTaskStore 之上叠加变更通知。
+ *
+ * 底层的持久化、原子写与恢复查询全部委托给 SqliteTaskStore；本类只负责：
+ * - 在每次 persist 后触发 UI 刷新回调；
+ * - 提供 `list()` 供 RuntimeService 构造视图快照。
+ *
+ * 传入 `:memory:` 时退化为纯内存库，可用于开发或测试。
+ */
 export class ObservableTaskStore implements TaskStore {
-  readonly #snapshots = new Map<string, TaskSnapshot>();
-  readonly #events = new Map<string, TaskEvent[]>();
+  readonly #inner: SqliteTaskStore;
   #onChanged: (() => void) | undefined;
+
+  constructor(location: string) {
+    this.#inner = new SqliteTaskStore({ location });
+  }
 
   setChangeListener(listener: () => void): void {
     this.#onChanged = listener;
   }
 
   list(): TaskSnapshot[] {
-    return [...this.#snapshots.values()].map((snapshot) =>
-      structuredClone(snapshot),
-    );
+    return this.#inner.listSnapshots();
   }
 
   async persist(task: TaskControlBlock): Promise<void> {
-    const snapshot = task.snapshot();
-    const storedEvents = this.#events.get(task.id) ?? [];
-    const latestSequence =
-      storedEvents.at(-1)?.sequence ?? 0;
-    const newEvents = snapshot.events.filter(
-      (event) => event.sequence > latestSequence,
-    );
-
-    storedEvents.push(...structuredClone(newEvents));
-    this.#events.set(task.id, storedEvents);
-    this.#snapshots.set(task.id, structuredClone(snapshot));
+    await this.#inner.persist(task);
     this.#onChanged?.();
   }
 
   async load(taskId: string): Promise<TaskSnapshot | undefined> {
-    const snapshot = this.#snapshots.get(taskId);
-    return snapshot ? structuredClone(snapshot) : undefined;
+    return await this.#inner.load(taskId);
   }
 
   async events(taskId: string): Promise<readonly TaskEvent[]> {
-    return structuredClone(this.#events.get(taskId) ?? []);
+    return await this.#inner.events(taskId);
+  }
+
+  close(): void {
+    this.#inner.close();
   }
 }

@@ -36,6 +36,17 @@ type ConversationRecord = {
 
 type RuntimeListener = (snapshot: RuntimeSnapshotView) => void;
 
+/** RuntimeService 的可选配置。 */
+export type RuntimeServiceOptions = {
+  /**
+   * 任务存储的 SQLite 文件路径。
+   *
+   * 省略或传入 `:memory:` 时使用纯内存库（开发/测试）；
+   * 桌面端主进程应传入 userData 目录下的持久化文件路径。
+   */
+  storeLocation?: string;
+};
+
 const DEMO_USAGE = {
   inputTokens: 180,
   outputTokens: 48,
@@ -51,14 +62,14 @@ const AGENT_POOL_POLICY = {
 export class RuntimeService {
   readonly #provider: SwitchableModelProvider;
   #fakeProvider: FakeModelProvider | undefined;
-  readonly #store = new ObservableTaskStore();
+  readonly #store: ObservableTaskStore;
   readonly #scheduler: TaskScheduler;
   readonly #conversations = new Map<string, ConversationRecord>();
   readonly #listeners = new Set<RuntimeListener>();
   #runPromise: Promise<void> | undefined;
   #publishQueued = false;
 
-  constructor(config?: ConfiguredProvider) {
+  constructor(config?: ConfiguredProvider, options: RuntimeServiceOptions = {}) {
     const initialProvider = config
       ? createConfiguredProvider(config)
       : this.createFakeProvider();
@@ -67,6 +78,11 @@ export class RuntimeService {
       initialProvider instanceof FakeModelProvider
         ? initialProvider
         : undefined;
+
+    // 默认使用内存库，桌面端主进程会传入 userData 目录下的持久化文件路径。
+    this.#store = new ObservableTaskStore(
+      options.storeLocation ?? ':memory:',
+    );
 
     this.#scheduler = new TaskScheduler({
       provider: this.#provider,

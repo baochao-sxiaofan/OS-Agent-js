@@ -2,6 +2,36 @@
 
 本项目使用语义化版本号。
 
+## 1.2.0 - 2026-08-24
+
+### 新增
+
+- 新增 `SqliteTaskStore`：基于 Node 内置 `node:sqlite` 的本地持久化实现，
+  实现现有 `TaskStore` 接口，内核与调度器零改动即可替换内存存储。
+- 单一 SQLite 文件即唯一事实源；快照与事件以 JSON 文本存入 `body` 字段，
+  并冗余 `root_task_id`、`status` 等索引列供崩溃恢复查询。
+- 每次状态跃迁的「快照 upsert + 事件增量 append」在同一事务内原子落盘，
+  事件按 `sequence` 去重，重复 persist 幂等。
+- 采用 WAL 模式优化高频小事务写入，由 SQLite 负责刷盘 durability。
+
+### 变更
+
+- 桌面端 `ObservableTaskStore` 改为包装 `SqliteTaskStore`，在持久化之上叠加
+  UI 变更通知；主进程将任务库落在 Electron `userData` 目录下的 `tasks.db`。
+- `RuntimeService` 新增 `storeLocation` 选项；省略时使用内存库（开发/测试）。
+
+### 说明
+
+- 选用内置 `node:sqlite` 而非原生编译依赖（如 better-sqlite3），避免 Electron
+  跨平台重建负担；该 API 在当前 Node 下仍标注为 experimental，但读写、事务与
+  JSON 值行为已在内核与 Electron 内置 Node 上验证一致。
+
+### 验证
+
+- 内核与桌面端 TypeScript 类型检查通过。
+- 8 个测试文件、51 个测试全部通过，新增 SqliteTaskStore 持久化、事件增量、
+  幂等重写与恢复往返用例，并通过跨进程重开的落盘冒烟验证。
+
 ## 1.1.0 - 2026-08-24
 
 ### 变更

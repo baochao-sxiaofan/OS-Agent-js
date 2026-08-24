@@ -170,7 +170,9 @@ app.whenReady().then(async () => {
   const savedConfig = await settingsStore.load(
     process.env['GEMINI_API_KEY'],
   );
-  const runtime = new RuntimeService(savedConfig);
+  const runtime = new RuntimeService(savedConfig, {
+    storeLocation: join(app.getPath('userData'), 'tasks.db'),
+  });
   registerIpcHandlers(runtime, settingsStore);
   runtime.subscribe((snapshot) => {
     if (mainWindow && !mainWindow.isDestroyed()) {

@@ -89,6 +89,10 @@ export {
   type TaskStore,
 } from './persistence/task-store.js';
 export {
+  SqliteTaskStore,
+  type SqliteTaskStoreOptions,
+} from './persistence/sqlite-task-store.js';
+export {
   AdmissionController,
   AdmissionLease,
   SystemClock,
