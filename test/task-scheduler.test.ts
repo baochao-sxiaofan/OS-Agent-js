@@ -1737,4 +1737,363 @@ describe('TaskScheduler', () => {
     expect(queuedSideEffectExecutions).toBe(0);
     expect(scheduler.liveAgentCount).toBe(0);
   });
+
+  it('restores an interrupted model request as READY and sends it again', async () => {
+    const clock = new ManualClock(50);
+    const store = new InMemoryTaskStore();
+    const persisted = TaskControlBlock.createAgent(
+      {
+        id: 'restore-running',
+        goal: 'Resume the interrupted request.',
+      },
+      { kind: 'root' },
+      10,
+    );
+    persisted.startModelAttempt();
+    persisted.transition(
+      {
+        status: 'RUNNING',
+        enteredAt: 20,
+        providerId: 'fake-model',
+        requestAttempt: 1,
+        operation: 'model',
+      },
+      'test_setup',
+    );
+    await store.persist(persisted);
+
+    const provider = new FakeModelProvider();
+    provider.setResponses(persisted.id, [
+      { type: 'final', output: 'recovered', usage },
+    ]);
+    const scheduler = new TaskScheduler({
+      provider,
+      tools: new ToolRegistry(),
+      store,
+      admission: new AdmissionController(
+        {
+          maxConcurrentRequests: 1,
+          requestsPerMinute: 10,
+          tokensPerMinute: 10_000,
+        },
+        clock,
+      ),
+      clock,
+    });
+
+    const [restored] = await scheduler.restoreMany([persisted.id]);
+
+    expect(restored?.state).toEqual({
+      status: 'READY',
+      enteredAt: 50,
+      reason: 'restored',
+    });
+    await scheduler.runUntilIdle();
+
+    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests[0]?.attempt).toBe(2);
+    expect(restored?.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'completed',
+        output: 'recovered',
+      },
+    });
+  });
+
+  it('keeps single-child restore compatible when its parent is not loaded', async () => {
+    const store = new InMemoryTaskStore();
+    const parent = TaskControlBlock.createAgent(
+      {
+        id: 'unloaded-parent',
+        goal: 'Remain outside this partial restore.',
+      },
+      { kind: 'root' },
+      10,
+    );
+    const child = TaskControlBlock.createAgent(
+      {
+        id: 'partial-restore-child',
+        goal: 'Restore only this child.',
+      },
+      { kind: 'child', parent },
+      20,
+    );
+    await store.persist(child);
+    const scheduler = new TaskScheduler({
+      provider: new FakeModelProvider(),
+      tools: new ToolRegistry(),
+      store,
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 10_000,
+      }),
+    });
+
+    const restored = await scheduler.restore(child.id);
+
+    expect(restored?.state.status).toBe('READY');
+    expect(scheduler.readyQueueSize).toBe(1);
+    expect(scheduler.liveAgentCount).toBe(1);
+  });
+
+  it('cancels an orphaned child during an explicit full-store recovery', async () => {
+    const store = new InMemoryTaskStore();
+    const parent = TaskControlBlock.createAgent(
+      {
+        id: 'missing-parent',
+        goal: 'This snapshot is intentionally absent.',
+      },
+      { kind: 'root' },
+      10,
+    );
+    const child = TaskControlBlock.createAgent(
+      {
+        id: 'orphaned-child',
+        goal: 'Must not continue without a result receiver.',
+      },
+      { kind: 'child', parent },
+      20,
+    );
+    await store.persist(child);
+    const scheduler = new TaskScheduler({
+      provider: new FakeModelProvider(),
+      tools: new ToolRegistry(),
+      store,
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 10_000,
+      }),
+    });
+
+    const [restored] = await scheduler.restoreMany(
+      [child.id],
+      { cancelOrphans: true },
+    );
+
+    expect(restored?.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'cancelled',
+      },
+    });
+    expect(scheduler.readyQueueSize).toBe(0);
+    expect(scheduler.liveAgentCount).toBe(0);
+  });
+
+  it('reconciles a persisted terminal child before waking its parent', async () => {
+    const clock = new ManualClock(100);
+    const store = new InMemoryTaskStore();
+    const parent = TaskControlBlock.createAgent(
+      {
+        id: 'restore-parent',
+        goal: 'Combine the child result.',
+      },
+      { kind: 'root' },
+      10,
+    );
+    parent.transition(
+      {
+        status: 'RUNNING',
+        enteredAt: 20,
+        providerId: 'fake-model',
+        requestAttempt: 1,
+        operation: 'model',
+      },
+      'test_setup',
+    );
+    const child = TaskControlBlock.createAgent(
+      {
+        id: 'restore-child',
+        goal: 'Finish one branch.',
+      },
+      { kind: 'child', parent },
+      30,
+    );
+    parent.registerAsyncWork(
+      [
+        {
+          workId: child.id,
+          kind: 'subagent',
+          label: child.goal,
+          childTaskId: child.id,
+        },
+      ],
+      30,
+    );
+    parent.transition(
+      {
+        status: 'BLOCKED',
+        enteredAt: 40,
+        reason: 'async_work',
+        waitingFor: [child.id],
+      },
+      'test_setup',
+    );
+    const childTermination = {
+      kind: 'completed' as const,
+      output: 'child result',
+    };
+    child.transition(
+      {
+        status: 'TERMINATED',
+        enteredAt: 50,
+        termination: childTermination,
+      },
+      'test_setup',
+    );
+    child.recordTermination(childTermination);
+    await store.persist(parent);
+    await store.persist(child);
+
+    const provider = new FakeModelProvider();
+    provider.setResponses(parent.id, [
+      { type: 'final', output: 'combined', usage },
+    ]);
+    const scheduler = new TaskScheduler({
+      provider,
+      tools: new ToolRegistry(),
+      store,
+      admission: new AdmissionController(
+        {
+          maxConcurrentRequests: 1,
+          requestsPerMinute: 10,
+          tokensPerMinute: 10_000,
+        },
+        clock,
+      ),
+      clock,
+    });
+
+    const restored = await scheduler.restoreMany([child.id, parent.id]);
+    const restoredParent = restored.find((task) => task.id === parent.id);
+    expect(restoredParent?.state.status).toBe('READY');
+
+    await scheduler.runUntilIdle();
+
+    expect(provider.requests[0]?.context).toContainEqual(
+      expect.objectContaining({
+        type: 'async_work_update',
+        allFinished: true,
+        results: [
+          expect.objectContaining({
+            workId: child.id,
+            status: 'completed',
+            termination: childTermination,
+          }),
+        ],
+      }),
+    );
+    expect(restoredParent?.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'completed',
+        output: 'combined',
+      },
+    });
+  });
+
+  it('restarts persisted running tool work with the original idempotency key', async () => {
+    const clock = new ManualClock(100);
+    const store = new InMemoryTaskStore();
+    const task = TaskControlBlock.createAgent(
+      {
+        id: 'restore-tool',
+        goal: 'Resume tool work.',
+        capabilities: ['payment:write'],
+      },
+      { kind: 'root' },
+      10,
+    );
+    task.transition(
+      {
+        status: 'RUNNING',
+        enteredAt: 20,
+        providerId: 'fake-model',
+        requestAttempt: 1,
+        operation: 'model',
+      },
+      'test_setup',
+    );
+    task.registerAsyncWork(
+      [
+        {
+          workId: 'transfer-1',
+          kind: 'tool',
+          label: 'transfer',
+          toolName: 'transfer',
+        },
+      ],
+      30,
+    );
+    task.recordToolCall('transfer-1', 'transfer');
+    task.appendContext({
+      type: 'tool_call',
+      callId: 'transfer-1',
+      toolName: 'transfer',
+      input: { amount: 100 },
+    });
+    task.transition(
+      {
+        status: 'BLOCKED',
+        enteredAt: 40,
+        reason: 'async_work',
+        waitingFor: ['transfer-1'],
+      },
+      'test_setup',
+    );
+    await store.persist(task);
+
+    const idempotencyKeys: string[] = [];
+    const tools = new ToolRegistry();
+    tools.register({
+      name: 'transfer',
+      description: 'Transfer funds.',
+      requiredCapability: 'payment:write',
+      effect: 'side_effect',
+      validateInput: () => ({ valid: true }),
+      execute: async (_input, context) => {
+        idempotencyKeys.push(context.idempotencyKey);
+        return { transferred: true };
+      },
+    });
+    const provider = new FakeModelProvider();
+    provider.setResponses(task.id, [
+      { type: 'final', output: 'transfer confirmed', usage },
+    ]);
+    const scheduler = new TaskScheduler({
+      provider,
+      tools,
+      store,
+      admission: new AdmissionController(
+        {
+          maxConcurrentRequests: 1,
+          requestsPerMinute: 10,
+          tokensPerMinute: 10_000,
+        },
+        clock,
+      ),
+      clock,
+    });
+
+    const [restored] = await scheduler.restoreMany([task.id]);
+    await scheduler.runUntilIdle();
+
+    expect(idempotencyKeys).toEqual(['restore-tool:transfer-1']);
+    expect(provider.requests[0]?.context).toContainEqual(
+      expect.objectContaining({
+        type: 'async_work_update',
+        allFinished: true,
+        results: [
+          expect.objectContaining({
+            workId: 'transfer-1',
+            output: { transferred: true },
+          }),
+        ],
+      }),
+    );
+    expect(restored?.state.status).toBe('TERMINATED');
+  });
 });

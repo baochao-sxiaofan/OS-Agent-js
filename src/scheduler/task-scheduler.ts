@@ -1,4 +1,7 @@
-import type { ContextItem } from '../kernel/context.js';
+import type {
+  ContextItem,
+  ToolCallContextItem,
+} from '../kernel/context.js';
 import type { AsyncWorkRegistration } from '../kernel/async-work.js';
 import type {
   ContextCompactionRequest,
@@ -23,7 +26,7 @@ import type {
 } from '../model/model-provider.js';
 import { TURN_SUMMARY_PROTOCOL } from '../model/model-provider.js';
 import type { TaskStore } from '../persistence/task-store.js';
-import type { JsonValue } from '../types/json.js';
+import type { JsonObject, JsonValue } from '../types/json.js';
 import { ToolNotFoundError, ToolRegistry } from '../tools/tool-registry.js';
 import type { Tool } from '../tools/tool.js';
 import {
@@ -148,6 +151,11 @@ function defaultWait(ms: number, signal?: AbortSignal): Promise<void> {
 
 export type SchedulerRunOptions = {
   signal?: AbortSignal;
+};
+
+export type RestoreTasksOptions = {
+  /** 全库恢复时，是否取消持久化集合中找不到父任务的存活子任务。 */
+  cancelOrphans?: boolean;
 };
 
 export class TaskScheduler {
@@ -504,35 +512,205 @@ export class TaskScheduler {
   }
 
   async restore(taskId: string): Promise<TaskControlBlock | undefined> {
-    const snapshot = await this.#store.load(taskId);
-    if (!snapshot) {
-      return undefined;
+    const [task] = await this.restoreMany([taskId]);
+    return task;
+  }
+
+  /**
+   * 批量恢复一组持久化任务。
+   *
+   * 恢复分为两个阶段：先完整重建任务表与 AgentPool 血缘，再恢复状态机、
+   * 子任务结果、工具执行器和异步 timer。这样父任务的恢复行为不依赖数据库
+   * 返回顺序，也不会在子任务尚未注册时误判其工作永久丢失。
+   */
+  async restoreMany(
+    taskIds: readonly string[],
+    options: RestoreTasksOptions = {},
+  ): Promise<readonly TaskControlBlock[]> {
+    if (new Set(taskIds).size !== taskIds.length) {
+      throw new Error('Restored task IDs must be unique.');
+    }
+    const snapshots = (
+      await Promise.all(
+        taskIds.map(async (taskId) => await this.#store.load(taskId)),
+      )
+    ).filter((snapshot) => snapshot !== undefined);
+    const tasks = snapshots
+      .map((snapshot) => TaskControlBlock.restore(snapshot))
+      .sort(
+        (left, right) =>
+          left.depth - right.depth ||
+          left.createdAt - right.createdAt,
+      );
+
+    for (const task of tasks) {
+      if (this.#tasks.has(task.id)) {
+        throw new Error(`Task is already registered: ${task.id}`);
+      }
     }
 
-    const task = TaskControlBlock.restore(snapshot);
-    this.#agentPool.registerRestored(task);
-    this.#tasks.set(task.id, task);
-    this.#abortControllers.set(task.id, new AbortController());
-    if (task.state.status !== 'TERMINATED') {
-      this.#ensureCompletion(task.id);
+    // 第一阶段只重建内核登记，不执行任何调度动作。
+    for (const task of tasks) {
+      this.#agentPool.registerRestored(task);
+      this.#tasks.set(task.id, task);
+      this.#abortControllers.set(task.id, new AbortController());
+      if (task.state.status !== 'TERMINATED') {
+        this.#ensureCompletion(task.id);
+      }
     }
 
-    if (task.state.status === 'RUNNING') {
+    // 父任务已终止或缺失时，存活子树不再具备合法结果接收方，恢复为取消终态。
+    for (const task of [...tasks].sort(
+      (left, right) => left.depth - right.depth,
+    )) {
+      if (
+        task.parentTaskId === undefined ||
+        task.state.status === 'TERMINATED'
+      ) {
+        continue;
+      }
+      const parent = this.#tasks.get(task.parentTaskId);
+      if (
+        parent?.state.status === 'TERMINATED' ||
+        (!parent && options.cancelOrphans === true)
+      ) {
+        await this.cancel(
+          task.id,
+          parent
+            ? `Parent task ${parent.id} was already terminated during recovery.`
+            : `Parent task ${task.parentTaskId} was missing during recovery.`,
+        );
+      }
+    }
+
+    // 已落盘终态的子任务可能尚未来得及更新父任务 Work Table，恢复时补做对账。
+    for (const child of tasks) {
+      this.reconcileRestoredSubagentResult(child);
+    }
+
+    // 崩溃会使进程内的模型请求失效；持久化 RUNNING 必须回到 READY 重新准入。
+    for (const task of tasks) {
+      if (task.state.status !== 'RUNNING') {
+        continue;
+      }
       task.transition(
         {
           status: 'READY',
-          enteredAt: Date.now(),
+          enteredAt: this.#clock.now(),
           reason: 'restored',
         },
         'recovered_incomplete_model_request',
       );
       await this.#store.persist(task);
     }
-    if (task.state.status === 'READY' && !this.#readyQueue.has(task.id)) {
-      await this.prepareTaskForQueue(task);
+
+    // 重建已失联的工具执行器。相同 callId 会生成相同幂等键，具体幂等保证由
+    // Tool/Skill 边界负责；内核只负责把仍为 running 的 Work Record 重新接上。
+    for (const task of tasks) {
+      await this.restorePendingToolWork(task);
     }
-    await this.restoreAsyncWorkScheduling(task);
-    return task;
+
+    // 最后恢复结果投递、批处理 timer 与 READY 队列。
+    for (const task of tasks) {
+      await this.restoreAsyncWorkScheduling(task);
+      if (task.state.status === 'READY' && !this.#readyQueue.has(task.id)) {
+        await this.prepareTaskForQueue(task);
+      }
+    }
+    return tasks;
+  }
+
+  private reconcileRestoredSubagentResult(
+    child: TaskControlBlock,
+  ): void {
+    if (
+      child.parentTaskId === undefined ||
+      child.state.status !== 'TERMINATED'
+    ) {
+      return;
+    }
+    const parent = this.#tasks.get(child.parentTaskId);
+    if (!parent || parent.state.status === 'TERMINATED') {
+      return;
+    }
+    const pending = parent.activeAsyncWorkGeneration?.work.some(
+      (work) =>
+        work.kind === 'subagent' &&
+        work.childTaskId === child.id &&
+        work.status === 'running',
+    );
+    if (!pending) {
+      return;
+    }
+    parent.completeSubagentWork(
+      child.id,
+      child.state.termination,
+      this.#clock.now(),
+    );
+    parent.recordSubagentResult(child.id, child.state.termination);
+  }
+
+  private async restorePendingToolWork(
+    task: TaskControlBlock,
+  ): Promise<void> {
+    if (task.state.status === 'TERMINATED') {
+      return;
+    }
+    const pendingToolWork =
+      task.activeAsyncWorkGeneration?.work.filter(
+        (work) => work.kind === 'tool' && work.status === 'running',
+      ) ?? [];
+    if (pendingToolWork.length === 0) {
+      return;
+    }
+
+    const calls: ResolvedToolCall[] = [];
+    let recoveredAsFailure = false;
+    for (const work of pendingToolWork) {
+      const contextItem = task.context.findLast(
+        (item): item is ToolCallContextItem =>
+          item.type === 'tool_call' &&
+          item.callId === work.workId,
+      );
+      // 没有 tool_call 上下文的记录可能由外部恢复适配器负责，内核不能擅自
+      // 把它判成失败；只有完整保存过调用参数的本地工具才由这里重启。
+      if (!contextItem) {
+        continue;
+      }
+      if (!isJsonObject(contextItem.input)) {
+        task.failToolWork(
+          work.workId,
+          `Cannot recover tool work ${work.workId}: persisted tool call input is invalid.`,
+          this.#clock.now(),
+        );
+        recoveredAsFailure = true;
+        continue;
+      }
+      const call: ToolCallRequest = {
+        callId: contextItem.callId,
+        toolName: contextItem.toolName,
+        input: contextItem.input,
+      };
+      try {
+        calls.push({
+          call,
+          tool: this.resolveAuthorizedTool(task, call),
+        });
+      } catch (error) {
+        task.failToolWork(
+          work.workId,
+          `Cannot recover tool work ${work.workId}: ${this.errorMessage(error)}`,
+          this.#clock.now(),
+        );
+        recoveredAsFailure = true;
+      }
+    }
+    if (recoveredAsFailure) {
+      await this.handleAsyncWorkProgress(task);
+    }
+    if (calls.length > 0) {
+      this.launchAsyncToolCalls(task, calls);
+    }
   }
 
   private async restoreAsyncWorkScheduling(
@@ -1610,4 +1788,12 @@ export class TaskScheduler {
   private isTaskTerminated(task: TaskControlBlock): boolean {
     return task.state.status === 'TERMINATED';
   }
+}
+
+function isJsonObject(value: JsonValue): value is JsonObject {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value)
+  );
 }

@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`1.2.0`
+当前版本：`1.2.1`
 
 ## 核心状态模型
 
@@ -311,7 +311,7 @@ npm run desktop:build
 ```
 
 推送到 `main` 后，`.github/workflows/windows-desktop.yml` 会在 Windows Runner 上
-执行检查和测试，并生成 `OS-Agent-Setup-1.2.0-x64.exe`。也可以在 GitHub Actions
+执行检查和测试，并生成 `OS-Agent-Setup-1.2.1-x64.exe`。也可以在 GitHub Actions
 页面手动触发该工作流。
 
 ### 最小 Gemini 网络验证
@@ -381,22 +381,25 @@ npm run benchmark:multi-agent
   验证。
 - GLM 和豆包当前使用手工模型 ID；Qwen 模型目录需要华北 2 业务空间 ID。
 - 模型配置切换仅影响后续任务，存在活动 Agent 时禁止切换 Provider。
-- Agent 池与任务存储仍为单进程内存实现。
-- Agent 池运行态计数尚未持久化，数据库恢复将在后续版本实现。
-- Work Table 和 timer deadline 可以从快照恢复，但进程退出后，内存中的工具 Promise
-  和外部子进程仍需未来的持久化执行器 Adapter 负责重连或重启。
+- 任务快照与事件已通过 SQLite 持久化；应用启动时会批量恢复任务树，把失效的
+  `RUNNING` 请求退回 `READY`，并重建 AgentPool、Work Table 结果投递和 timer。
+- 保存过完整 `tool_call` 上下文的运行中本地工具会使用原 `idempotencyKey` 重启；
+  没有调用上下文的外部工作仍需对应恢复 Adapter 接管。
+- Conversation 元数据尚未单独持久化；恢复时每个根任务会重建为一个独立
+  Conversation，根任务内部的 Agent 拓扑保持不变。
 - 人工审批和资源锁已预留状态，但尚未完成协议。
 - 轮次摘要和二次压缩已定义 Provider/Adapter 协议，但尚未连接真实模型服务。
 - RAG 仍将在后续通过 Adapter 接入成熟方案。
 
 ## 后续方向
 
-1. 增加持久化数据库 Adapter、Agent 池快照和崩溃恢复测试。
-2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-3. 增加 Provider 级能力探测和更细粒度的模型兼容性矩阵。
-4. 为更多非 OpenAI-compatible 厂商协议增加原生 Adapter。
-5. 增加真实 `ContextCompactor` Adapter。
-6. 通过独立 Adapter 接入成熟的 RAG 方案。
+1. 持久化 Conversation 元数据，保留重启前的多轮对话归属关系。
+2. 增加外部进程和长时工作对应的恢复 Adapter。
+3. 增加人工审批和资源锁对应的阻塞/唤醒协议。
+4. 增加 Provider 级能力探测和更细粒度的模型兼容性矩阵。
+5. 为更多非 OpenAI-compatible 厂商协议增加原生 Adapter。
+6. 增加真实 `ContextCompactor` Adapter。
+7. 通过独立 Adapter 接入成熟的 RAG 方案。
 
 完整的项目约束与设计规则见 [AGENT.md](./AGENT.md)，版本变更见
 [CHANGELOG.md](./CHANGELOG.md)，本轮多 Agent 测试过程与结果见

@@ -61,6 +61,7 @@ export class SpawnReservation {
 
 export class AgentPool {
   readonly #liveTaskIds = new Set<string>();
+  readonly #restoredTaskIds = new Set<string>();
   readonly #parentByChild = new Map<string, string>();
   readonly #childrenByParent = new Map<string, Set<string>>();
   readonly #spawnedByRoot = new Map<string, number>();
@@ -117,11 +118,25 @@ export class AgentPool {
   }
 
   registerRestored(task: TaskControlBlock): void {
-    if (task.state.status === 'TERMINATED' || this.#liveTaskIds.has(task.id)) {
+    if (this.#restoredTaskIds.has(task.id)) {
       return;
     }
-    if (this.availableLiveSlots <= 0) {
+    const isLive = task.state.status !== 'TERMINATED';
+    if (isLive && this.availableLiveSlots <= 0) {
       throw new Error(`Agent pool cannot restore task ${task.id}: pool is full.`);
+    }
+    this.#restoredTaskIds.add(task.id);
+    if (!this.#spawnedByRoot.has(task.rootTaskId)) {
+      this.#spawnedByRoot.set(task.rootTaskId, 0);
+    }
+    if (task.parentTaskId !== undefined) {
+      this.#spawnedByRoot.set(
+        task.rootTaskId,
+        this.spawnedCount(task.rootTaskId) + 1,
+      );
+    }
+    if (!isLive) {
+      return;
     }
     this.#liveTaskIds.add(task.id);
     this.updatePeakLiveCount();
@@ -131,9 +146,6 @@ export class AgentPool {
         this.#childrenByParent.get(task.parentTaskId) ?? new Set<string>();
       children.add(task.id);
       this.#childrenByParent.set(task.parentTaskId, children);
-    }
-    if (!this.#spawnedByRoot.has(task.rootTaskId)) {
-      this.#spawnedByRoot.set(task.rootTaskId, 0);
     }
   }
 

@@ -117,4 +117,47 @@ describe('AgentPool', () => {
       reason: 'root_spawn_limit_exceeded',
     });
   });
+
+  it('rebuilds the cumulative root spawn limit from restored children', () => {
+    const pool = new AgentPool({
+      maxDepth: 3,
+      maxLiveAgents: 2,
+      maxSpawnedPerRoot: 1,
+    });
+    const root = TaskControlBlock.createAgent(
+      {
+        id: 'restored-root',
+        goal: 'Coordinate restored work.',
+      },
+      { kind: 'root' },
+    );
+    const child = TaskControlBlock.createAgent(
+      {
+        id: 'restored-child',
+        goal: 'Already completed work.',
+      },
+      { kind: 'child', parent: root },
+    );
+    child.transition(
+      {
+        status: 'TERMINATED',
+        enteredAt: 10,
+        termination: {
+          kind: 'completed',
+          output: 'done',
+        },
+      },
+      'test_setup',
+    );
+
+    pool.registerRestored(root);
+    pool.registerRestored(child);
+
+    expect(pool.liveCount).toBe(1);
+    expect(pool.spawnedCount(root.id)).toBe(1);
+    expect(pool.tryReserveChildren(root, 1)).toMatchObject({
+      reserved: false,
+      reason: 'root_spawn_limit_exceeded',
+    });
+  });
 });

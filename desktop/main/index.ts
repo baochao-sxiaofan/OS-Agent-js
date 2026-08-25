@@ -173,6 +173,8 @@ app.whenReady().then(async () => {
   const runtime = new RuntimeService(savedConfig, {
     storeLocation: join(app.getPath('userData'), 'tasks.db'),
   });
+  await runtime.initialize();
+  app.once('will-quit', () => runtime.close());
   registerIpcHandlers(runtime, settingsStore);
   runtime.subscribe((snapshot) => {
     if (mainWindow && !mainWindow.isDestroyed()) {

@@ -166,11 +166,15 @@ File Search 等成熟方案。
 29. Ready Queue、AgentPool 和 Provider 并发峰值观测指标。
 30. 16-Agent Map-Reduce 调度基准和真实 Gemini 三任务多 Agent 冒烟验证。
 31. 双通道上下文独立验证：完整历史与摘要分别持久化，模型只接收预算内混合上下文。
+32. SQLite 任务快照与事件持久化，单次跃迁通过事务原子写入快照和增量事件。
+33. 桌面启动批量恢复任务树：失效 RUNNING 请求重新入队、BLOCKED 异步投递与
+    timer 重建、终态子任务对账、运行中本地工具按原幂等键重启。
 
 后续优先级：
 
-1. 增加持久化数据库 Adapter、Agent 池快照，以及工具/外部进程重连执行器。
-2. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-3. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。
-4. 增加其他真实模型 Provider Adapter。
-5. 增加真实模型厂商的 `ContextCompactor` Adapter。
+1. 持久化 Conversation 元数据，保留重启前的多轮对话归属关系。
+2. 增加外部进程和长时工作对应的恢复 Adapter。
+3. 增加人工审批和资源锁对应的阻塞/唤醒协议。
+4. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。
+5. 增加其他真实模型 Provider Adapter。
+6. 增加真实模型厂商的 `ContextCompactor` Adapter。

@@ -67,6 +67,7 @@ export class RuntimeService {
   readonly #conversations = new Map<string, ConversationRecord>();
   readonly #listeners = new Set<RuntimeListener>();
   #runPromise: Promise<void> | undefined;
+  #initializePromise: Promise<void> | undefined;
   #publishQueued = false;
 
   constructor(config?: ConfiguredProvider, options: RuntimeServiceOptions = {}) {
@@ -104,6 +105,21 @@ export class RuntimeService {
       this.#queuePublish();
     });
     this.createConversationRecord();
+  }
+
+  /**
+   * 从本地任务库恢复所有历史任务，并把未完成任务重新接回调度器。
+   *
+   * 任务库目前不保存 Conversation 元数据，因此恢复时每个根任务重建为一个
+   * 独立 Conversation；根任务下的完整 Agent 拓扑仍通过 rootTaskId 保留。
+   */
+  async initialize(): Promise<void> {
+    this.#initializePromise ??= this.#restorePersistedTasks();
+    await this.#initializePromise;
+  }
+
+  close(): void {
+    this.#store.close();
   }
 
   subscribe(listener: RuntimeListener): () => void {
@@ -271,6 +287,48 @@ export class RuntimeService {
     };
     this.#conversations.set(conversation.id, conversation);
     return conversation;
+  }
+
+  async #restorePersistedTasks(): Promise<void> {
+    const snapshots = this.#store.list();
+    if (snapshots.length === 0) {
+      return;
+    }
+
+    const roots = snapshots
+      .filter((snapshot) => snapshot.parentTaskId === undefined)
+      .sort((left, right) => left.createdAt - right.createdAt);
+    if (roots.length > 0) {
+      this.#conversations.clear();
+      for (const root of roots) {
+        const conversation: ConversationRecord = {
+          id: randomUUID(),
+          title: this.createConversationTitle(root.goal),
+          createdAt: root.createdAt,
+          updatedAt: Math.max(
+            root.updatedAt,
+            ...snapshots
+              .filter((snapshot) => snapshot.rootTaskId === root.id)
+              .map((snapshot) => snapshot.updatedAt),
+          ),
+          rootTaskIds: [root.id],
+        };
+        this.#conversations.set(conversation.id, conversation);
+      }
+    }
+
+    await this.#scheduler.restoreMany(
+      snapshots.map((snapshot) => snapshot.id),
+      { cancelOrphans: true },
+    );
+    this.#touchConversationForLatestTasks();
+    if (
+      this.#scheduler.readyQueueSize > 0 ||
+      this.#scheduler.activeOperationCount > 0
+    ) {
+      this.#ensureSchedulerRunning();
+    }
+    this.#queuePublish();
   }
 
   private configureDemoScenario(rootTaskId: string, task: string): void {

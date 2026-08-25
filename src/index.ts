@@ -116,6 +116,7 @@ export {
 export {
   TaskScheduler,
   type AsyncWorkPolicy,
+  type RestoreTasksOptions,
   type SchedulerMetricsSnapshot,
   type SchedulerRunOptions,
   type SchedulerRunResult,
