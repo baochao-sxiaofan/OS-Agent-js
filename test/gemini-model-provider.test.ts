@@ -359,12 +359,10 @@ describe('GeminiModelProvider', () => {
       type: 'spawn_subagents',
       children: [
         {
-          taskId: 'leaf-a',
           goal: 'Return the square of 2.',
           maxModelAttempts: 1,
         },
         {
-          taskId: 'leaf-b',
           goal: 'Return the square of 3.',
           maxModelAttempts: 1,
         },
@@ -378,9 +376,21 @@ describe('GeminiModelProvider', () => {
           text?: string;
         }>;
       }>;
+      generationConfig?: {
+        responseJsonSchema?: {
+          properties?: {
+            children?: {
+              items?: {
+                properties?: Record<string, unknown>;
+              };
+            };
+          };
+        };
+      };
     };
     const promptText = body.contents?.[0]?.parts?.[0]?.text;
     const prompt = JSON.parse(promptText ?? '{}') as {
+      taskId?: string;
       context?: Array<{ type?: string }>;
       delegation?: {
         canSpawnSubagents?: boolean;
@@ -390,9 +400,14 @@ describe('GeminiModelProvider', () => {
       'context_summary',
       'user',
     ]);
+    expect(prompt).not.toHaveProperty('taskId');
     expect(prompt.delegation).toEqual({
       canSpawnSubagents: true,
     });
+    expect(
+      body.generationConfig?.responseJsonSchema?.properties?.children
+        ?.items?.properties,
+    ).not.toHaveProperty('taskId');
   });
 
   it('rejects a subagent action when delegation is disabled', async () => {

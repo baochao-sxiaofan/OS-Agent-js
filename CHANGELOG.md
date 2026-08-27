@@ -2,6 +2,69 @@
 
 本项目使用语义化版本号。
 
+## 1.3.0 - 2026-08-27
+
+### Capability 与资源授权
+
+- 新增 `CapabilityManager`，作为 Capability 校验、Grant 签发、父级委派和
+  人工审批路由的唯一内核裁决入口。
+- Capability 从字符串升级为可持久化的结构化 Grant，包含 URI 风格资源范围、
+  来源链、可转授标记、执行模式、有效期和可选使用次数。
+- 资源范围支持 `all`、`exact` 和 `subtree`，URI 在比较前统一规范化，防止通过
+  `..` 路径或相似前缀扩大访问范围。
+- 根 Agent 的权限形成整棵任务树的 Authority Ceiling。根权限不覆盖请求能力或
+  资源范围时，子 Agent 的申请会被内核直接拒绝。
+- 普通 Capability 从最近持权祖先开始，沿直接父子关系逐级授权。每一级 Agent
+  只能决定是否向自己的直接子 Agent 转授，最终 Grant 仍由 Manager 校验并签发。
+- `git.push`、转账、生产部署和外部文件系统写入默认属于人工审批能力；请求在
+  Root Ceiling 允许后绕过父 Agent，直接进入人工审批。
+- 人工签发的敏感 Grant 默认只能执行一次，并绑定内核操作 ID；同一操作可在崩溃
+  恢复后使用原幂等键继续执行，其他操作不能复用该 Grant。
+
+### Work Table 与模型协议
+
+- 子 Agent 等待 Capability 时保持存活并进入
+  `BLOCKED(capability_request)`；敏感请求进入 `BLOCKED(human_approval)`。
+- Capability blocker 作为 `waiting_for_capability` 非终态进展写入父任务的
+  Work Table，通过既有 Completion Mailbox 和 30 秒批处理 timer 投递，不增加
+  独立消息队列或立即唤醒路径。
+- 多个子 Agent 的 Capability 请求可以在同一 `async_work_update.pending` 中批量
+  投递；父 Agent 一轮未处理完的 blocker 会重新进入下一批窗口。
+- 新增 `request_capabilities` 和 `resolve_capability_request` 结构化动作。
+  Agent 只能声明所需能力和资源，不能指定审批路由，也不能自行构造 Grant。
+- 父 Agent 不能在存在 Capability blocker 时返回 `wait_for_async_work`，避免已经
+  投递的非终态进展失去后续唤醒路径。
+- Gemini、Anthropic 和 OpenAI-compatible Provider 共用统一的结构化响应 Schema
+  和解析器，消除厂商协议漂移。
+
+### Tool 与身份边界
+
+- Tool 可见性与执行权限解耦。全局 Tool 不再因当前 Capability 被隐藏，后续由
+  Character 层叠加角色专属可见性。
+- Tool 可通过 `requiredCapabilities(input)` 按实际参数声明资源权限；旧的
+  `requiredCapability` 全局简写继续兼容。
+- Tool 调用在登记前和实际执行前均经过 CapabilityManager 校验；工具不存在、输入
+  非法或权限不足会作为结构化拒绝返回，不会进入执行器。
+- 子任务 ID 完全由内核生成，模型只提交目标和能力请求；Provider 发送上下文时清除
+  子任务内部 ID。
+- 新增可注入任务 ID 生成器，保留测试和演示的确定性，同时防止模型控制身份。
+
+### 持久化与验证
+
+- Capability Grant、审批请求、逐级委派路径、Work Table blocker 和相关审计事件
+  全部进入任务快照；旧字符串 Capability 快照可继续恢复。
+- 新增父级授权、Root Ceiling、敏感权限人工路由、三级逐跳授权、并发请求批处理、
+  资源范围、防路径逃逸、单次 Grant 和审批快照测试。
+- 11 个测试文件、76 个测试全部通过。
+- 内核与桌面端 TypeScript 类型检查、核心构建、桌面生产构建和 Git diff 检查通过。
+
+### 当前边界
+
+- 人工审批目前提供 `pendingHumanCapabilityApprovals()` 和
+  `resolveHumanCapabilityRequest()` 内核 API，桌面审批界面尚未接入。
+- Character 定义、Character 专属 Tool 可见性以及 MCP/Skill Adapter 将在后续版本
+  接入。
+
 ## 1.2.1 - 2026-08-25
 
 ### 修复

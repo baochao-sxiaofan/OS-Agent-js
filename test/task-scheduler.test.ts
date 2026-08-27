@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AdmissionController,
   AgentPool,
+  CapabilityManager,
   FakeContextCompactor,
   FakeModelProvider,
   InMemoryTaskStore,
@@ -37,10 +38,14 @@ class ManualClock implements Clock {
 
 function createRuntime(options?: {
   agentPool?: AgentPool;
+  asyncWorkBatchWindowMs?: number;
+  capabilityManager?: CapabilityManager;
   clock?: Clock;
   maxConcurrentRequests?: number;
   readyQueue?: ReadyQueue;
   requestsPerMinute?: number;
+  taskIds?: readonly string[];
+  wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }) {
   const provider = new FakeModelProvider();
   const tools = new ToolRegistry();
@@ -53,17 +58,40 @@ function createRuntime(options?: {
     },
     options?.clock,
   );
+  const taskIds = [...(options?.taskIds ?? [])];
   const scheduler = new TaskScheduler({
     provider,
     tools,
     store,
     admission,
+    ...(options?.wait === undefined ? {} : { wait: options.wait }),
+    ...(options?.asyncWorkBatchWindowMs === undefined
+      ? {}
+      : {
+          asyncWorkPolicy: {
+            batchWindowMs: options.asyncWorkBatchWindowMs,
+          },
+        }),
+    ...(options?.capabilityManager === undefined
+      ? {}
+      : { capabilityManager: options.capabilityManager }),
     ...(options?.agentPool === undefined
       ? {}
       : { agentPool: options.agentPool }),
     ...(options?.readyQueue === undefined
       ? {}
       : { readyQueue: options.readyQueue }),
+    ...(options?.taskIds === undefined
+      ? {}
+      : {
+          taskIdGenerator: () => {
+            const taskId = taskIds.shift();
+            if (!taskId) {
+              throw new Error('Test task ID sequence was exhausted.');
+            }
+            return taskId;
+          },
+        }),
   });
   return { admission, provider, scheduler, store, tools };
 }
@@ -205,7 +233,7 @@ describe('TaskScheduler', () => {
     expect(second.state.status).toBe('TERMINATED');
   });
 
-  it('fails a task when the model requests a tool without capability', async () => {
+  it('returns a capability requirement when a tool call is unauthorized', async () => {
     const privilegedTool: Tool = {
       name: 'write_file',
       description: 'Write a file.',
@@ -232,6 +260,11 @@ describe('TaskScheduler', () => {
         ],
         usage,
       },
+      {
+        type: 'final',
+        output: 'continued without the privileged operation',
+        usage,
+      },
     ]);
 
     await scheduler.runUntilIdle();
@@ -239,15 +272,119 @@ describe('TaskScheduler', () => {
     expect(task.state).toMatchObject({
       status: 'TERMINATED',
       termination: {
-        kind: 'failed',
+        kind: 'completed',
+        output: 'continued without the privileged operation',
       },
     });
-    if (task.state.status === 'TERMINATED') {
-      expect(task.state.termination).toMatchObject({
-        kind: 'failed',
-        error: expect.stringContaining('lacks capability'),
-      });
-    }
+    expect(task.context).toContainEqual({
+      type: 'tool_call_rejected',
+      toolName: 'write_file',
+      reason: 'capability_required',
+      message: 'Tool write_file requires additional capability.',
+      requiredCapabilities: [
+        {
+          capability: 'filesystem:write',
+          scope: { kind: 'all' },
+        },
+      ],
+    });
+    expect(provider.requests[0]?.tools).toContainEqual({
+      name: 'write_file',
+      description: 'Write a file.',
+    });
+  });
+
+  it('derives resource-scoped capability requirements from tool input', async () => {
+    const writes: string[] = [];
+    const scopedWriteTool: Tool = {
+      name: 'write_scoped_file',
+      description: 'Write one scoped file.',
+      effect: 'side_effect',
+      validateInput: (input) =>
+        typeof input['resource'] === 'string'
+          ? { valid: true }
+          : { valid: false, error: 'resource is required' },
+      requiredCapabilities: (input) => [
+        {
+          capability: 'file.write',
+          scope: {
+            kind: 'exact',
+            resource: String(input['resource']),
+          },
+        },
+      ],
+      execute: async (input) => {
+        writes.push(String(input['resource']));
+        return 'written';
+      },
+    };
+    const { provider, scheduler, tools } = createRuntime();
+    tools.register(scopedWriteTool);
+    const task = await scheduler.submit({
+      id: 'scoped-writer',
+      goal: 'Write only inside the assigned directory.',
+      capabilities: [
+        {
+          capability: 'file.write',
+          scope: {
+            kind: 'subtree',
+            resource: 'file:///repo/src/auth',
+          },
+        },
+      ],
+    });
+    provider.setResponses(task.id, [
+      {
+        type: 'tool_calls',
+        calls: [
+          {
+            callId: 'allowed-write',
+            toolName: 'write_scoped_file',
+            input: {
+              resource: 'file:///repo/src/auth/token.ts',
+            },
+          },
+        ],
+        usage,
+      },
+      {
+        type: 'tool_calls',
+        calls: [
+          {
+            callId: 'denied-write',
+            toolName: 'write_scoped_file',
+            input: {
+              resource: 'file:///repo/src/shared/config.ts',
+            },
+          },
+        ],
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'stopped at the assigned boundary',
+        usage,
+      },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    expect(writes).toEqual(['file:///repo/src/auth/token.ts']);
+    expect(task.context).toContainEqual(
+      expect.objectContaining({
+        type: 'tool_call_rejected',
+        reason: 'capability_required',
+        requiredCapabilities: [
+          {
+            capability: 'file.write',
+            scope: {
+              kind: 'exact',
+              resource: 'file:///repo/src/shared/config.ts',
+            },
+          },
+        ],
+      }),
+    );
   });
 
   it('terminates before calling the model when task budget is insufficient', async () => {
@@ -376,6 +513,7 @@ describe('TaskScheduler', () => {
     const { provider, scheduler } = createRuntime({
       agentPool,
       maxConcurrentRequests: 1,
+      taskIds: ['middle', 'leaf'],
     });
     const root = await scheduler.submit({
       id: 'root',
@@ -384,7 +522,7 @@ describe('TaskScheduler', () => {
     provider.setResponses('root', [
       {
         type: 'spawn_subagents',
-        children: [{ taskId: 'middle', goal: 'Coordinate the branch.' }],
+        children: [{ goal: 'Coordinate the branch.' }],
         usage,
       },
       { type: 'final', output: 'root complete', usage },
@@ -392,7 +530,7 @@ describe('TaskScheduler', () => {
     provider.setResponses('middle', [
       {
         type: 'spawn_subagents',
-        children: [{ taskId: 'leaf', goal: 'Complete concrete work.' }],
+        children: [{ goal: 'Complete concrete work.' }],
         usage,
       },
       { type: 'final', output: 'middle complete', usage },
@@ -437,6 +575,42 @@ describe('TaskScheduler', () => {
     expect(scheduler.liveAgentCount).toBe(0);
   });
 
+  it('retries internal child ID collisions without involving the model', async () => {
+    const { provider, scheduler } = createRuntime({
+      maxConcurrentRequests: 1,
+      taskIds: ['collision-root', 'generated-child'],
+    });
+    const root = await scheduler.submit({
+      id: 'collision-root',
+      goal: 'Delegate one branch.',
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'spawn_subagents',
+        children: [{ goal: 'Complete the generated branch.' }],
+        usage,
+      },
+      { type: 'final', output: 'root complete', usage },
+    ]);
+    provider.setResponses('generated-child', [
+      { type: 'final', output: 'child complete', usage },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    expect(scheduler.getTask('generated-child')).toBeDefined();
+    expect(provider.requests.map((request) => request.taskId)).toEqual([
+      'collision-root',
+      'generated-child',
+      'collision-root',
+    ]);
+    expect(
+      root.context.some(
+        (item) => item.type === 'subagent_spawn_rejected',
+      ),
+    ).toBe(false);
+  });
+
   it('rejects depth-four delegation and lets the leaf report upward', async () => {
     const agentPool = new AgentPool({
       maxDepth: 3,
@@ -446,6 +620,7 @@ describe('TaskScheduler', () => {
     const { provider, scheduler } = createRuntime({
       agentPool,
       maxConcurrentRequests: 1,
+      taskIds: ['middle-depth', 'leaf-depth'],
     });
     const root = await scheduler.submit({
       id: 'root-depth',
@@ -454,7 +629,7 @@ describe('TaskScheduler', () => {
     provider.setResponses('root-depth', [
       {
         type: 'spawn_subagents',
-        children: [{ taskId: 'middle-depth', goal: 'Coordinate.' }],
+        children: [{ goal: 'Coordinate.' }],
         usage,
       },
       { type: 'final', output: 'root handled fallback', usage },
@@ -462,7 +637,7 @@ describe('TaskScheduler', () => {
     provider.setResponses('middle-depth', [
       {
         type: 'spawn_subagents',
-        children: [{ taskId: 'leaf-depth', goal: 'Do work.' }],
+        children: [{ goal: 'Do work.' }],
         usage,
       },
       { type: 'final', output: 'middle handled fallback', usage },
@@ -470,7 +645,7 @@ describe('TaskScheduler', () => {
     provider.setResponses('leaf-depth', [
       {
         type: 'spawn_subagents',
-        children: [{ taskId: 'forbidden-depth', goal: 'Too deep.' }],
+        children: [{ goal: 'Too deep.' }],
         usage,
       },
       {
@@ -523,7 +698,7 @@ describe('TaskScheduler', () => {
     provider.setResponses(root.id, [
       {
         type: 'spawn_subagents',
-        children: [{ taskId: 'no-slot', goal: 'Cannot be created.' }],
+        children: [{ goal: 'Cannot be created.' }],
         usage,
       },
       { type: 'final', output: 'completed without delegation', usage },
@@ -566,6 +741,10 @@ describe('TaskScheduler', () => {
         maxLiveAgents: 3,
         maxSpawnedPerRoot: 2,
       }),
+      taskIdGenerator: (() => {
+        const taskIds = ['first-child', 'second-child'];
+        return () => taskIds.shift() ?? 'unexpected-child';
+      })(),
     });
     const root = await scheduler.submit({
       id: 'concurrent-root',
@@ -584,10 +763,10 @@ describe('TaskScheduler', () => {
     // 两次创建请求在同一事件循环中并发发起（各自的同步准入段先后原子执行）。
     const [firstSpawn, secondSpawn] = await Promise.all([
       scheduler.spawnChildren(root.id, [
-        { id: 'first-child', goal: 'First branch.' },
+        { goal: 'First branch.' },
       ]),
       scheduler.spawnChildren(root.id, [
-        { id: 'second-child', goal: 'Second branch.' },
+        { goal: 'Second branch.' },
       ]),
     ]);
 
@@ -625,6 +804,7 @@ describe('TaskScheduler', () => {
         maxLiveAgents: 3,
         maxSpawnedPerRoot: 5,
       }),
+      taskIdGenerator: () => 'doomed-child',
     });
     const root = await scheduler.submit({
       id: 'send-fail-root',
@@ -641,7 +821,7 @@ describe('TaskScheduler', () => {
     );
 
     const result = await scheduler.spawnChildren(root.id, [
-      { id: 'doomed-child', goal: 'Will fail to send.' },
+      { goal: 'Will fail to send.' },
     ]);
 
     expect(result).toMatchObject({ spawned: true });
@@ -906,6 +1086,7 @@ describe('TaskScheduler', () => {
         requestsPerMinute: 10,
         tokensPerMinute: 10_000,
       }),
+      taskIdGenerator: () => 'oversized-child',
     });
     const root = await scheduler.submit({
       id: 'context-parent',
@@ -916,7 +1097,6 @@ describe('TaskScheduler', () => {
         type: 'spawn_subagents',
         children: [
           {
-            taskId: 'oversized-child',
             goal: 'Cannot fit.',
             context: [{ type: 'user', content: 'oversized child context' }],
           },
@@ -1141,6 +1321,10 @@ describe('TaskScheduler', () => {
         tokensPerMinute: 50_000,
       }),
       asyncWorkPolicy: { batchWindowMs: 30_000 },
+      taskIdGenerator: (() => {
+        const taskIds = ['mixed-a', 'mixed-b'];
+        return () => taskIds.shift() ?? 'unexpected-mixed-child';
+      })(),
       wait: async (_ms, signal) => {
         await Promise.race([
           batchWindow,
@@ -1162,8 +1346,8 @@ describe('TaskScheduler', () => {
       {
         type: 'async_work',
         children: [
-          { taskId: 'mixed-a', goal: 'Complete branch A.' },
-          { taskId: 'mixed-b', goal: 'Complete branch B.' },
+          { goal: 'Complete branch A.' },
+          { goal: 'Complete branch B.' },
         ],
         calls: [
           {
@@ -1662,6 +1846,7 @@ describe('TaskScheduler', () => {
         tokensPerMinute: 20_000,
       }),
       asyncWorkPolicy: { batchWindowMs: 30_000 },
+      taskIdGenerator: () => 'cancelled-child',
       wait: async (_ms, signal) => {
         await Promise.race([
           batchWindow,
@@ -1683,7 +1868,6 @@ describe('TaskScheduler', () => {
         type: 'async_work',
         children: [
           {
-            taskId: 'cancelled-child',
             goal: 'Wait for a local operation.',
             capabilities: ['job:run'],
           },
@@ -1998,14 +2182,26 @@ describe('TaskScheduler', () => {
   it('restarts persisted running tool work with the original idempotency key', async () => {
     const clock = new ManualClock(100);
     const store = new InMemoryTaskStore();
+    const capabilityManager = new CapabilityManager();
+    const grants = capabilityManager.grantByHuman(
+      'restore-tool',
+      'approved-transfer',
+      [
+        {
+          capability: 'payment:write',
+          scope: { kind: 'all' },
+        },
+      ],
+      10,
+    );
     const task = TaskControlBlock.createAgent(
       {
         id: 'restore-tool',
         goal: 'Resume tool work.',
-        capabilities: ['payment:write'],
       },
       { kind: 'root' },
       10,
+      grants,
     );
     task.transition(
       {
@@ -2029,6 +2225,10 @@ describe('TaskScheduler', () => {
       30,
     );
     task.recordToolCall('transfer-1', 'transfer');
+    task.consumeCapabilityGrant(
+      grants[0]?.grantId ?? '',
+      'transfer-1',
+    );
     task.appendContext({
       type: 'tool_call',
       callId: 'transfer-1',
@@ -2067,6 +2267,7 @@ describe('TaskScheduler', () => {
       provider,
       tools,
       store,
+      capabilityManager,
       admission: new AdmissionController(
         {
           maxConcurrentRequests: 1,
@@ -2095,5 +2296,500 @@ describe('TaskScheduler', () => {
       }),
     );
     expect(restored?.state.status).toBe('TERMINATED');
+  });
+
+  it('routes a normal capability request to the parent for approval', async () => {
+    const capabilityManager = new CapabilityManager({
+      requestIdGenerator: () => 'capability-request-1',
+    });
+    const { provider, scheduler } = createRuntime({
+      asyncWorkBatchWindowMs: 1,
+      capabilityManager,
+      maxConcurrentRequests: 1,
+      taskIds: ['capability-child'],
+    });
+    const root = await scheduler.submit({
+      id: 'capability-root',
+      goal: 'Coordinate a scoped code change.',
+      capabilities: [
+        {
+          capability: 'file.write',
+          scope: {
+            kind: 'subtree',
+            resource: 'file:///repo/src',
+          },
+        },
+      ],
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'spawn_subagents',
+        children: [{ goal: 'Modify one authentication file.' }],
+        usage,
+      },
+      {
+        type: 'resolve_capability_request',
+        requestRef: 'capability-request-1',
+        decision: 'approve',
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'change integrated',
+        usage,
+      },
+    ]);
+    provider.setResponses('capability-child', [
+      {
+        type: 'request_capabilities',
+        requests: [
+          {
+            capability: 'file.write',
+            scope: {
+              kind: 'exact',
+              resource: 'file:///repo/src/auth/token.ts',
+            },
+            reason: 'The assigned implementation requires this file.',
+          },
+        ],
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'child change complete',
+        usage,
+      },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    const child = scheduler.getTask('capability-child');
+    expect(child?.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'completed',
+        output: 'child change complete',
+      },
+    });
+    expect(child?.capabilityGrants).toEqual([
+      expect.objectContaining({
+        capability: 'file.write',
+        scope: {
+          kind: 'exact',
+          resource: 'file:///repo/src/auth/token.ts',
+        },
+        source: expect.objectContaining({
+          type: 'parent',
+          issuerTaskId: root.id,
+        }),
+      }),
+    ]);
+    expect(root.context).toContainEqual(
+      expect.objectContaining({
+        type: 'async_work_update',
+        pending: [
+          expect.objectContaining({
+            status: 'waiting_for_capability',
+            blocker: expect.objectContaining({
+              requestRef: 'capability-request-1',
+            }),
+          }),
+        ],
+      }),
+    );
+    expect(root.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'completed',
+        output: 'change integrated',
+      },
+    });
+  });
+
+  it('propagates capability grants down the Agent ancestry one hop at a time', async () => {
+    const capabilityManager = new CapabilityManager({
+      requestIdGenerator: () => 'nested-capability-request',
+    });
+    const { provider, scheduler } = createRuntime({
+      asyncWorkBatchWindowMs: 1,
+      capabilityManager,
+      maxConcurrentRequests: 1,
+      taskIds: ['middle-agent', 'leaf-agent'],
+    });
+    const root = await scheduler.submit({
+      id: 'root-authority',
+      goal: 'Coordinate a nested implementation.',
+      capabilities: [
+        {
+          capability: 'file.write',
+          scope: {
+            kind: 'subtree',
+            resource: 'file:///repo/src',
+          },
+        },
+      ],
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'spawn_subagents',
+        children: [{ goal: 'Coordinate the implementation branch.' }],
+        usage,
+      },
+      {
+        type: 'resolve_capability_request',
+        requestRef: 'nested-capability-request',
+        decision: 'approve',
+        usage,
+      },
+      { type: 'final', output: 'root complete', usage },
+    ]);
+    provider.setResponses('middle-agent', [
+      {
+        type: 'spawn_subagents',
+        children: [{ goal: 'Modify the assigned source file.' }],
+        usage,
+      },
+      {
+        type: 'resolve_capability_request',
+        requestRef: 'nested-capability-request',
+        decision: 'approve',
+        usage,
+      },
+      { type: 'final', output: 'middle complete', usage },
+    ]);
+    provider.setResponses('leaf-agent', [
+      {
+        type: 'request_capabilities',
+        requests: [
+          {
+            capability: 'file.write',
+            scope: {
+              kind: 'exact',
+              resource: 'file:///repo/src/auth/token.ts',
+            },
+          },
+        ],
+        usage,
+      },
+      { type: 'final', output: 'leaf complete', usage },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    const middle = scheduler.getTask('middle-agent');
+    const leaf = scheduler.getTask('leaf-agent');
+    expect(middle?.capabilityGrants).toEqual([
+      expect.objectContaining({
+        capability: 'file.write',
+        source: expect.objectContaining({
+          type: 'parent',
+          issuerTaskId: root.id,
+        }),
+      }),
+    ]);
+    expect(leaf?.capabilityGrants).toEqual([
+      expect.objectContaining({
+        capability: 'file.write',
+        source: expect.objectContaining({
+          type: 'parent',
+          issuerTaskId: 'middle-agent',
+        }),
+      }),
+    ]);
+    const rootRequestUpdate = root.context.find(
+      (item) =>
+        item.type === 'async_work_update' &&
+        item.pending.some(
+          (pending) =>
+            pending.label === 'Coordinate the implementation branch.' &&
+            pending.blocker?.requestRef ===
+              'nested-capability-request',
+        ),
+    );
+    const middleRequestUpdate = middle?.context.find(
+      (item) =>
+        item.type === 'async_work_update' &&
+        item.pending.some(
+          (pending) =>
+            pending.label === 'Modify the assigned source file.' &&
+            pending.blocker?.requestRef ===
+              'nested-capability-request',
+        ),
+    );
+    expect(rootRequestUpdate).toBeDefined();
+    expect(middleRequestUpdate).toBeDefined();
+    expect(root.state.status).toBe('TERMINATED');
+  });
+
+  it('batches concurrent child capability blockers on the parent work table', async () => {
+    const requestIds = ['batch-capability-1', 'batch-capability-2'];
+    let releaseBatchWindow: (() => void) | undefined;
+    const batchWindow = new Promise<void>((resolve) => {
+      releaseBatchWindow = resolve;
+    });
+    const capabilityManager = new CapabilityManager({
+      requestIdGenerator: () =>
+        requestIds.shift() ?? 'unexpected-capability-request',
+    });
+    const { provider, scheduler } = createRuntime({
+      asyncWorkBatchWindowMs: 5,
+      capabilityManager,
+      maxConcurrentRequests: 2,
+      taskIds: ['batch-child-a', 'batch-child-b'],
+      wait: async () => await batchWindow,
+    });
+    const root = await scheduler.submit({
+      id: 'batch-capability-root',
+      goal: 'Coordinate two scoped changes.',
+      capabilities: ['file.write'],
+      maxModelAttempts: 5,
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'spawn_subagents',
+        children: [
+          { goal: 'Modify module A.' },
+          { goal: 'Modify module B.' },
+        ],
+        usage,
+      },
+      {
+        type: 'resolve_capability_request',
+        requestRef: 'batch-capability-1',
+        decision: 'approve',
+        usage,
+      },
+      {
+        type: 'resolve_capability_request',
+        requestRef: 'batch-capability-2',
+        decision: 'approve',
+        usage,
+      },
+      { type: 'final', output: 'both changes complete', usage },
+    ]);
+    for (const [taskId, resource] of [
+      ['batch-child-a', 'file:///repo/a.ts'],
+      ['batch-child-b', 'file:///repo/b.ts'],
+    ] as const) {
+      provider.setResponses(taskId, [
+        {
+          type: 'request_capabilities',
+          requests: [
+            {
+              capability: 'file.write',
+              scope: { kind: 'exact', resource },
+            },
+          ],
+          usage,
+        },
+        { type: 'final', output: `${taskId} complete`, usage },
+      ]);
+    }
+
+    const run = scheduler.runUntilIdle();
+    await vi.waitFor(() => {
+      expect(scheduler.getTask('batch-child-a')?.state.status).toBe(
+        'BLOCKED',
+      );
+      expect(scheduler.getTask('batch-child-b')?.state.status).toBe(
+        'BLOCKED',
+      );
+    });
+    expect(
+      provider.requests.filter((request) => request.taskId === root.id),
+    ).toHaveLength(1);
+
+    releaseBatchWindow?.();
+    await run;
+
+    const batchedUpdate = root.context.find(
+      (item) =>
+        item.type === 'async_work_update' &&
+        item.pending.filter(
+          (pending) =>
+            pending.status === 'waiting_for_capability',
+        ).length === 2,
+    );
+    expect(batchedUpdate).toBeDefined();
+    expect(
+      root.context.filter(
+        (item) => item.type === 'async_work_update',
+      ).length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(root.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'completed',
+        output: 'both changes complete',
+      },
+    });
+  });
+
+  it('does not let a parent approve capability it does not hold', async () => {
+    const capabilityManager = new CapabilityManager({
+      requestIdGenerator: () => 'unowned-request-1',
+    });
+    const { provider, scheduler } = createRuntime({
+      capabilityManager,
+      maxConcurrentRequests: 1,
+      taskIds: ['unowned-child'],
+    });
+    const root = await scheduler.submit({
+      id: 'unowned-root',
+      goal: 'Coordinate without write authority.',
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'spawn_subagents',
+        children: [{ goal: 'Attempt a scoped change.' }],
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'fallback complete',
+        usage,
+      },
+    ]);
+    provider.setResponses('unowned-child', [
+      {
+        type: 'request_capabilities',
+        requests: [
+          {
+            capability: 'file.write',
+            scope: {
+              kind: 'exact',
+              resource: 'file:///repo/src/auth/token.ts',
+            },
+          },
+        ],
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'continued without write access',
+        usage,
+      },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    const child = scheduler.getTask('unowned-child');
+    expect(child?.capabilityGrants).toEqual([]);
+    expect(child?.context).toContainEqual(
+      expect.objectContaining({
+        type: 'capability_request_result',
+        requestRef: 'unowned-request-1',
+        status: 'denied',
+        reason: expect.stringContaining(
+          'Root Agent authority does not cover capability file.write',
+        ),
+      }),
+    );
+    expect(child?.state.status).toBe('TERMINATED');
+  });
+
+  it('routes sensitive capability requests directly to human approval', async () => {
+    const capabilityManager = new CapabilityManager({
+      requestIdGenerator: () => 'human-request-1',
+    });
+    const { provider, scheduler } = createRuntime({
+      capabilityManager,
+      maxConcurrentRequests: 1,
+      taskIds: ['sensitive-child'],
+    });
+    const root = await scheduler.submit({
+      id: 'sensitive-root',
+      goal: 'Coordinate a release.',
+      capabilities: [
+        {
+          capability: 'git.push',
+          scope: {
+            kind: 'exact',
+            resource: 'git://repo/origin/main',
+          },
+        },
+      ],
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'spawn_subagents',
+        children: [{ goal: 'Publish the approved commit.' }],
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'release complete',
+        usage,
+      },
+    ]);
+    provider.setResponses('sensitive-child', [
+      {
+        type: 'request_capabilities',
+        requests: [
+          {
+            capability: 'git.push',
+            scope: {
+              kind: 'exact',
+              resource: 'git://repo/origin/main',
+            },
+            reason: 'The release must publish the reviewed commit.',
+          },
+        ],
+        usage,
+      },
+      {
+        type: 'final',
+        output: 'commit published',
+        usage,
+      },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    const child = scheduler.getTask('sensitive-child');
+    expect(child?.state).toMatchObject({
+      status: 'BLOCKED',
+      reason: 'human_approval',
+      waitingFor: ['human-request-1'],
+    });
+    expect(scheduler.pendingHumanCapabilityApprovals()).toEqual([
+      expect.objectContaining({
+        requestId: 'human-request-1',
+        requesterTaskId: 'sensitive-child',
+      }),
+    ]);
+    expect(
+      root.context.some(
+        (item) =>
+          item.type === 'async_work_update' &&
+          item.pending.some(
+            (pending) =>
+              pending.blocker?.requestRef === 'human-request-1',
+          ),
+      ),
+    ).toBe(false);
+
+    await scheduler.resolveHumanCapabilityRequest(
+      'human-request-1',
+      'approve',
+    );
+    await scheduler.runUntilIdle();
+
+    expect(child?.capabilityGrants).toEqual([
+      expect.objectContaining({
+        capability: 'git.push',
+        source: {
+          type: 'human',
+          approvalRequestId: 'human-request-1',
+        },
+      }),
+    ]);
+    expect(root.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'completed',
+        output: 'release complete',
+      },
+    });
   });
 });

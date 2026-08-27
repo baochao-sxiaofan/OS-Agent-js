@@ -1,4 +1,3 @@
-import type { ContextItem } from '../kernel/context.js';
 import type { JsonObject, JsonValue } from '../types/json.js';
 import type {
   ModelProvider,
@@ -10,6 +9,7 @@ import type {
 import {
   STRUCTURED_AGENT_INSTRUCTION,
   parseStructuredAgentResponse,
+  serializeContextItemForModel,
 } from './structured-agent-response.js';
 
 export type AnthropicModelProviderOptions = {
@@ -92,10 +92,9 @@ export class AnthropicModelProvider implements ModelProvider {
           {
             role: 'user',
             content: JSON.stringify({
-              taskId: request.taskId,
               goal: request.goal,
               attempt: request.attempt,
-              context: request.context.map(serializeContextItem),
+              context: request.context.map(serializeContextItemForModel),
               tools: request.tools,
               delegation: request.delegation,
             }),
@@ -137,10 +136,6 @@ export class AnthropicModelProvider implements ModelProvider {
       parseUsage(object['usage']),
     );
   }
-}
-
-function serializeContextItem(item: ContextItem): JsonObject {
-  return structuredClone(item) as JsonObject;
 }
 
 async function parseJsonResponse(response: Response): Promise<JsonValue> {

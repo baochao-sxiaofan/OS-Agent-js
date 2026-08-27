@@ -2,6 +2,10 @@ import type {
   ContextItem,
   TurnSummary,
 } from '../kernel/context.js';
+import type {
+  CapabilityInput,
+  CapabilityRequest,
+} from '../capability/capability.js';
 import type { JsonObject, JsonValue } from '../types/json.js';
 
 export type TurnSummaryProtocol = {
@@ -63,9 +67,10 @@ export type ModelUsage = {
 };
 
 export type SubagentSpawnRequest = {
-  taskId?: string;
   goal: string;
-  capabilities?: string[];
+  /** Compatibility shorthand for capabilities applying to all resources. */
+  capabilities?: CapabilityInput[];
+  requestedCapabilities?: CapabilityRequest[];
   context?: ContextItem[];
   maxModelAttempts?: number;
   maxCostUsd?: number;
@@ -99,6 +104,20 @@ export type ModelResponse =
     }
   | {
       type: 'wait_for_async_work';
+      turnSummary?: TurnSummary;
+      usage: ModelUsage;
+    }
+  | {
+      type: 'request_capabilities';
+      requests: CapabilityRequest[];
+      turnSummary?: TurnSummary;
+      usage: ModelUsage;
+    }
+  | {
+      type: 'resolve_capability_request';
+      requestRef: string;
+      decision: 'approve' | 'deny';
+      reason?: string;
       turnSummary?: TurnSummary;
       usage: ModelUsage;
     }

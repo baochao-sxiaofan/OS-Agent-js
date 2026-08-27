@@ -1,6 +1,14 @@
 import type { ModelUsage } from '../model/model-provider.js';
 import type { JsonValue } from '../types/json.js';
 import type {
+  CapabilityApprovalRoute,
+  CapabilityDelegationHop,
+  CapabilityGrantSource,
+  CapabilityRequest,
+  CapabilityRequestStatus,
+  ResourceScope,
+} from '../capability/capability.js';
+import type {
   AsyncWorkKind,
   AsyncWorkTerminalStatus,
 } from './async-work.js';
@@ -42,6 +50,8 @@ export type ModelResponseRecordedEvent = TaskEventBase & {
     | 'async_work'
     | 'final'
     | 'needs_parent_action'
+    | 'request_capabilities'
+    | 'resolve_capability_request'
     | 'spawn_subagents'
     | 'tool_calls'
     | 'wait_for_async_work';
@@ -69,6 +79,21 @@ export type AsyncWorkDeliveredEvent = TaskEventBase & {
   generationId: string;
   workIds: string[];
   allFinished: boolean;
+};
+
+export type AsyncWorkCapabilityBlockedEvent = TaskEventBase & {
+  type: 'async_work_capability_blocked';
+  generationId: string;
+  workId: string;
+  requestRef: string;
+  requests: CapabilityRequest[];
+};
+
+export type AsyncWorkCapabilityUnblockedEvent = TaskEventBase & {
+  type: 'async_work_capability_unblocked';
+  generationId: string;
+  workId: string;
+  requestRef: string;
 };
 
 export type ContextSummaryRecordedEvent = TaskEventBase & {
@@ -114,10 +139,55 @@ export type SubagentResultRecordedEvent = TaskEventBase & {
   result: Termination;
 };
 
+export type CapabilityGrantedEvent = TaskEventBase & {
+  type: 'capability_granted';
+  grantId: string;
+  capability: string;
+  scope: ResourceScope;
+  sourceType: CapabilityGrantSource['type'];
+};
+
+export type CapabilityGrantConsumedEvent = TaskEventBase & {
+  type: 'capability_grant_consumed';
+  grantId: string;
+  capability: string;
+  remainingUses: number;
+  operationId: string;
+};
+
+export type CapabilityRequestCreatedEvent = TaskEventBase & {
+  type: 'capability_request_created';
+  requestId: string;
+  route: CapabilityApprovalRoute;
+  requests: CapabilityRequest[];
+  delegationPath?: CapabilityDelegationHop[];
+};
+
+export type CapabilityRequestResolvedEvent = TaskEventBase & {
+  type: 'capability_request_resolved';
+  requestId: string;
+  status: Exclude<CapabilityRequestStatus, 'pending'>;
+  reason?: string;
+};
+
+export type CapabilityDelegationAdvancedEvent = TaskEventBase & {
+  type: 'capability_delegation_advanced';
+  requestId: string;
+  grantedHopIndex: number;
+  nextHopIndex?: number;
+};
+
 export type TaskEvent =
+  | AsyncWorkCapabilityBlockedEvent
+  | AsyncWorkCapabilityUnblockedEvent
   | AsyncWorkDeliveredEvent
   | AsyncWorkRegisteredEvent
   | AsyncWorkTerminalEvent
+  | CapabilityGrantedEvent
+  | CapabilityGrantConsumedEvent
+  | CapabilityDelegationAdvancedEvent
+  | CapabilityRequestCreatedEvent
+  | CapabilityRequestResolvedEvent
   | CapacityWaitRecordedEvent
   | ContextCompactionRecordedEvent
   | ContextSummaryRecordedEvent

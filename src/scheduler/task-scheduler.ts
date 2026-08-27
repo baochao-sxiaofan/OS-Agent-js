@@ -1,8 +1,24 @@
+import { randomUUID } from 'node:crypto';
+
+import type {
+  CapabilityGrant,
+  CapabilityInput,
+  CapabilityRequest,
+  CapabilityRequestRecord,
+} from '../capability/capability.js';
+import {
+  CapabilityDelegationError,
+  CapabilityManager,
+  type CapabilityAncestor,
+} from '../capability/capability-manager.js';
 import type {
   ContextItem,
   ToolCallContextItem,
 } from '../kernel/context.js';
-import type { AsyncWorkRegistration } from '../kernel/async-work.js';
+import {
+  isAsyncWorkTerminalStatus,
+  type AsyncWorkRegistration,
+} from '../kernel/async-work.js';
 import type {
   ContextCompactionRequest,
   ContextCompactor,
@@ -16,6 +32,7 @@ import {
   TaskControlBlock,
   type AgentCreationOrigin,
   type CreateAgentRequest,
+  type CreateChildAgentRequest,
 } from '../kernel/task-control-block.js';
 import type { TaskState, Termination } from '../kernel/task-state.js';
 import type {
@@ -73,10 +90,16 @@ export type TaskSchedulerOptions = {
   contextWindowPolicy?: ContextWindowPolicy;
   readyQueue?: ReadyQueue;
   asyncWorkPolicy?: AsyncWorkPolicy;
+  capabilityManager?: CapabilityManager;
   // 与准入控制共享的时钟，便于测试注入。
   clock?: Clock;
   // 自动唤醒时使用的等待实现，默认基于 setTimeout。
   wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  // 内核任务 ID 生成器；测试可注入确定性实现，生产默认使用 randomUUID。
+  taskIdGenerator?: (
+    request: Readonly<CreateAgentRequest>,
+    origin: AgentCreationOrigin,
+  ) => string;
 };
 
 export type AsyncWorkPolicy = Readonly<{
@@ -114,6 +137,7 @@ type AsyncWorkTimer = {
 type ResolvedToolCall = {
   call: ToolCallRequest;
   tool: Tool;
+  requiredCapabilities: CapabilityRequest[];
 };
 
 // 任务完成句柄：外部可以 await 单个任务的终止结果，而不必依赖整体 runUntilIdle。
@@ -158,12 +182,21 @@ export type RestoreTasksOptions = {
   cancelOrphans?: boolean;
 };
 
+export type PendingHumanCapabilityApproval = {
+  requestId: string;
+  requesterTaskId: string;
+  requesterGoal: string;
+  requests: CapabilityRequest[];
+  createdAt: number;
+};
+
 export class TaskScheduler {
   readonly #provider: ModelProvider;
   readonly #admission: AdmissionController;
   readonly #tools: ToolRegistry;
   readonly #store: TaskStore;
   readonly #agentPool: AgentPool;
+  readonly #capabilityManager: CapabilityManager;
   readonly #readyQueue: ReadyQueue;
   readonly #asyncWorkPolicy: AsyncWorkPolicy;
   readonly #contextCompactor: ContextCompactor | undefined;
@@ -183,6 +216,10 @@ export class TaskScheduler {
   readonly #completions = new Map<string, CompletionDeferred>();
   readonly #clock: Clock;
   readonly #wait: (ms: number, signal?: AbortSignal) => Promise<void>;
+  readonly #taskIdGenerator: (
+    request: Readonly<CreateAgentRequest>,
+    origin: AgentCreationOrigin,
+  ) => string;
   // 最近一次因限流被拒的最早可重试时刻，run() 用它决定休眠多久后自动唤醒。
   #nextRetryAt: number | undefined;
   #operationSequence = 0;
@@ -192,6 +229,8 @@ export class TaskScheduler {
     this.#admission = options.admission;
     this.#tools = options.tools;
     this.#store = options.store;
+    this.#capabilityManager =
+      options.capabilityManager ?? new CapabilityManager();
     this.#asyncWorkPolicy = {
       ...(options.asyncWorkPolicy ?? { batchWindowMs: 30_000 }),
     };
@@ -203,6 +242,8 @@ export class TaskScheduler {
     }
     this.#clock = options.clock ?? new SystemClock();
     this.#wait = options.wait ?? defaultWait;
+    this.#taskIdGenerator =
+      options.taskIdGenerator ?? (() => randomUUID());
     this.#contextCompactor = options.contextCompactor;
     this.#contextWindowManager = new ContextWindowManager(
       options.provider.contextWindowTokens,
@@ -270,6 +311,7 @@ export class TaskScheduler {
   private createAgent(
     request: CreateAgentRequest,
     origin: AgentCreationOrigin,
+    excludedIds: ReadonlySet<string> = new Set(),
   ): TaskControlBlock {
     if (
       origin.kind === 'child' &&
@@ -279,15 +321,108 @@ export class TaskScheduler {
         `Task depth ${origin.parent.depth} reached max depth ${this.#agentPool.policy.maxDepth}.`,
       );
     }
+    const suppliedId = origin.kind === 'root' ? request.id : undefined;
+    const taskId =
+      suppliedId ??
+      this.generateTaskId(request, origin, excludedIds);
+    const issuedAt = this.#clock.now();
+    const capabilityGrants =
+      origin.kind === 'root'
+        ? this.#capabilityManager.issueRootGrants(
+            taskId,
+            request.capabilities ?? [],
+            issuedAt,
+          )
+        : this.#capabilityManager.delegate(
+            origin.parent.id,
+            origin.parent.capabilityGrants,
+            taskId,
+            request.capabilities ?? [],
+            issuedAt,
+          );
     return TaskControlBlock.createAgent(
-      request,
+      {
+        ...request,
+        id: taskId,
+      },
       origin,
-      this.#clock.now(),
+      issuedAt,
+      capabilityGrants,
     );
+  }
+
+  private generateTaskId(
+    request: Readonly<CreateAgentRequest>,
+    origin: AgentCreationOrigin,
+    excludedIds: ReadonlySet<string>,
+  ): string {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const taskId = this.#taskIdGenerator(request, origin).trim();
+      if (!taskId) {
+        throw new Error('Task ID generator returned an empty ID.');
+      }
+      if (!this.#tasks.has(taskId) && !excludedIds.has(taskId)) {
+        return taskId;
+      }
+    }
+    throw new Error('Task ID generator could not produce a unique ID.');
   }
 
   getTask(taskId: string): TaskControlBlock | undefined {
     return this.#tasks.get(taskId);
+  }
+
+  pendingHumanCapabilityApprovals(): PendingHumanCapabilityApproval[] {
+    return [...this.#tasks.values()].flatMap((task) =>
+      task.capabilityRequests
+        .filter(
+          (request) =>
+            task.state.status !== 'TERMINATED' &&
+            request.status === 'pending' &&
+            request.route === 'human',
+        )
+        .map((request) => ({
+          requestId: request.requestId,
+          requesterTaskId: task.id,
+          requesterGoal: task.goal,
+          requests: structuredClone(request.requests),
+          createdAt: request.createdAt,
+        })),
+    );
+  }
+
+  async resolveHumanCapabilityRequest(
+    requestId: string,
+    decision: 'approve' | 'deny',
+    reason?: string,
+  ): Promise<void> {
+    const pending = this.findPendingCapabilityRequest(
+      requestId,
+      'human',
+    );
+    if (!pending) {
+      throw new Error(
+        `Pending human capability request was not found: ${requestId}`,
+      );
+    }
+    const now = this.#clock.now();
+    const grants =
+      decision === 'approve'
+        ? this.#capabilityManager.grantByHuman(
+            pending.task.id,
+            requestId,
+            pending.request.requests,
+            now,
+          )
+        : [];
+    await this.finishCapabilityRequest(
+      pending.task,
+      pending.request,
+      decision === 'approve' ? 'granted' : 'denied',
+      grants,
+      reason,
+      now,
+    );
   }
 
   // 返回单个任务的完成 Promise。任务尚未终止时挂起，终止后 resolve 出终止结果；
@@ -311,7 +446,7 @@ export class TaskScheduler {
 
   async spawnChildren(
     parentTaskId: string,
-    childOptions: readonly CreateAgentRequest[],
+    childOptions: readonly CreateChildAgentRequest[],
   ): Promise<SpawnChildrenResult> {
     const parent = this.requireTask(parentTaskId);
     return await this.startAsyncWork(parent, [], childOptions);
@@ -320,7 +455,7 @@ export class TaskScheduler {
   private async startAsyncWork(
     parent: TaskControlBlock,
     toolCalls: readonly ToolCallRequest[],
-    childOptions: readonly CreateAgentRequest[],
+    childOptions: readonly CreateChildAgentRequest[],
   ): Promise<SpawnChildrenResult> {
     if (parent.state.status !== 'RUNNING') {
       return {
@@ -336,23 +471,7 @@ export class TaskScheduler {
         'At least one asynchronous work item is required.',
       );
     }
-    const childTaskIds = childOptions
-      .map((options) => options.id)
-      .filter((taskId): taskId is string => taskId !== undefined);
-    if (
-      new Set(childTaskIds).size !== childTaskIds.length ||
-      childTaskIds.some((taskId) => this.#tasks.has(taskId))
-    ) {
-      return await this.rejectSubagentSpawn(
-        parent,
-        'invalid_spawn_request',
-        'Child task IDs must be unique and must not have been used before.',
-      );
-    }
-    const requestedWorkIds = [
-      ...toolCalls.map((call) => call.callId),
-      ...childTaskIds,
-    ];
+    const requestedWorkIds = toolCalls.map((call) => call.callId);
     const usedWorkIds = new Set(
       parent.asyncWorkGenerations.flatMap((generation) =>
         generation.work.map((work) => work.workId),
@@ -369,34 +488,67 @@ export class TaskScheduler {
       );
     }
 
-    const capabilityEscalation = childOptions
-      .flatMap((options) => options.capabilities ?? [])
-      .find((capability) => !parent.hasCapability(capability));
-    if (capabilityEscalation !== undefined) {
-      return await this.rejectSubagentSpawn(
-        parent,
-        'capability_escalation',
-        `Child requested capability not held by parent: ${capabilityEscalation}.`,
+    for (const options of childOptions) {
+      const delegation = this.#capabilityManager.validateDelegation(
+        parent.capabilityGrants,
+        options.capabilities ?? [],
+        this.#clock.now(),
       );
+      if (!delegation.allowed) {
+        return await this.rejectSubagentSpawn(
+          parent,
+          'capability_escalation',
+          delegation.reason,
+        );
+      }
     }
 
-    let resolvedToolCalls: ResolvedToolCall[];
-    try {
-      resolvedToolCalls = toolCalls.map((call) => ({
-        call,
-        tool: this.resolveAuthorizedTool(parent, call),
-      }));
-    } catch (error) {
-      const message = this.errorMessage(error);
-      await this.terminateTask(parent, {
-        kind: 'failed',
-        error: message,
-      });
-      return {
-        spawned: false,
-        reason: 'invalid_spawn_request',
-        message,
-      };
+    const resolvedToolCalls: ResolvedToolCall[] = [];
+    for (const call of toolCalls) {
+      try {
+        const tool = this.resolveTool(call);
+        resolvedToolCalls.push({
+          call,
+          tool,
+          requiredCapabilities: this.requiredCapabilitiesForTool(
+            tool,
+            call.input,
+          ),
+        });
+      } catch (error) {
+        const message =
+          error instanceof ToolNotFoundError
+            ? `Model requested unavailable tool: ${call.toolName}`
+            : this.errorMessage(error);
+        return await this.rejectToolCall(
+          parent,
+          call.toolName,
+          error instanceof ToolNotFoundError
+            ? 'tool_not_found'
+            : 'invalid_input',
+          message,
+        );
+      }
+    }
+    for (const {
+      call,
+      requiredCapabilities,
+    } of resolvedToolCalls) {
+      const authorization = this.#capabilityManager.check(
+        parent.capabilityGrants,
+        requiredCapabilities,
+        this.#clock.now(),
+        call.callId,
+      );
+      if (!authorization.allowed) {
+        return await this.rejectToolCall(
+          parent,
+          call.toolName,
+          'capability_required',
+          `Tool ${call.toolName} requires additional capability.`,
+          authorization.missing,
+        );
+      }
     }
     const reservationDecision =
       childOptions.length === 0
@@ -416,9 +568,16 @@ export class TaskScheduler {
     // 因此并发创建彼此不会交错，无需再依赖 spawn_in_progress 锁。
     let children: TaskControlBlock[];
     try {
-      children = childOptions.map((options) =>
-        this.createAgent(options, { kind: 'child', parent }),
-      );
+      const allocatedIds = new Set([...usedWorkIds, ...requestedWorkIds]);
+      children = childOptions.map((options) => {
+        const child = this.createAgent(
+          options,
+          { kind: 'child', parent },
+          allocatedIds,
+        );
+        allocatedIds.add(child.id);
+        return child;
+      });
       const now = this.#clock.now();
       const work: AsyncWorkRegistration[] = [
         ...resolvedToolCalls.map(({ call }) => ({
@@ -503,7 +662,7 @@ export class TaskScheduler {
       }
       const termination: Termination = {
         kind: 'failed',
-        error: `Failed to send subagent ${child.id}: ${this.errorMessage(error)}`,
+        error: `Failed to send subagent: ${this.errorMessage(error)}`,
       };
       parent.completeSubagentWork(child.id, termination, this.#clock.now());
       parent.recordSubagentResult(child.id, termination);
@@ -637,7 +796,7 @@ export class TaskScheduler {
       (work) =>
         work.kind === 'subagent' &&
         work.childTaskId === child.id &&
-        work.status === 'running',
+        !isAsyncWorkTerminalStatus(work.status),
     );
     if (!pending) {
       return;
@@ -692,10 +851,7 @@ export class TaskScheduler {
         input: contextItem.input,
       };
       try {
-        calls.push({
-          call,
-          tool: this.resolveAuthorizedTool(task, call),
-        });
+        calls.push(this.resolveAuthorizedTool(task, call));
       } catch (error) {
         task.failToolWork(
           work.workId,
@@ -1001,8 +1157,26 @@ export class TaskScheduler {
           );
           return;
         case 'wait_for_async_work':
+          if (task.hasActiveCapabilityBlockers()) {
+            throw new Error(
+              'Agent must resolve pending capability requests before waiting.',
+            );
+          }
           task.completeModelTurn(response.turnSummary);
           await this.settleParentAfterAsyncWorkTurn(task);
+          return;
+        case 'request_capabilities':
+          task.completeModelTurn(response.turnSummary);
+          await this.requestCapabilities(task, response.requests);
+          return;
+        case 'resolve_capability_request':
+          task.completeModelTurn(response.turnSummary);
+          await this.resolveParentCapabilityRequest(
+            task,
+            response.requestRef,
+            response.decision,
+            response.reason,
+          );
           return;
         default: {
           const exhaustiveResponse: never = response;
@@ -1058,13 +1232,18 @@ export class TaskScheduler {
 
   private async executeAsyncToolCall(
     task: TaskControlBlock,
-    { call, tool }: ResolvedToolCall,
+    { call, requiredCapabilities, tool }: ResolvedToolCall,
   ): Promise<void> {
     if (this.isTaskTerminated(task)) {
       return;
     }
     try {
-      const output = await this.executeResolvedTool(task, call, tool);
+      const output = await this.executeResolvedTool(
+        task,
+        call,
+        tool,
+        requiredCapabilities,
+      );
       if (task.state.status === 'TERMINATED') {
         return;
       }
@@ -1303,10 +1482,361 @@ export class TaskScheduler {
     await this.#store.persist(parent);
   }
 
+  private async requestCapabilities(
+    task: TaskControlBlock,
+    requestedInputs: readonly CapabilityInput[],
+  ): Promise<void> {
+    if (task.state.status !== 'RUNNING') {
+      throw new Error(
+        `Agent cannot request capabilities from ${task.state.status}.`,
+      );
+    }
+    const requested =
+      this.#capabilityManager.normalizeRequests(requestedInputs);
+    const check = this.#capabilityManager.check(
+      task.capabilityGrants,
+      requested,
+      this.#clock.now(),
+    );
+    const requestId = this.generateCapabilityRequestId();
+    if (check.allowed) {
+      task.appendContext({
+        type: 'capability_request_result',
+        requestRef: requestId,
+        status: 'granted',
+        capabilities: requested.map(({ capability, scope }) => ({
+          capability,
+          scope: structuredClone(scope),
+        })),
+        reason: 'Agent already holds the requested capabilities.',
+      });
+      task.transition(
+        {
+          status: 'READY',
+          enteredAt: this.#clock.now(),
+          reason: 'capability_result_available',
+        },
+        'requested_capabilities_already_held',
+      );
+      await this.prepareTaskForQueue(task);
+      await this.#store.persist(task);
+      return;
+    }
+
+    const ancestors = this.capabilityAncestors(task);
+    const authorityChain =
+      task.parentTaskId === undefined ? [task] : ancestors;
+    const route = this.#capabilityManager.planRequest(
+      task.id,
+      authorityChain.map(
+        (ancestor): CapabilityAncestor => ({
+          taskId: ancestor.id,
+          grants: ancestor.capabilityGrants,
+        }),
+      ),
+      check.missing,
+      this.#clock.now(),
+    );
+    if (!route.routed) {
+      task.appendContext({
+        type: 'capability_request_result',
+        requestRef: requestId,
+        status: 'denied',
+        capabilities: check.missing.map(({ capability, scope }) => ({
+          capability,
+          scope: structuredClone(scope),
+        })),
+        reason: route.reason,
+      });
+      task.transition(
+        {
+          status: 'READY',
+          enteredAt: this.#clock.now(),
+          reason: 'capability_result_available',
+        },
+        'capability_request_rejected_by_kernel',
+      );
+      await this.prepareTaskForQueue(task);
+      await this.#store.persist(task);
+      return;
+    }
+
+    const record: CapabilityRequestRecord = {
+      requestId,
+      requests: structuredClone(check.missing),
+      route: route.route,
+      status: 'pending',
+      createdAt: this.#clock.now(),
+      ...(route.route === 'parent'
+        ? {
+            delegationPath: structuredClone(route.delegationPath),
+            currentHopIndex: 0,
+          }
+        : {}),
+    };
+    task.registerCapabilityRequest(record);
+    task.transition(
+      {
+        status: 'BLOCKED',
+        enteredAt: this.#clock.now(),
+        reason:
+          route.route === 'human'
+            ? 'human_approval'
+            : 'capability_request',
+        waitingFor: [requestId],
+      },
+      `waiting_for_${route.route}_capability_approval`,
+    );
+    await this.#store.persist(task);
+
+    if (route.route === 'parent') {
+      await this.publishCurrentCapabilityHop(task, record);
+    }
+  }
+
+  private async publishCurrentCapabilityHop(
+    requester: TaskControlBlock,
+    request: CapabilityRequestRecord,
+  ): Promise<void> {
+    const hop = requester.currentCapabilityDelegationHop(
+      request.requestId,
+    );
+    if (!hop) {
+      throw new Error(
+        `Capability request has no pending delegation hop: ${request.requestId}`,
+      );
+    }
+    const grantor = this.requireTask(hop.grantorTaskId);
+    grantor.markSubagentWaitingForCapability(
+      hop.granteeTaskId,
+      request.requestId,
+      request.requests,
+      this.#clock.now(),
+    );
+    await this.handleAsyncWorkProgress(grantor);
+  }
+
+  private async resolveParentCapabilityRequest(
+    parent: TaskControlBlock,
+    requestRef: string,
+    decision: 'approve' | 'deny',
+    reason?: string,
+  ): Promise<void> {
+    const pending = this.findPendingCapabilityRequest(
+      requestRef,
+      'parent',
+    );
+    const hop =
+      pending?.task.currentCapabilityDelegationHop(requestRef);
+    if (!pending || !hop || hop.grantorTaskId !== parent.id) {
+      throw new Error(
+        `Capability request is not pending for this parent: ${requestRef}`,
+      );
+    }
+
+    let status: 'denied' | 'granted' =
+      decision === 'approve' ? 'granted' : 'denied';
+    let resolutionReason = reason;
+    let grants: CapabilityGrant[] = [];
+    const grantee = this.requireTask(hop.granteeTaskId);
+    if (status === 'granted') {
+      try {
+        grants = this.#capabilityManager.grantByParent(
+          parent.id,
+          parent.capabilityGrants,
+          grantee.id,
+          pending.request.requests,
+          this.#clock.now(),
+        );
+      } catch (error) {
+        status = 'denied';
+        resolutionReason =
+          error instanceof CapabilityDelegationError
+            ? error.message
+            : this.errorMessage(error);
+      }
+    }
+
+    parent.clearSubagentCapabilityBlocker(grantee.id, requestRef);
+    if (status === 'granted') {
+      grantee.addCapabilityGrants(grants);
+      await this.#store.persist(grantee);
+      const nextHop =
+        pending.task.advanceCapabilityDelegation(requestRef);
+      if (nextHop) {
+        await this.#store.persist(pending.task);
+        await this.publishCurrentCapabilityHop(
+          pending.task,
+          pending.request,
+        );
+      } else {
+        await this.finishCapabilityRequest(
+          pending.task,
+          pending.request,
+          'granted',
+          [],
+          resolutionReason,
+          this.#clock.now(),
+        );
+      }
+    } else {
+      await this.finishCapabilityRequest(
+        pending.task,
+        pending.request,
+        'denied',
+        [],
+        resolutionReason,
+        this.#clock.now(),
+      );
+    }
+    await this.continueParentAfterCapabilityResolution(parent);
+  }
+
+  private async continueParentAfterCapabilityResolution(
+    parent: TaskControlBlock,
+  ): Promise<void> {
+    if (parent.state.status !== 'RUNNING') {
+      return;
+    }
+    if (parent.hasActiveCapabilityBlockers()) {
+      parent.requeueActiveCapabilityBlockers();
+      await this.settleParentAfterAsyncWorkTurn(parent);
+      await this.handleAsyncWorkProgress(parent);
+      return;
+    }
+    if (parent.activeAsyncWorkPendingIds().length > 0) {
+      await this.settleParentAfterAsyncWorkTurn(parent);
+      return;
+    }
+    parent.transition(
+      {
+        status: 'READY',
+        enteredAt: this.#clock.now(),
+        reason: 'capability_result_available',
+      },
+      'capability_request_resolved',
+    );
+    await this.prepareTaskForQueue(parent);
+    await this.#store.persist(parent);
+  }
+
+  private async finishCapabilityRequest(
+    task: TaskControlBlock,
+    request: CapabilityRequestRecord,
+    status: 'denied' | 'granted',
+    grants: readonly CapabilityGrant[],
+    reason: string | undefined,
+    resolvedAt: number,
+  ): Promise<void> {
+    if (
+      task.state.status !== 'BLOCKED' ||
+      (task.state.reason !== 'capability_request' &&
+        task.state.reason !== 'human_approval')
+    ) {
+      throw new Error(
+        `Capability requester is not waiting for approval: ${task.id}`,
+      );
+    }
+    task.resolveCapabilityRequest(
+      request.requestId,
+      status,
+      grants,
+      reason,
+      resolvedAt,
+    );
+    task.appendContext({
+      type: 'capability_request_result',
+      requestRef: request.requestId,
+      status,
+      capabilities: request.requests.map(({ capability, scope }) => ({
+        capability,
+        scope: structuredClone(scope),
+      })),
+      ...(reason === undefined ? {} : { reason }),
+    });
+    task.transition(
+      {
+        status: 'READY',
+        enteredAt: resolvedAt,
+        reason: 'capability_result_available',
+      },
+      `capability_request_${status}`,
+    );
+    if (
+      this.#asyncWorkWakeReady.has(task.id) &&
+      task.hasUndeliveredAsyncWorkResults()
+    ) {
+      await this.deliverAsyncWorkUpdate(task);
+      return;
+    }
+    await this.prepareTaskForQueue(task);
+    await this.#store.persist(task);
+  }
+
+  private capabilityAncestors(task: TaskControlBlock): TaskControlBlock[] {
+    const ancestors: TaskControlBlock[] = [];
+    const visited = new Set<string>([task.id]);
+    let parentTaskId = task.parentTaskId;
+    while (parentTaskId !== undefined) {
+      if (visited.has(parentTaskId)) {
+        throw new Error('Capability ancestry contains a cycle.');
+      }
+      visited.add(parentTaskId);
+      const parent = this.#tasks.get(parentTaskId);
+      if (!parent || parent.state.status === 'TERMINATED') {
+        break;
+      }
+      ancestors.push(parent);
+      parentTaskId = parent.parentTaskId;
+    }
+    return ancestors;
+  }
+
+  private findPendingCapabilityRequest(
+    requestId: string,
+    route: 'human' | 'parent',
+  ):
+    | {
+        task: TaskControlBlock;
+        request: CapabilityRequestRecord;
+      }
+    | undefined {
+    for (const task of this.#tasks.values()) {
+      const request = task.capabilityRequests.find(
+        (candidate) =>
+          candidate.requestId === requestId &&
+          candidate.route === route &&
+          candidate.status === 'pending',
+      );
+      if (request) {
+        return { task, request };
+      }
+    }
+    return undefined;
+  }
+
+  private generateCapabilityRequestId(): string {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const requestId = this.#capabilityManager.nextRequestId();
+      const alreadyUsed = [...this.#tasks.values()].some((task) =>
+        task.capabilityRequests.some(
+          (request) => request.requestId === requestId,
+        ),
+      );
+      if (!alreadyUsed) {
+        return requestId;
+      }
+    }
+    throw new Error(
+      'Capability request ID generator could not produce a unique ID.',
+    );
+  }
+
   private async executeResolvedTool(
     task: TaskControlBlock,
     call: ToolCallRequest,
     tool: Tool,
+    requiredCapabilities: readonly CapabilityRequest[],
   ): Promise<JsonValue> {
     const validation = tool.validateInput(call.input);
     if (!validation.valid) {
@@ -1314,6 +1844,23 @@ export class TaskScheduler {
         `Invalid input for tool ${tool.name}: ${validation.error}`,
       );
     }
+    const authorization = this.#capabilityManager.check(
+      task.capabilityGrants,
+      requiredCapabilities,
+      this.#clock.now(),
+      call.callId,
+    );
+    if (!authorization.allowed) {
+      throw new Error(
+        `Agent lacks capability ${authorization.missing
+          .map((request) => request.capability)
+          .join(', ')}`,
+      );
+    }
+    for (const grant of authorization.grants) {
+      task.consumeCapabilityGrant(grant.grantId, call.callId);
+    }
+    await this.#store.persist(task);
 
     return await tool.execute(call.input, {
       taskId: task.id,
@@ -1322,26 +1869,61 @@ export class TaskScheduler {
     });
   }
 
-  private resolveAuthorizedTool(
-    task: TaskControlBlock,
-    call: ToolCallRequest,
-  ): Tool {
-    let tool: Tool;
-    try {
-      tool = this.#tools.get(call.toolName);
-    } catch (error) {
-      if (error instanceof ToolNotFoundError) {
-        throw new Error(`Model requested unavailable tool: ${call.toolName}`);
-      }
-      throw error;
-    }
-
-    if (!task.hasCapability(tool.requiredCapability)) {
+  private resolveTool(call: ToolCallRequest): Tool {
+    const tool = this.#tools.get(call.toolName);
+    const validation = tool.validateInput(call.input);
+    if (!validation.valid) {
       throw new Error(
-        `Task ${task.id} lacks capability ${tool.requiredCapability}`,
+        `Invalid input for tool ${tool.name}: ${validation.error}`,
       );
     }
     return tool;
+  }
+
+  private resolveAuthorizedTool(
+    task: TaskControlBlock,
+    call: ToolCallRequest,
+  ): ResolvedToolCall {
+    const tool = this.resolveTool(call);
+    const requiredCapabilities = this.requiredCapabilitiesForTool(
+      tool,
+      call.input,
+    );
+    const authorization = this.#capabilityManager.check(
+      task.capabilityGrants,
+      requiredCapabilities,
+      this.#clock.now(),
+      call.callId,
+    );
+    if (!authorization.allowed) {
+      throw new Error(
+        `Agent lacks capability ${authorization.missing
+          .map((request) => request.capability)
+          .join(', ')}`,
+      );
+    }
+    return {
+      call,
+      tool,
+      requiredCapabilities,
+    };
+  }
+
+  private requiredCapabilitiesForTool(
+    tool: Tool,
+    input: JsonObject,
+  ): CapabilityRequest[] {
+    const requirements =
+      tool.requiredCapabilities?.(input) ??
+      (tool.requiredCapability === undefined
+        ? []
+        : [tool.requiredCapability]);
+    if (requirements.length === 0) {
+      throw new Error(
+        `Tool declared no required capabilities: ${tool.name}`,
+      );
+    }
+    return this.#capabilityManager.normalizeRequests(requirements);
   }
 
   private async handleModelFailure(
@@ -1376,6 +1958,10 @@ export class TaskScheduler {
       return;
     }
     const childTaskIds = this.#agentPool.childrenOf(task.id);
+    task.denyPendingCapabilityRequests(
+      `Task terminated with ${termination.kind}.`,
+      this.#clock.now(),
+    );
     const nextState: TaskState = {
       status: 'TERMINATED',
       enteredAt: Date.now(),
@@ -1413,6 +1999,43 @@ export class TaskScheduler {
     this.#completions.get(task.id)?.resolve(termination);
     this.#completions.delete(task.id);
     await this.notifyParentOfTermination(task, termination);
+  }
+
+  private async rejectToolCall(
+    task: TaskControlBlock,
+    toolName: string,
+    reason: 'capability_required' | 'invalid_input' | 'tool_not_found',
+    message: string,
+    requiredCapabilities?: readonly CapabilityRequest[],
+  ): Promise<SpawnChildrenResult> {
+    task.appendContext({
+      type: 'tool_call_rejected',
+      toolName,
+      reason,
+      message,
+      ...(requiredCapabilities === undefined
+        ? {}
+        : {
+            requiredCapabilities: [
+              ...structuredClone(requiredCapabilities),
+            ],
+          }),
+    });
+    task.transition(
+      {
+        status: 'READY',
+        enteredAt: this.#clock.now(),
+        reason: 'tool_call_rejected',
+      },
+      `tool_call_rejected:${reason}`,
+    );
+    await this.prepareTaskForQueue(task);
+    await this.#store.persist(task);
+    return {
+      spawned: false,
+      reason: 'invalid_spawn_request',
+      message,
+    };
   }
 
   private async rejectSubagentSpawn(
@@ -1475,13 +2098,16 @@ export class TaskScheduler {
 
   private toCreateAgentRequest(
     request: SubagentSpawnRequest,
-  ): CreateAgentRequest {
+  ): CreateChildAgentRequest {
+    const requestedCapabilities = [
+      ...(request.capabilities ?? []),
+      ...(request.requestedCapabilities ?? []),
+    ];
     return {
       goal: request.goal,
-      ...(request.taskId === undefined ? {} : { id: request.taskId }),
-      ...(request.capabilities === undefined
+      ...(requestedCapabilities.length === 0
         ? {}
-        : { capabilities: request.capabilities }),
+        : { capabilities: requestedCapabilities }),
       ...(request.context === undefined ? {} : { context: request.context }),
       ...(request.maxModelAttempts === undefined
         ? {}
@@ -1501,7 +2127,7 @@ export class TaskScheduler {
       taskId: task.id,
       goal: task.goal,
       context,
-      tools: this.#tools.descriptorsFor(task.capabilities),
+      tools: this.#tools.descriptors(),
       attempt,
       summaryProtocol: TURN_SUMMARY_PROTOCOL,
       delegation: {
@@ -1516,7 +2142,7 @@ export class TaskScheduler {
   ): Promise<void> {
     if (task.state.status !== 'READY') {
       throw new Error(
-        `Cannot prepare task ${task.id} from ${task.state.status}.`,
+        `Cannot prepare an Agent from ${task.state.status}.`,
       );
     }
     this.#readyQueue.remove(task.id);

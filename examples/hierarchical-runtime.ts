@@ -8,6 +8,7 @@ import {
 } from '../src/index.js';
 
 const provider = new FakeModelProvider();
+const generatedTaskIds = ['middle', 'leaf'];
 const scheduler = new TaskScheduler({
   provider,
   tools: new ToolRegistry(),
@@ -22,6 +23,13 @@ const scheduler = new TaskScheduler({
     maxLiveAgents: 3,
     maxSpawnedPerRoot: 2,
   }),
+  taskIdGenerator: () => {
+    const taskId = generatedTaskIds.shift();
+    if (!taskId) {
+      throw new Error('Example task ID sequence was exhausted.');
+    }
+    return taskId;
+  },
 });
 
 const usage = {
@@ -40,7 +48,6 @@ provider.setResponses('root', [
     type: 'spawn_subagents',
     children: [
       {
-        taskId: 'middle',
         goal: 'Coordinate the concrete investigation.',
       },
     ],
@@ -57,7 +64,6 @@ provider.setResponses('middle', [
     type: 'spawn_subagents',
     children: [
       {
-        taskId: 'leaf',
         goal: 'Inspect the concrete evidence.',
       },
     ],

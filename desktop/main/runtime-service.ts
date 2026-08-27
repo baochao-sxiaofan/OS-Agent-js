@@ -66,6 +66,7 @@ export class RuntimeService {
   readonly #scheduler: TaskScheduler;
   readonly #conversations = new Map<string, ConversationRecord>();
   readonly #listeners = new Set<RuntimeListener>();
+  readonly #demoChildTaskIds = new Map<string, string>();
   #runPromise: Promise<void> | undefined;
   #initializePromise: Promise<void> | undefined;
   #publishQueued = false;
@@ -97,6 +98,17 @@ export class RuntimeService {
       agentPool: new AgentPool(AGENT_POOL_POLICY),
       asyncWorkPolicy: {
         batchWindowMs: 1_200,
+      },
+      taskIdGenerator: (request, origin) => {
+        if (origin.kind === 'child') {
+          const key = this.#demoTaskKey(origin.parent.id, request.goal);
+          const configuredId = this.#demoChildTaskIds.get(key);
+          if (configuredId) {
+            this.#demoChildTaskIds.delete(key);
+            return configuredId;
+          }
+        }
+        return randomUUID();
       },
     });
 
@@ -340,19 +352,32 @@ export class RuntimeService {
     const plannerId = randomUUID();
     const executorId = randomUUID();
     const verifierId = randomUUID();
+    const plannerGoal = '拆解任务目标，明确约束和执行步骤';
+    const executorGoal = '根据任务目标形成可交付的执行结果';
+    const verifierGoal = '检查执行依据、边界条件与潜在风险';
+    this.#demoChildTaskIds.set(
+      this.#demoTaskKey(rootTaskId, plannerGoal),
+      plannerId,
+    );
+    this.#demoChildTaskIds.set(
+      this.#demoTaskKey(rootTaskId, executorGoal),
+      executorId,
+    );
+    this.#demoChildTaskIds.set(
+      this.#demoTaskKey(plannerId, verifierGoal),
+      verifierId,
+    );
 
     fakeProvider.setResponses(rootTaskId, [
       {
         type: 'spawn_subagents',
         children: [
           {
-            taskId: plannerId,
-            goal: '拆解任务目标，明确约束和执行步骤',
+            goal: plannerGoal,
             maxModelAttempts: 3,
           },
           {
-            taskId: executorId,
-            goal: '根据任务目标形成可交付的执行结果',
+            goal: executorGoal,
             maxModelAttempts: 2,
           },
         ],
@@ -386,8 +411,7 @@ export class RuntimeService {
         type: 'spawn_subagents',
         children: [
           {
-            taskId: verifierId,
-            goal: '检查执行依据、边界条件与潜在风险',
+            goal: verifierGoal,
             maxModelAttempts: 1,
           },
         ],
@@ -429,6 +453,10 @@ export class RuntimeService {
         usage: DEMO_USAGE,
       },
     ]);
+  }
+
+  #demoTaskKey(parentTaskId: string, goal: string): string {
+    return `${parentTaskId}\u0000${goal}`;
   }
 
   #ensureSchedulerRunning(): void {
@@ -593,7 +621,13 @@ export class RuntimeService {
       goal: task.goal,
       status: task.state.status,
       stateLabel: state.label,
-      capabilities: [...task.capabilities],
+      capabilities: [
+        ...new Set(
+          task.capabilityGrants?.map((grant) => grant.capability) ??
+            task.capabilities ??
+            [],
+        ),
+      ],
       modelAttempts: task.modelAttempts,
       maxModelAttempts: task.maxModelAttempts,
       spentCostUsd: task.budget.spentCostUsd,
@@ -697,6 +731,40 @@ export class RuntimeService {
           label: '等待运行资源',
           detail: event.reasons.join('、'),
         };
+      case 'capability_granted':
+        return {
+          ...base,
+          label: `获得权限 ${event.capability}`,
+          detail: event.scope.kind,
+        };
+      case 'capability_grant_consumed':
+        return {
+          ...base,
+          label: `使用权限 ${event.capability}`,
+          detail: `剩余 ${event.remainingUses} 次`,
+        };
+      case 'capability_delegation_advanced':
+        return {
+          ...base,
+          label: '权限委派已推进',
+          detail: `第 ${event.grantedHopIndex + 1} 跳`,
+        };
+      case 'capability_request_created':
+        return {
+          ...base,
+          label: '已申请权限',
+          detail: `${event.route} · ${event.requests
+            .map((request) => request.capability)
+            .join('、')}`,
+        };
+      case 'capability_request_resolved':
+        return {
+          ...base,
+          label: `权限申请${event.status === 'granted' ? '已批准' : '已拒绝'}`,
+          ...(event.reason === undefined
+            ? {}
+            : { detail: event.reason }),
+        };
       case 'model_response_recorded':
         return {
           ...base,
@@ -708,6 +776,20 @@ export class RuntimeService {
           ...base,
           label: `登记 ${event.work.length} 项异步工作`,
           detail: event.work.map((work) => work.kind).join('、'),
+        };
+      case 'async_work_capability_blocked':
+        return {
+          ...base,
+          label: '子 Agent 等待权限',
+          detail: event.requests
+            .map((request) => request.capability)
+            .join('、'),
+        };
+      case 'async_work_capability_unblocked':
+        return {
+          ...base,
+          label: '子 Agent 权限等待已解除',
+          detail: event.requestRef,
         };
       case 'async_work_terminal':
         return {

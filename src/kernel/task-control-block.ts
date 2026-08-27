@@ -1,5 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
+import type {
+  CapabilityDelegationHop,
+  CapabilityGrant,
+  CapabilityInput,
+  CapabilityRequest,
+  CapabilityRequestRecord,
+} from '../capability/capability.js';
+import { CapabilityManager } from '../capability/capability-manager.js';
 import type { ModelUsage } from '../model/model-provider.js';
 import type { JsonValue } from '../types/json.js';
 import type {
@@ -8,6 +16,7 @@ import type {
   AsyncWorkRegistration,
   AsyncWorkTerminalStatus,
 } from './async-work.js';
+import { isAsyncWorkTerminalStatus } from './async-work.js';
 import type {
   AsyncWorkUpdateContextItem,
   ContextItem,
@@ -48,12 +57,16 @@ export type TaskBudget = {
  * `parentTaskId` 和初始状态均由内核创建入口推导，调用方不能自行指定。
  */
 export type CreateAgentRequest = {
-  /** 可选的任务 ID；未提供时由内核生成 UUID。 */
+  /** 可选的根任务 ID，仅供宿主或测试注入；子任务 ID 始终由内核生成。 */
   id?: string;
   /** Agent 需要完成的任务目标。 */
   goal: string;
-  /** 任务允许使用的能力令牌集合。 */
-  capabilities?: readonly string[];
+  /**
+   * 宿主授予根任务或父 Agent 请求转授给子任务的能力。
+   *
+   * 字符串是兼容旧调用方的全局范围简写；资源敏感的新调用应使用结构化输入。
+   */
+  capabilities?: readonly CapabilityInput[];
   /** 任务启动时携带的完整上下文。 */
   context?: readonly ContextItem[];
   /** 模型请求最多允许尝试的次数；默认值为 3。 */
@@ -64,6 +77,13 @@ export type CreateAgentRequest = {
     maxCostUsd: number;
   };
 };
+
+/**
+ * 子 Agent 可提交的业务配置。
+ *
+ * 子任务 ID 由内核生成，调用方不能通过创建请求指定。
+ */
+export type CreateChildAgentRequest = Omit<CreateAgentRequest, 'id'>;
 
 /**
  * Agent 创建来源。
@@ -97,8 +117,12 @@ export type TaskSnapshot = {
   depth: number;
   /** 当前任务需要完成的目标。 */
   goal: string;
-  /** 当前任务持有的能力令牌。 */
-  capabilities: string[];
+  /** CapabilityManager 已签发给当前任务的授权事实。 */
+  capabilityGrants?: CapabilityGrant[];
+  /** 兼容 1.2.1 及更早快照的旧能力字符串。 */
+  capabilities?: string[];
+  /** 当前任务发起过的 capability 请求及其处理状态。 */
+  capabilityRequests?: CapabilityRequestRecord[];
   /** 不经压缩销毁的完整上下文历史。 */
   context: ContextItem[];
   /** 持久化的异步工作批次和 Work Table。 */
@@ -144,8 +168,10 @@ export class TaskControlBlock {
   /** 任务创建时的 Unix 毫秒时间戳。 */
   readonly createdAt: number;
 
-  /** 去重保存的能力令牌集合。 */
-  #capabilities: Set<string>;
+  /** CapabilityManager 签发并由任务快照持久化的授权事实。 */
+  #capabilityGrants: CapabilityGrant[];
+  /** 当前任务发起过的 capability 请求。 */
+  #capabilityRequests: CapabilityRequestRecord[];
   /** 始终保留的完整上下文历史。 */
   #context: ContextItem[];
   /** 按 generation 分组的持久化异步 Work Table。 */
@@ -195,7 +221,26 @@ export class TaskControlBlock {
     this.depth = snapshot.depth;
     this.goal = snapshot.goal;
     this.createdAt = snapshot.createdAt;
-    this.#capabilities = new Set(snapshot.capabilities);
+    this.#capabilityGrants = structuredClone(
+      snapshot.capabilityGrants ??
+        restoreLegacyCapabilityGrants(snapshot),
+    );
+    if (
+      this.#capabilityGrants.some(
+        (grant) => grant.subjectTaskId !== snapshot.id,
+      )
+    ) {
+      throw new Error('Capability grant subject does not match its task.');
+    }
+    if (
+      new Set(this.#capabilityGrants.map((grant) => grant.grantId)).size !==
+      this.#capabilityGrants.length
+    ) {
+      throw new Error('Capability grant IDs must be unique within a task.');
+    }
+    this.#capabilityRequests = structuredClone(
+      snapshot.capabilityRequests ?? [],
+    );
     this.#context = structuredClone(snapshot.context);
     this.#asyncWorkGenerations = structuredClone(
       snapshot.asyncWorkGenerations ?? [],
@@ -224,6 +269,7 @@ export class TaskControlBlock {
     request: CreateAgentRequest,
     origin: AgentCreationOrigin,
     createdAt = Date.now(),
+    capabilityGrants?: readonly CapabilityGrant[],
   ): TaskControlBlock {
     const parent = origin.kind === 'child' ? origin.parent : undefined;
     const depth = parent === undefined ? 1 : parent.depth + 1;
@@ -238,6 +284,14 @@ export class TaskControlBlock {
       reason: 'submitted',
     };
     const taskId = request.id ?? randomUUID();
+    const grants =
+      capabilityGrants ??
+      createCompatibilityGrants(
+        taskId,
+        request.capabilities ?? [],
+        parent,
+        createdAt,
+      );
     const createdEvent: TaskEvent = {
       type: 'task_created',
       eventId: randomUUID(),
@@ -247,6 +301,17 @@ export class TaskControlBlock {
       goal: request.goal,
       initialState,
     };
+    const grantEvents: TaskEvent[] = grants.map((grant, index) => ({
+      type: 'capability_granted',
+      eventId: randomUUID(),
+      taskId,
+      occurredAt: createdAt,
+      sequence: index + 2,
+      grantId: grant.grantId,
+      capability: grant.capability,
+      scope: structuredClone(grant.scope),
+      sourceType: grant.source.type,
+    }));
 
     return new TaskControlBlock({
       id: taskId,
@@ -254,7 +319,8 @@ export class TaskControlBlock {
       ...(parent === undefined ? {} : { parentTaskId: parent.id }),
       depth,
       goal: request.goal,
-      capabilities: [...(request.capabilities ?? [])],
+      capabilityGrants: [...structuredClone(grants)],
+      capabilityRequests: [],
       context: [...(request.context ?? [])],
       asyncWorkGenerations: [],
       contextSummaries: [],
@@ -268,7 +334,7 @@ export class TaskControlBlock {
       maxModelAttempts: request.maxModelAttempts ?? 3,
       createdAt,
       updatedAt: createdAt,
-      events: [createdEvent],
+      events: [createdEvent, ...grantEvents],
     });
   }
 
@@ -309,9 +375,19 @@ export class TaskControlBlock {
     return this.#contextSummaries;
   }
 
-  /** 获取能力令牌数组副本。 */
+  /** 获取当前任务持有的 Grant 副本。 */
+  get capabilityGrants(): readonly CapabilityGrant[] {
+    return structuredClone(this.#capabilityGrants);
+  }
+
+  /** 获取当前任务发起过的 capability 请求副本。 */
+  get capabilityRequests(): readonly CapabilityRequestRecord[] {
+    return structuredClone(this.#capabilityRequests);
+  }
+
+  /** 获取能力名称数组；仅用于旧 UI 和调用方兼容。 */
   get capabilities(): readonly string[] {
-    return [...this.#capabilities];
+    return [...new Set(this.#capabilityGrants.map((grant) => grant.capability))];
   }
 
   /** 获取当前任务预算的只读视图。 */
@@ -339,9 +415,209 @@ export class TaskControlBlock {
     return this.#events;
   }
 
-  /** 判断当前任务是否持有指定能力令牌。 */
+  /** 判断当前任务是否持有指定名称的未过期能力。 */
   hasCapability(capability: string): boolean {
-    return this.#capabilities.has(capability);
+    const now = Date.now();
+    return this.#capabilityGrants.some(
+      (grant) =>
+        grant.capability === capability &&
+        (grant.expiresAt === undefined || grant.expiresAt > now) &&
+        (grant.remainingUses === undefined || grant.remainingUses > 0),
+    );
+  }
+
+  /** 消耗一次有限 Grant；无限 Grant 不需要修改。 */
+  consumeCapabilityGrant(grantId: string, operationId: string): void {
+    const grant = this.#capabilityGrants.find(
+      (candidate) => candidate.grantId === grantId,
+    );
+    if (!grant) {
+      throw new Error(`Capability grant is not registered: ${grantId}`);
+    }
+    if (grant.remainingUses === undefined) {
+      return;
+    }
+    if (grant.consumedBy === operationId) {
+      return;
+    }
+    if (grant.remainingUses <= 0) {
+      throw new Error(`Capability grant is exhausted: ${grantId}`);
+    }
+    grant.remainingUses -= 1;
+    grant.consumedBy = operationId;
+    this.recordEvent({
+      type: 'capability_grant_consumed',
+      grantId,
+      capability: grant.capability,
+      remainingUses: grant.remainingUses,
+      operationId,
+    });
+  }
+
+  /** 追加由 CapabilityManager 签发的 Grant。 */
+  addCapabilityGrants(grants: readonly CapabilityGrant[]): void {
+    for (const grant of grants) {
+      if (grant.subjectTaskId !== this.id) {
+        throw new Error('Capability grant subject does not match this task.');
+      }
+      if (
+        this.#capabilityGrants.some(
+          (existing) => existing.grantId === grant.grantId,
+        )
+      ) {
+        continue;
+      }
+      this.#capabilityGrants.push(structuredClone(grant));
+      this.recordEvent({
+        type: 'capability_granted',
+        grantId: grant.grantId,
+        capability: grant.capability,
+        scope: structuredClone(grant.scope),
+        sourceType: grant.source.type,
+      });
+    }
+  }
+
+  /** 登记一项由 CapabilityManager 完成路由的授权申请。 */
+  registerCapabilityRequest(request: CapabilityRequestRecord): void {
+    if (
+      this.#capabilityRequests.some(
+        (existing) =>
+          existing.status === 'pending' ||
+          existing.requestId === request.requestId,
+      )
+    ) {
+      throw new Error(
+        'Task already has a pending or duplicate capability request.',
+      );
+    }
+    this.#capabilityRequests.push(structuredClone(request));
+    this.recordEvent({
+      type: 'capability_request_created',
+      requestId: request.requestId,
+      route: request.route,
+      requests: structuredClone(request.requests),
+      ...(request.delegationPath === undefined
+        ? {}
+        : {
+            delegationPath: structuredClone(
+              request.delegationPath,
+            ),
+          }),
+    });
+  }
+
+  currentCapabilityDelegationHop(
+    requestId: string,
+  ): CapabilityDelegationHop | undefined {
+    const request = this.#capabilityRequests.find(
+      (candidate) => candidate.requestId === requestId,
+    );
+    if (
+      !request?.delegationPath ||
+      request.currentHopIndex === undefined
+    ) {
+      return undefined;
+    }
+    const hop = request.delegationPath[request.currentHopIndex];
+    return hop ? structuredClone(hop) : undefined;
+  }
+
+  advanceCapabilityDelegation(
+    requestId: string,
+  ): CapabilityDelegationHop | undefined {
+    const request = this.#capabilityRequests.find(
+      (candidate) => candidate.requestId === requestId,
+    );
+    if (
+      !request ||
+      request.status !== 'pending' ||
+      !request.delegationPath ||
+      request.currentHopIndex === undefined
+    ) {
+      throw new Error(
+        `Capability delegation is not active: ${requestId}`,
+      );
+    }
+    const grantedHopIndex = request.currentHopIndex;
+    const current = request.delegationPath[grantedHopIndex];
+    if (!current || current.status !== 'pending') {
+      throw new Error(
+        `Capability delegation hop is not pending: ${requestId}`,
+      );
+    }
+    current.status = 'granted';
+    const nextHopIndex = grantedHopIndex + 1;
+    const next = request.delegationPath[nextHopIndex];
+    if (next) {
+      next.status = 'pending';
+      request.currentHopIndex = nextHopIndex;
+    } else {
+      delete request.currentHopIndex;
+    }
+    this.recordEvent({
+      type: 'capability_delegation_advanced',
+      requestId,
+      grantedHopIndex,
+      ...(next === undefined ? {} : { nextHopIndex }),
+    });
+    return next ? structuredClone(next) : undefined;
+  }
+
+  /** 完成待处理授权申请，并在允许时安装内核签发的 Grant。 */
+  resolveCapabilityRequest(
+    requestId: string,
+    status: 'denied' | 'granted',
+    grants: readonly CapabilityGrant[],
+    reason: string | undefined,
+    resolvedAt: number,
+  ): CapabilityRequestRecord {
+    const request = this.#capabilityRequests.find(
+      (candidate) => candidate.requestId === requestId,
+    );
+    if (!request) {
+      throw new Error(`Capability request is not registered: ${requestId}`);
+    }
+    if (request.status !== 'pending') {
+      throw new Error(`Capability request is already resolved: ${requestId}`);
+    }
+    if (status === 'granted') {
+      this.addCapabilityGrants(grants);
+    } else if (grants.length > 0) {
+      throw new Error('Denied capability request cannot install grants.');
+    }
+    request.status = status;
+    request.resolvedAt = resolvedAt;
+    if (reason === undefined) {
+      delete request.resolutionReason;
+    } else {
+      request.resolutionReason = reason;
+    }
+    this.recordEvent({
+      type: 'capability_request_resolved',
+      requestId,
+      status,
+      ...(reason === undefined ? {} : { reason }),
+    });
+    return structuredClone(request);
+  }
+
+  /** 任务终止时关闭全部待处理请求，避免恢复后留下无主审批。 */
+  denyPendingCapabilityRequests(reason: string, resolvedAt: number): void {
+    for (const request of this.#capabilityRequests) {
+      if (request.status !== 'pending') {
+        continue;
+      }
+      request.status = 'denied';
+      request.resolvedAt = resolvedAt;
+      request.resolutionReason = reason;
+      this.recordEvent({
+        type: 'capability_request_resolved',
+        requestId: request.requestId,
+        status: 'denied',
+        reason,
+      });
+    }
   }
 
   /**
@@ -477,21 +753,135 @@ export class TaskControlBlock {
     });
   }
 
+  /**
+   * 在父任务的 Work Table 中记录直接子 Agent 正在等待 capability。
+   *
+   * 该更新是非终态进展；工作仍然存活，并通过现有 Completion Mailbox 批量投递。
+   */
+  markSubagentWaitingForCapability(
+    childTaskId: string,
+    requestRef: string,
+    requests: readonly CapabilityRequest[],
+    now: number,
+  ): void {
+    const generation = this.requireOpenGenerationForSubagent(childTaskId);
+    const work = generation.work.find(
+      (candidate) =>
+        candidate.kind === 'subagent' &&
+        candidate.childTaskId === childTaskId,
+    );
+    if (
+      !work ||
+      (work.status !== 'running' &&
+        work.status !== 'waiting_for_capability')
+    ) {
+      throw new Error(`Subagent work is not running: ${childTaskId}`);
+    }
+    if (work.blocker !== undefined) {
+      throw new Error(
+        `Subagent work already has a capability blocker: ${childTaskId}`,
+      );
+    }
+    work.blocker = {
+      type: 'capability_request',
+      requestRef,
+      requests: [...structuredClone(requests)],
+      blockedAt: now,
+    };
+    work.status = 'waiting_for_capability';
+    this.recordEvent({
+      type: 'async_work_capability_blocked',
+      generationId: generation.generationId,
+      workId: work.workId,
+      requestRef,
+      requests: [...structuredClone(requests)],
+    });
+  }
+
+  /** 清除父任务 Work Table 中已经处理完毕的 capability blocker。 */
+  clearSubagentCapabilityBlocker(
+    childTaskId: string,
+    requestRef: string,
+  ): void {
+    const generation = this.requireOpenGenerationForSubagent(childTaskId);
+    const work = generation.work.find(
+      (candidate) =>
+        candidate.kind === 'subagent' &&
+        candidate.childTaskId === childTaskId,
+    );
+    if (
+      !work ||
+      work.status !== 'waiting_for_capability' ||
+      work.blocker?.requestRef !== requestRef
+    ) {
+      throw new Error(
+        `Subagent capability blocker is not active: ${requestRef}`,
+      );
+    }
+    work.status = 'running';
+    delete work.blocker;
+    this.recordEvent({
+      type: 'async_work_capability_unblocked',
+      generationId: generation.generationId,
+      workId: work.workId,
+      requestRef,
+    });
+  }
+
   /** 返回当前开放 generation 中仍在运行的 workId。 */
   activeAsyncWorkPendingIds(): string[] {
     return (
       this.activeAsyncWorkGeneration?.work
-        .filter((work) => work.status === 'running')
+        .filter((work) => !isAsyncWorkTerminalStatus(work.status))
         .map((work) => work.workId) ?? []
     );
   }
 
-  /** 判断当前批次是否存在尚未注入父 Agent 上下文的终态结果。 */
+  hasActiveCapabilityBlockers(): boolean {
+    return (
+      this.activeAsyncWorkGeneration?.work.some(
+        (work) =>
+          work.status === 'waiting_for_capability' &&
+          work.blocker !== undefined,
+      ) ?? false
+    );
+  }
+
+  /**
+   * 将尚未处理但已投递过的 blocker 重新放回 Completion Mailbox。
+   *
+   * 父 Agent 一轮只能处理一个授权决定时，其余 blocker 会重新走统一批处理窗口。
+   */
+  requeueActiveCapabilityBlockers(): number {
+    const generation = this.#asyncWorkGenerations.findLast(
+      (candidate) => candidate.closedAt === undefined,
+    );
+    if (!generation) {
+      return 0;
+    }
+    let count = 0;
+    for (const work of generation.work) {
+      if (
+        work.status === 'waiting_for_capability' &&
+        work.blocker?.deliveredAt !== undefined
+      ) {
+        delete work.blocker.deliveredAt;
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  /** 判断当前批次是否存在尚未注入父 Agent 上下文的结果或阻塞进展。 */
   hasUndeliveredAsyncWorkResults(): boolean {
     return (
       this.activeAsyncWorkGeneration?.work.some(
         (work) =>
-          work.status !== 'running' && work.deliveredAt === undefined,
+          (isAsyncWorkTerminalStatus(work.status) &&
+            work.deliveredAt === undefined) ||
+          (work.status === 'waiting_for_capability' &&
+            work.blocker !== undefined &&
+            work.blocker.deliveredAt === undefined),
       ) ?? false
     );
   }
@@ -502,7 +892,9 @@ export class TaskControlBlock {
     return (
       generation !== undefined &&
       generation.work.length > 0 &&
-      generation.work.every((work) => work.status !== 'running')
+      generation.work.every((work) =>
+        isAsyncWorkTerminalStatus(work.status),
+      )
     );
   }
 
@@ -544,14 +936,21 @@ export class TaskControlBlock {
     }
     const terminal = generation.work.filter(
       (work) =>
-        work.status !== 'running' && work.deliveredAt === undefined,
+        isAsyncWorkTerminalStatus(work.status) &&
+        work.deliveredAt === undefined,
     );
-    if (terminal.length === 0) {
+    const blocked = generation.work.filter(
+      (work) =>
+        work.status === 'waiting_for_capability' &&
+        work.blocker !== undefined &&
+        work.blocker.deliveredAt === undefined,
+    );
+    if (terminal.length === 0 && blocked.length === 0) {
       return undefined;
     }
     // 全部完成时走立即唤醒路径；存在 pending 时则是一次部分结果批量投递。
     const allFinished = generation.work.every(
-      (work) => work.status !== 'running',
+      (work) => isAsyncWorkTerminalStatus(work.status),
     );
     const update: AsyncWorkUpdateContextItem = {
       type: 'async_work_update',
@@ -571,18 +970,37 @@ export class TaskControlBlock {
         ...(work.error === undefined ? {} : { error: work.error }),
       })),
       pending: generation.work
-        .filter((work) => work.status === 'running')
+        .filter((work) => !isAsyncWorkTerminalStatus(work.status))
         .map((work) => ({
           workId: work.workId,
           kind: work.kind,
           label: work.label,
           startedAt: work.startedAt,
+          status:
+            work.status === 'waiting_for_capability'
+              ? 'waiting_for_capability'
+              : 'running',
+          ...(work.blocker === undefined
+            ? {}
+            : {
+                blocker: {
+                  type: work.blocker.type,
+                  requestRef: work.blocker.requestRef,
+                  requests: structuredClone(work.blocker.requests),
+                  blockedAt: work.blocker.blockedAt,
+                },
+              }),
         })),
       allFinished,
     };
     // 先持久化投递标记，再由后续快照保证恢复时不会重复注入同一结果。
     for (const work of terminal) {
       work.deliveredAt = now;
+    }
+    for (const work of blocked) {
+      if (work.blocker) {
+        work.blocker.deliveredAt = now;
+      }
     }
     delete generation.batchDueAt;
     if (allFinished) {
@@ -592,7 +1010,7 @@ export class TaskControlBlock {
     this.recordEvent({
       type: 'async_work_delivered',
       generationId: generation.generationId,
-      workIds: terminal.map((work) => work.workId),
+      workIds: [...terminal, ...blocked].map((work) => work.workId),
       allFinished,
     });
     return update;
@@ -679,6 +1097,8 @@ export class TaskControlBlock {
       | 'async_work'
       | 'final'
       | 'needs_parent_action'
+      | 'request_capabilities'
+      | 'resolve_capability_request'
       | 'spawn_subagents'
       | 'tool_calls'
       | 'wait_for_async_work',
@@ -759,7 +1179,8 @@ export class TaskControlBlock {
         : { parentTaskId: this.parentTaskId }),
       depth: this.depth,
       goal: this.goal,
-      capabilities: [...this.#capabilities],
+      capabilityGrants: structuredClone(this.#capabilityGrants),
+      capabilityRequests: structuredClone(this.#capabilityRequests),
       context: structuredClone(this.#context),
       asyncWorkGenerations: structuredClone(this.#asyncWorkGenerations),
       contextSummaries: structuredClone(this.#contextSummaries),
@@ -802,10 +1223,11 @@ export class TaskControlBlock {
     const work = generation.work.find(
       (candidate) => candidate.workId === workId,
     );
-    if (!work || work.status !== 'running') {
+    if (!work || isAsyncWorkTerminalStatus(work.status)) {
       throw new Error(`Asynchronous work is already terminal: ${workId}`);
     }
     work.status = status;
+    delete work.blocker;
     work.completedAt = now;
     if (result.output !== undefined) {
       work.output = structuredClone(result.output);
@@ -836,6 +1258,26 @@ export class TaskControlBlock {
     if (!generation) {
       throw new Error(
         `Asynchronous work generation is not active: ${generationId}`,
+      );
+    }
+    return generation;
+  }
+
+  private requireOpenGenerationForSubagent(
+    childTaskId: string,
+  ): AsyncWorkGeneration {
+    const generation = this.#asyncWorkGenerations.findLast(
+      (candidate) =>
+        candidate.closedAt === undefined &&
+        candidate.work.some(
+          (work) =>
+            work.kind === 'subagent' &&
+            work.childTaskId === childTaskId,
+        ),
+    );
+    if (!generation) {
+      throw new Error(
+        `Subagent work is not active for child: ${childTaskId}`,
       );
     }
     return generation;
@@ -891,4 +1333,42 @@ export class TaskControlBlock {
     this.#events.push(taskEvent);
     this.#updatedAt = occurredAt;
   }
+}
+
+/**
+ * 仅用于直接调用 TCB 工厂和恢复旧测试的兼容路径。
+ *
+ * 生产调度器始终显式传入 CapabilityManager 签发的 grants。子任务在此路径下
+ * 仍会检查父任务持有并允许转授对应的全局能力，避免工厂成为越权入口。
+ */
+function createCompatibilityGrants(
+  taskId: string,
+  inputs: readonly CapabilityInput[],
+  parent: TaskControlBlock | undefined,
+  issuedAt: number,
+): CapabilityGrant[] {
+  const manager = new CapabilityManager();
+  return parent === undefined
+    ? manager.issueRootGrants(taskId, inputs, issuedAt)
+    : manager.delegate(
+        parent.id,
+        parent.capabilityGrants,
+        taskId,
+        inputs,
+        issuedAt,
+      );
+}
+
+function restoreLegacyCapabilityGrants(
+  snapshot: TaskSnapshot,
+): CapabilityGrant[] {
+  const grants = new CapabilityManager().issueRootGrants(
+    snapshot.id,
+    snapshot.capabilities ?? [],
+    snapshot.createdAt,
+  );
+  return grants.map((grant, index) => ({
+    ...grant,
+    grantId: `legacy:${snapshot.id}:${index}`,
+  }));
 }

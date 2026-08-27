@@ -73,6 +73,13 @@ describe('provider adapters', () => {
     expect(new Headers(init?.headers).get('api-key')).toBe(
       'secret-test-key',
     );
+    const body = JSON.parse(String(init?.body)) as {
+      messages?: Array<{ content?: string }>;
+    };
+    const modelInput = JSON.parse(
+      body.messages?.[1]?.content ?? '{}',
+    ) as { taskId?: string };
+    expect(modelInput).not.toHaveProperty('taskId');
   });
 
   it('uses Anthropic headers and parses structured text content', async () => {
@@ -117,5 +124,12 @@ describe('provider adapters', () => {
     expect(new Headers(init?.headers).get('anthropic-version')).toBe(
       '2023-06-01',
     );
+    const body = JSON.parse(String(init?.body)) as {
+      messages?: Array<{ content?: string }>;
+    };
+    const modelInput = JSON.parse(
+      body.messages?.[0]?.content ?? '{}',
+    ) as { taskId?: string };
+    expect(modelInput).not.toHaveProperty('taskId');
   });
 });

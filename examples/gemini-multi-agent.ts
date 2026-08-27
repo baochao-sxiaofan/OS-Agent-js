@@ -44,8 +44,8 @@ const root = await scheduler.submit({
   goal: [
     'This task must use exactly two subagents before producing a final answer.',
     'On the first turn, return spawn_subagents with exactly these children:',
-    '1. taskId gemini-leaf-2, goal: Return final output exactly "4".',
-    '2. taskId gemini-leaf-3, goal: Return final output exactly "9".',
+    '1. goal: Return final output exactly "4".',
+    '2. goal: Return final output exactly "9".',
     'Set maxModelAttempts to 1 for both children.',
     'After an async_work_update with allFinished=true arrives, return final output exactly "4+9=13".',
   ].join(' '),
@@ -63,7 +63,10 @@ const root = await scheduler.submit({
 
 await scheduler.run();
 
-const leaves = ['gemini-leaf-2', 'gemini-leaf-3'].map((taskId) => {
+const leafTaskIds = root.events
+  .filter((event) => event.type === 'subagent_spawned')
+  .map((event) => event.childTaskId);
+const leaves = leafTaskIds.map((taskId) => {
   const task = scheduler.getTask(taskId);
   if (!task) {
     throw new Error(`Gemini did not create expected child ${taskId}.`);

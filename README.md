@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`1.2.1`
+当前版本：`1.3.0`
 
 ## 核心状态模型
 
@@ -66,9 +66,10 @@ needs_parent_action  # 需要父任务先完成某项前置工作
 
 ## 增量异步工作任务板
 
-工具调用和子 Agent 委派统一登记到父任务持久化的 `AsyncWorkGeneration` 中。模型可以
-通过一次 `async_work` 响应同时启动多个子 Agent 和多个长时工具，不再需要按类型拆成
-不同轮次，也不必等待整批工作全部结束。
+工具调用和子 Agent 委派统一登记到父任务持久化的 `AsyncWorkGeneration` 中。子 Agent
+等待 capability 时也只更新对应 Work Record 为 `waiting_for_capability`，不建立独立
+消息或唤醒通道。模型可以通过一次 `async_work` 响应同时启动多个子 Agent 和多个长时
+工具，不再需要按类型拆成不同轮次，也不必等待整批工作全部结束。
 
 每个父任务使用按需创建的一次性批处理定时器，默认窗口为 30 秒：
 
@@ -76,7 +77,7 @@ needs_parent_action  # 需要父任务先完成某项前置工作
 没有新结果
 -> 不创建定时器
 
-第一个结果完成
+第一个结果完成或子任务状态更新
 -> 写入 Completion Mailbox
 -> 启动一次性 batch timer
 
@@ -93,7 +94,8 @@ timer 到期但仍有工作运行
 ```
 
 投递给模型的 `async_work_update` 包含本批 `results`、当前 `pending` 和
-`allFinished`。父 Agent 处理部分结果后，可以返回 `wait_for_async_work` 继续等待；
+`allFinished`。`pending` 会携带子任务的 capability blocker。父 Agent 处理部分结果
+或权限申请后，可以返回 `wait_for_async_work` 继续等待；
 如果后台结果恰好在父模型运行期间到达，结果会留在 Mailbox，当前模型轮次结束后立即
 重新入队，不会并发修改同一个父任务。
 
@@ -182,16 +184,36 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 
 ## 工具与权限
 
-工具声明：
+工具目录和执行权限相互独立。运行时注册的全局工具可以对 Agent 可见；
+Character 专属工具将在 Character 层进一步筛选。工具只声明执行需求，不负责
+决定调用者是否有权执行。
 
-- `requiredCapability`：调用所需能力；
+- `requiredCapabilities(input)`：根据调用参数推导能力及具体资源范围；
+- `requiredCapability`：旧工具使用的全局能力简写；
 - `effect`：`read_only`、`side_effect` 或 `privileged`；
 - 输入校验；
 - 执行函数。
 
-子任务的 Capability 必须是父任务 Capability 的子集。只读工具允许并行执行；
-有副作用或高权限工具保持串行，避免共享状态竞争。每次工具调用都获得幂等键和
-取消信号。
+`CapabilityManager` 是授权的唯一裁决入口。授权以 `CapabilityGrant` 持久化，
+包含能力名称、URI 风格资源范围、来源链、可转授标记、期限和可选使用次数。
+父 Agent 创建子 Agent 时只能缩小自己持有且可转授的 Grant，不能创造权限或扩大
+资源范围。
+
+Agent 缺少能力时只提交 `request_capabilities`，不能选择审批人。Manager 首先检查
+Root Authority Ceiling；根任务不覆盖请求能力及资源范围时直接拒绝：
+
+- 普通能力从最近持权祖先开始，沿直接父子关系逐级向下授权；每一级父 Agent 都只能
+  决定是否向自己的直接子 Agent 转授；
+- capability blocker 作为 Work Table 的非终态进展，沿用 30 秒批处理窗口；
+- `git.push`、转账、生产部署等敏感能力在 Root Ceiling 允许后绕过父 Agent，
+  直接进入人工审批；
+- 等待普通授权时进入 `BLOCKED(capability_request)`；
+- 等待敏感授权时进入 `BLOCKED(human_approval)`；
+- 人工签发的敏感 Grant 默认只能被一个内核操作消费一次，同一操作可按幂等键恢复。
+
+Tool 调用前和实际执行前都会校验 Grant。缺权、工具不存在或输入非法会作为结构化
+拒绝结果返回给 Agent，不会进入工具执行器。只读工具允许并行执行；有副作用或
+高权限工具保持串行。
 
 ## 当前能力
 
@@ -224,6 +246,8 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 - Gemini 结构化 final、子 Agent 委派、异步等待、父任务协助响应和轮次摘要
 - 子任务创建、阻塞、结果回传和父任务唤醒
 - Capability 驱动的工具权限控制
+- 资源范围化 Capability Grant、父级衰减委派和敏感权限人工路由
+- Capability 请求的阻塞、审批、唤醒、快照与审计事件
 - 工具阻塞与事件唤醒
 - 任务快照和只追加事件历史
 - 单进程内存存储实现
@@ -234,6 +258,7 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 
 ```text
 src/
+├── capability/   # 资源范围、Grant、审批策略和逐级授权
 ├── context/      # 上下文窗口策略与二次压缩 Adapter
 ├── kernel/       # 状态、任务控制块、上下文和事件
 ├── model/        # Provider 接口与 Fake Provider
@@ -311,7 +336,7 @@ npm run desktop:build
 ```
 
 推送到 `main` 后，`.github/workflows/windows-desktop.yml` 会在 Windows Runner 上
-执行检查和测试，并生成 `OS-Agent-Setup-1.2.1-x64.exe`。也可以在 GitHub Actions
+执行检查和测试，并生成 `OS-Agent-Setup-1.3.0-x64.exe`。也可以在 GitHub Actions
 页面手动触发该工作流。
 
 ### 最小 Gemini 网络验证
@@ -387,7 +412,8 @@ npm run benchmark:multi-agent
   没有调用上下文的外部工作仍需对应恢复 Adapter 接管。
 - Conversation 元数据尚未单独持久化；恢复时每个根任务会重建为一个独立
   Conversation，根任务内部的 Agent 拓扑保持不变。
-- 人工审批和资源锁已预留状态，但尚未完成协议。
+- Capability 人工审批已提供内核查询与决议 API，桌面审批界面尚未接入；资源锁仍仅
+  预留状态。
 - 轮次摘要和二次压缩已定义 Provider/Adapter 协议，但尚未连接真实模型服务。
 - RAG 仍将在后续通过 Adapter 接入成熟方案。
 

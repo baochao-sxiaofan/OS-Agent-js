@@ -96,4 +96,72 @@ describe('SqliteTaskStore', () => {
     expect(await store.events('missing')).toEqual([]);
     store.close();
   });
+
+  it('persists capability grants and pending approval requests', async () => {
+    const store = new SqliteTaskStore({ location: ':memory:' });
+    const task = TaskControlBlock.createAgent(
+      {
+        id: 'approval-task',
+        goal: 'Wait for a sensitive capability.',
+        capabilities: ['file.read'],
+      },
+      { kind: 'root' },
+      1,
+    );
+    task.transition(
+      {
+        status: 'RUNNING',
+        enteredAt: 2,
+        providerId: 'fake',
+        requestAttempt: 1,
+      },
+      'admitted',
+    );
+    task.registerCapabilityRequest({
+      requestId: 'approval-1',
+      requests: [
+        {
+          capability: 'git.push',
+          scope: {
+            kind: 'exact',
+            resource: 'git://repo/origin/main',
+          },
+        },
+      ],
+      route: 'human',
+      status: 'pending',
+      createdAt: 3,
+    });
+    task.transition(
+      {
+        status: 'BLOCKED',
+        enteredAt: 3,
+        reason: 'human_approval',
+        waitingFor: ['approval-1'],
+      },
+      'waiting_for_human_capability_approval',
+    );
+
+    await store.persist(task);
+    const snapshot = await store.load(task.id);
+    expect(snapshot).toBeDefined();
+    if (!snapshot) {
+      return;
+    }
+    const restored = TaskControlBlock.restore(snapshot);
+
+    expect(restored.capabilities).toEqual(['file.read']);
+    expect(restored.capabilityRequests).toEqual([
+      expect.objectContaining({
+        requestId: 'approval-1',
+        route: 'human',
+        status: 'pending',
+      }),
+    ]);
+    expect(restored.state).toMatchObject({
+      status: 'BLOCKED',
+      reason: 'human_approval',
+    });
+    store.close();
+  });
 });

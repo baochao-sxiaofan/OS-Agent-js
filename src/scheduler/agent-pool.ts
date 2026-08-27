@@ -157,7 +157,7 @@ export class AgentPool {
       return {
         reserved: false,
         reason: 'parent_not_live',
-        message: `Parent task ${parent.id} is not live.`,
+        message: 'The requesting Agent is no longer live.',
       };
     }
     if (parent.depth >= this.policy.maxDepth) {
@@ -185,7 +185,7 @@ export class AgentPool {
       return {
         reserved: false,
         reason: 'root_spawn_limit_exceeded',
-        message: `Root task ${rootTaskId} reached its cumulative spawn limit.`,
+        message: 'The current task tree reached its cumulative spawn limit.',
       };
     }
 

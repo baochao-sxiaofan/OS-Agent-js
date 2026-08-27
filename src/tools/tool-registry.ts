@@ -22,6 +22,14 @@ export class ToolRegistry {
     if (this.#tools.has(tool.name)) {
       throw new DuplicateToolError(tool.name);
     }
+    if (
+      tool.requiredCapability === undefined &&
+      tool.requiredCapabilities === undefined
+    ) {
+      throw new Error(
+        `Tool must declare its required capabilities: ${tool.name}`,
+      );
+    }
     this.#tools.set(tool.name, tool);
   }
 
@@ -33,13 +41,22 @@ export class ToolRegistry {
     return tool;
   }
 
-  descriptorsFor(capabilities: readonly string[]): ToolDescriptor[] {
-    const capabilitySet = new Set(capabilities);
+  /**
+   * 返回当前运行时注册的全局工具。
+   *
+   * 工具可见性不再由 capability 决定；后续 Character 层会在全局目录上叠加
+   * 角色工具集合。CapabilityManager 只负责某一次具体调用能否执行。
+   */
+  descriptors(): ToolDescriptor[] {
     return [...this.#tools.values()]
-      .filter((tool) => capabilitySet.has(tool.requiredCapability))
       .map((tool) => ({
         name: tool.name,
         description: tool.description,
       }));
+  }
+
+  /** @deprecated Use descriptors(); capability is not a visibility filter. */
+  descriptorsFor(_capabilities: readonly string[]): ToolDescriptor[] {
+    return this.descriptors();
   }
 }

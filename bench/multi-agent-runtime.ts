@@ -78,6 +78,21 @@ async function runScenario(concurrency: number): Promise<BenchmarkResult> {
     requestsPerMinute: 10_000,
     tokensPerMinute: 10_000_000,
   });
+  const taskIdsByGoal = new Map<string, string>();
+  for (let middleIndex = 0; middleIndex < MIDDLE_COUNT; middleIndex += 1) {
+    const firstNumber = middleIndex * LEAVES_PER_MIDDLE + 1;
+    taskIdsByGoal.set(
+      `Coordinate integers ${firstNumber} through ${firstNumber + 3}.`,
+      `middle-${middleIndex + 1}`,
+    );
+  }
+  for (
+    let value = 1;
+    value <= MIDDLE_COUNT * LEAVES_PER_MIDDLE;
+    value += 1
+  ) {
+    taskIdsByGoal.set(`Return the square of ${value}.`, `leaf-${value}`);
+  }
   const scheduler = new TaskScheduler({
     provider,
     agentPool,
@@ -86,6 +101,13 @@ async function runScenario(concurrency: number): Promise<BenchmarkResult> {
     store: new InMemoryTaskStore(),
     asyncWorkPolicy: {
       batchWindowMs: 5_000,
+    },
+    taskIdGenerator: (request) => {
+      const taskId = taskIdsByGoal.get(request.goal);
+      if (!taskId) {
+        throw new Error(`No benchmark task ID for goal: ${request.goal}`);
+      }
+      return taskId;
     },
   });
 
@@ -162,8 +184,7 @@ function configureResponses(
   provider.setResponses(rootTaskId, [
     {
       type: 'spawn_subagents',
-      children: middleIds.map((taskId, index) => ({
-        taskId,
+      children: middleIds.map((_taskId, index) => ({
         goal: `Coordinate integers ${index * 4 + 1} through ${index * 4 + 4}.`,
       })),
       turnSummary: {
@@ -201,7 +222,6 @@ function configureResponses(
       {
         type: 'spawn_subagents',
         children: leafNumbers.map((value) => ({
-          taskId: `leaf-${value}`,
           goal: `Return the square of ${value}.`,
           maxModelAttempts: 1,
         })),

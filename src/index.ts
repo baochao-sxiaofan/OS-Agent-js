@@ -1,4 +1,33 @@
 export type {
+  CapabilityApprovalRoute,
+  CapabilityCheckResult,
+  CapabilityDelegationHop,
+  CapabilityDelegationDecision,
+  CapabilityGrant,
+  CapabilityGrantSource,
+  CapabilityInput,
+  CapabilityPolicy,
+  CapabilityRequest,
+  CapabilityRequestRecord,
+  CapabilityRequestRouteDecision,
+  CapabilityRequestStatus,
+  ResourceScope,
+} from './capability/capability.js';
+export {
+  capabilityRequestKey,
+  normalizeCapabilityInput,
+  normalizeResourceScope,
+  scopeContains,
+} from './capability/capability.js';
+export {
+  CapabilityDelegationError,
+  CapabilityManager,
+  DEFAULT_CAPABILITY_POLICIES,
+  type CapabilityAncestor,
+  type CapabilityManagerOptions,
+} from './capability/capability-manager.js';
+export type {
+  AsyncWorkCapabilityBlocker,
   AsyncWorkPending,
   AsyncWorkGeneration,
   AsyncWorkKind,
@@ -8,11 +37,14 @@ export type {
   AsyncWorkStatus,
   AsyncWorkTerminalStatus,
 } from './kernel/async-work.js';
+export { isAsyncWorkTerminalStatus } from './kernel/async-work.js';
 export type {
   AsyncWorkUpdateContextItem,
+  CapabilityRequestResultContextItem,
   ContextItem,
   ContextSummaryKind,
   ContextSummaryRecord,
+  ToolCallRejectedContextItem,
   TurnSummary,
 } from './kernel/context.js';
 export type {
@@ -38,6 +70,7 @@ export {
   TaskControlBlock,
   type AgentCreationOrigin,
   type CreateAgentRequest,
+  type CreateChildAgentRequest,
   type TaskBudget,
   type TaskSnapshot,
 } from './kernel/task-control-block.js';
@@ -116,6 +149,7 @@ export {
 export {
   TaskScheduler,
   type AsyncWorkPolicy,
+  type PendingHumanCapabilityApproval,
   type RestoreTasksOptions,
   type SchedulerMetricsSnapshot,
   type SchedulerRunOptions,

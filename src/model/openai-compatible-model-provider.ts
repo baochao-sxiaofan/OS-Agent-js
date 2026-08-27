@@ -1,4 +1,3 @@
-import type { ContextItem } from '../kernel/context.js';
 import type { JsonObject, JsonValue } from '../types/json.js';
 import type {
   ModelProvider,
@@ -10,6 +9,7 @@ import type {
 import {
   STRUCTURED_AGENT_INSTRUCTION,
   parseStructuredAgentResponse,
+  serializeContextItemForModel,
 } from './structured-agent-response.js';
 
 export type OpenAiCompatibleModelProviderOptions = {
@@ -128,10 +128,9 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
         {
           role: 'user',
           content: JSON.stringify({
-            taskId: request.taskId,
             goal: request.goal,
             attempt: request.attempt,
-            context: request.context.map(serializeContextItem),
+            context: request.context.map(serializeContextItemForModel),
             tools: request.tools,
             delegation: request.delegation,
           }),
@@ -145,10 +144,6 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
     payload[this.#maxTokensField] = this.#maxOutputTokens;
     return payload;
   }
-}
-
-function serializeContextItem(item: ContextItem): JsonObject {
-  return structuredClone(item) as JsonObject;
 }
 
 function estimateTokens(text: string): number {

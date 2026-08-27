@@ -57,15 +57,25 @@ File Search 等成熟方案。
 - 内核必须与具体模型服务商解耦。
 - 调度、模型调用、工具执行、持久化、检索和可观测性必须保持职责分离。
 - 所有状态转换必须显式完成，禁止任意模块直接修改任务状态。
+- Task ID 只能由内核生成并维护，不得进入模型可见输入，也不得允许模型在子任务
+  创建请求中指定；测试需要确定性 ID 时必须注入内核 ID 生成器。
 - 运行状态和事件使用可辨识联合类型，并通过穷尽式 `switch` 处理。
 - 禁止使用 `any`。公共领域类型应尽量避免 `unknown`；外部不可信数据必须在边界处
   完成校验和类型收窄。
 - 工具输出、模型服务商响应、恢复后的持久化状态和外部事件都按不可信输入处理。
 - 所有带副作用的操作必须支持幂等键。
 - 高权限工具必须由能力和审批策略强制保护，不能只依靠 Prompt 约束。
+- Tool 可见性与执行授权必须分离；Tool 只声明所需能力，所有 Grant 签发、
+  资源范围校验、委派衰减和审批路由统一由 `CapabilityManager` 裁决。
+- Agent 只能申请 Capability，不能选择由父 Agent 还是用户审批。敏感能力必须绕过
+  父 Agent 直接进入人工审批，人工签发的默认授权应限制为单次内核操作。
+- Capability 请求必须先受 Root Authority Ceiling 约束。普通授权从最近持权祖先开始
+  沿父子关系逐级下发，任何中间 Agent 都不能被跳过。
+- 子 Agent 等待 Capability 属于 Work Table 的非终态进展，必须通过现有
+  Completion Mailbox 和批处理 timer 投递，禁止增加独立唤醒通道。
 - Agent 与子 Agent 的上下文遵循最小权限原则：每个任务只能获得其角色所需的
   上下文和工具。
-- 子 Agent 的 Capability 必须是父 Agent Capability 的子集。
+- 父 Agent 只能转授自己持有、允许转授且资源范围不扩大的 Capability。
 - 子 Agent 创建必须同时受到全局存活数量、每棵任务树累计创建数量和最大委派深度
   三类独立限制。
 - 深度调度必须使用加权轮转和老化机制，禁止使用会让浅层任务永久饿死的绝对深度
@@ -132,7 +142,7 @@ File Search 等成熟方案。
 
 ## 当前状态
 
-当前 `0.6.0` 内核已经实现：
+当前 `1.3.0` 内核已经实现：
 
 1. 任务状态、事件和合法状态转换规则。
 2. 可序列化的 `TaskControlBlock` 快照和只追加事件历史。
@@ -169,12 +179,22 @@ File Search 等成熟方案。
 32. SQLite 任务快照与事件持久化，单次跃迁通过事务原子写入快照和增量事件。
 33. 桌面启动批量恢复任务树：失效 RUNNING 请求重新入队、BLOCKED 异步投递与
     timer 重建、终态子任务对账、运行中本地工具按原幂等键重启。
+34. 模型侧完全移除 Task ID；子任务身份、血缘和碰撞重试由内核管理。
+35. 资源范围化 Capability Grant、Root Authority Ceiling、父级衰减委派和
+    敏感权限人工审批路由。
+36. Capability 请求作为 `waiting_for_capability` 非终态进展进入 Work Table，
+    复用 Completion Mailbox 和批处理 timer。
+37. 普通 Capability 从最近持权祖先开始沿父子关系逐级授权，中间 Agent 不可跳过。
+38. Tool 可见性与执行授权分离，并支持按调用参数推导资源范围。
+39. Gemini、Anthropic 和 OpenAI-compatible Provider 共用统一结构化响应协议。
 
 后续优先级：
 
-1. 持久化 Conversation 元数据，保留重启前的多轮对话归属关系。
-2. 增加外部进程和长时工作对应的恢复 Adapter。
-3. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-4. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。
-5. 增加其他真实模型 Provider Adapter。
-6. 增加真实模型厂商的 `ContextCompactor` Adapter。
+1. 接入桌面人工审批队列、单次决议和 Settings 持久策略。
+2. 定义 Character Agent Type 及其基础权限、工具可见性和上下文策略。
+3. 接入 MCP/Skill Adapter，并由 CapabilityManager 统一约束外部资源访问。
+4. 持久化 Conversation 元数据，保留重启前的多轮对话归属关系。
+5. 增加外部进程和长时工作对应的恢复 Adapter。
+6. 增加资源锁对应的阻塞/唤醒协议。
+7. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。
+8. 增加真实模型厂商的 `ContextCompactor` Adapter。

@@ -1,5 +1,9 @@
 import type { JsonValue } from '../types/json.js';
 import type {
+  CapabilityRequest,
+  ResourceScope,
+} from '../capability/capability.js';
+import type {
   AsyncWorkPending,
   AsyncWorkResult,
 } from './async-work.js';
@@ -159,6 +163,27 @@ export type SubagentSpawnRejectedContextItem = {
   message: string;
 };
 
+/** Tool 调用在进入执行器前被内核拒绝。 */
+export type ToolCallRejectedContextItem = {
+  type: 'tool_call_rejected';
+  toolName: string;
+  reason: 'capability_required' | 'invalid_input' | 'tool_not_found';
+  message: string;
+  requiredCapabilities?: CapabilityRequest[];
+};
+
+/** CapabilityManager 向请求方投递的最终授权结果。 */
+export type CapabilityRequestResultContextItem = {
+  type: 'capability_request_result';
+  requestRef: string;
+  status: 'denied' | 'granted';
+  capabilities: Array<{
+    capability: string;
+    scope: ResourceScope;
+  }>;
+  reason?: string;
+};
+
 /**
  * Agent 完整上下文中允许出现的所有记录类型。
  *
@@ -168,10 +193,12 @@ export type SubagentSpawnRejectedContextItem = {
 export type ContextItem =
   | AssistantContextItem
   | AsyncWorkUpdateContextItem
+  | CapabilityRequestResultContextItem
   | ContextSummaryItem
   | SubagentResultContextItem
   | SubagentSpawnRejectedContextItem
   | SystemContextItem
   | ToolCallContextItem
+  | ToolCallRejectedContextItem
   | ToolResultContextItem
   | UserContextItem;
