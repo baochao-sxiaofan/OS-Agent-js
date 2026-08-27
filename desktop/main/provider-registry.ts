@@ -1,6 +1,7 @@
 import {
   AnthropicModelProvider,
   GeminiModelProvider,
+  MiniMaxModelProvider,
   OpenAiCompatibleModelProvider,
   type JsonObject,
   type JsonValue,
@@ -28,6 +29,8 @@ type ProviderEndpoint = {
   apiKeyHeader: 'api-key' | 'authorization';
   maxTokensField: 'max_completion_tokens' | 'max_tokens';
 };
+
+const MINIMAX_MIN_OUTPUT_TOKENS = 4_096;
 
 export async function discoverProviderModels(
   credentials: ProviderCredentials,
@@ -65,6 +68,15 @@ export function createConfiguredProvider(
         apiKey: config.apiKey,
         model: config.modelId,
         maxOutputTokens,
+      });
+    case 'minimax':
+      return new MiniMaxModelProvider({
+        apiKey: config.apiKey,
+        model: config.modelId,
+        maxOutputTokens: Math.max(
+          maxOutputTokens,
+          MINIMAX_MIN_OUTPUT_TOKENS,
+        ),
       });
     default: {
       const endpoint = providerEndpoint(config);

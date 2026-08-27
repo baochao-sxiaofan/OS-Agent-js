@@ -5,9 +5,11 @@ import { fileURLToPath } from 'node:url';
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   shell,
   type BrowserWindowConstructorOptions,
+  type OpenDialogOptions,
 } from 'electron';
 
 import {
@@ -54,6 +56,21 @@ function registerIpcHandlers(
   );
   ipcMain.handle(IPC_CHANNELS.createConversation, () =>
     runtime.createConversation(),
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.selectWorkspace,
+    async (_event, conversationId: unknown) => {
+      if (typeof conversationId !== 'string' || !conversationId) {
+        throw new Error('Invalid Conversation ID.');
+      }
+      const workspacePath = await selectWorkspaceDirectory();
+      return workspacePath === undefined
+        ? undefined
+        : await runtime.setConversationWorkspace(
+            conversationId,
+            workspacePath,
+          );
+    },
   );
   ipcMain.handle(
     IPC_CHANNELS.discoverModels,
@@ -106,6 +123,18 @@ function registerIpcHandlers(
       return await runtime.cancelTask(taskId);
     },
   );
+}
+
+async function selectWorkspaceDirectory(): Promise<string | undefined> {
+  const options: OpenDialogOptions = {
+    title: '选择 Conversation Workspace',
+    buttonLabel: '选择 Workspace',
+    properties: ['openDirectory', 'createDirectory'],
+  };
+  const selection = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
+  return selection.canceled ? undefined : selection.filePaths[0];
 }
 
 async function createWindow(): Promise<void> {

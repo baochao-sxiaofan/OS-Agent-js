@@ -7,7 +7,7 @@ import type {
   ModelUsage,
 } from './model-provider.js';
 import {
-  STRUCTURED_AGENT_INSTRUCTION,
+  buildStructuredAgentSystemInstruction,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from './structured-agent-response.js';
@@ -84,15 +84,16 @@ export class AnthropicModelProvider implements ModelProvider {
       body: JSON.stringify({
         model: this.#model,
         max_tokens: this.#maxOutputTokens,
-        system: [
-          STRUCTURED_AGENT_INSTRUCTION,
-          request.summaryProtocol.instruction,
-        ].join(' '),
+        system: buildStructuredAgentSystemInstruction(request),
         messages: [
           {
             role: 'user',
             content: JSON.stringify({
               goal: request.goal,
+              ...(request.character === undefined
+                ? {}
+                : { character: request.character }),
+              capabilities: request.capabilities ?? [],
               attempt: request.attempt,
               context: request.context.map(serializeContextItemForModel),
               tools: request.tools,

@@ -1,12 +1,22 @@
 import { randomUUID } from 'node:crypto';
+import { realpath, stat } from 'node:fs/promises';
 
 import {
   AdmissionController,
   AgentPool,
+  capabilityRequestKey,
+  createWorkspaceCapabilityRequests,
+  CURRENT_WORKSPACE_RESOURCE,
+  extractInheritableRootAuthority,
   FakeModelProvider,
+  registerBuiltinTools,
   TaskScheduler,
   ToolRegistry,
   TURN_SUMMARY_PROTOCOL,
+  WORKSPACE_FILESYSTEM_CAPABILITIES,
+  type CapabilityRequest,
+  type ContextItem,
+  type ProcessSandbox,
   type TaskSnapshot,
 } from '../../src/index.js';
 import type { TaskEvent } from '../../src/kernel/task-event.js';
@@ -32,6 +42,10 @@ type ConversationRecord = {
   createdAt: number;
   updatedAt: number;
   rootTaskIds: string[];
+  /** 控制平面持有的宿主目录；不进入模型或 Capability Grant。 */
+  workspacePath?: string;
+  /** 每轮 Root Agent 重新签发的任务树权限上限。 */
+  authorityCeiling: CapabilityRequest[];
 };
 
 type RuntimeListener = (snapshot: RuntimeSnapshotView) => void;
@@ -45,6 +59,8 @@ export type RuntimeServiceOptions = {
    * 桌面端主进程应传入 userData 目录下的持久化文件路径。
    */
   storeLocation?: string;
+  /** Enables `test.run`; must isolate the complete child process tree. */
+  processSandbox?: ProcessSandbox;
 };
 
 const DEMO_USAGE = {
@@ -59,17 +75,26 @@ const AGENT_POOL_POLICY = {
   maxSpawnedPerRoot: 100,
 } as const;
 
+const ROOT_TASK_POLICY = {
+  maxModelAttempts: 24,
+  maxCostUsd: 1,
+} as const;
+
+const CONVERSATION_METADATA_KEY = 'desktop.conversations.v1';
+
 export class RuntimeService {
   readonly #provider: SwitchableModelProvider;
   #fakeProvider: FakeModelProvider | undefined;
   readonly #store: ObservableTaskStore;
   readonly #scheduler: TaskScheduler;
+  readonly #processSandboxEnabled: boolean;
   readonly #conversations = new Map<string, ConversationRecord>();
   readonly #listeners = new Set<RuntimeListener>();
   readonly #demoChildTaskIds = new Map<string, string>();
   #runPromise: Promise<void> | undefined;
   #initializePromise: Promise<void> | undefined;
   #publishQueued = false;
+  #closed = false;
 
   constructor(config?: ConfiguredProvider, options: RuntimeServiceOptions = {}) {
     const initialProvider = config
@@ -86,9 +111,16 @@ export class RuntimeService {
       options.storeLocation ?? ':memory:',
     );
 
+    const tools = new ToolRegistry();
+    registerBuiltinTools(tools, {
+      ...(options.processSandbox === undefined
+        ? {}
+        : { processSandbox: options.processSandbox }),
+    });
+    this.#processSandboxEnabled = options.processSandbox !== undefined;
     this.#scheduler = new TaskScheduler({
       provider: this.#provider,
-      tools: new ToolRegistry(),
+      tools,
       store: this.#store,
       admission: new AdmissionController({
         maxConcurrentRequests: 2,
@@ -99,6 +131,8 @@ export class RuntimeService {
       asyncWorkPolicy: {
         batchWindowMs: 1_200,
       },
+      workspaceRootResolver: (task) =>
+        this.#workspaceRootForRootTask(task.rootTaskId),
       taskIdGenerator: (request, origin) => {
         if (origin.kind === 'child') {
           const key = this.#demoTaskKey(origin.parent.id, request.goal);
@@ -116,14 +150,10 @@ export class RuntimeService {
       this.#touchConversationForLatestTasks();
       this.#queuePublish();
     });
-    this.createConversationRecord();
   }
 
   /**
    * 从本地任务库恢复所有历史任务，并把未完成任务重新接回调度器。
-   *
-   * 任务库目前不保存 Conversation 元数据，因此恢复时每个根任务重建为一个
-   * 独立 Conversation；根任务下的完整 Agent 拓扑仍通过 rootTaskId 保留。
    */
   async initialize(): Promise<void> {
     this.#initializePromise ??= this.#restorePersistedTasks();
@@ -131,6 +161,7 @@ export class RuntimeService {
   }
 
   close(): void {
+    this.#closed = true;
     this.#store.close();
   }
 
@@ -223,7 +254,41 @@ export class RuntimeService {
   }
 
   createConversation(): RuntimeSnapshotView {
-    this.createConversationRecord();
+    const conversation = this.createConversationRecord();
+    this.#conversations.set(conversation.id, conversation);
+    this.persistConversationRecords();
+    this.#queuePublish();
+    return this.getSnapshot();
+  }
+
+  async setConversationWorkspace(
+    conversationId: string,
+    workspacePath: string,
+  ): Promise<RuntimeSnapshotView> {
+    const conversation = this.#conversations.get(conversationId);
+    if (!conversation) {
+      throw new Error(`Conversation not found: ${conversationId}`);
+    }
+    const currentRootTaskId = conversation.rootTaskIds.at(-1);
+    const currentRoot = currentRootTaskId
+      ? this.#store
+          .list()
+          .find((snapshot) => snapshot.id === currentRootTaskId)
+      : undefined;
+    if (currentRoot && currentRoot.state.status !== 'TERMINATED') {
+      throw new Error('当前 Conversation 正在执行，不能更换 Workspace。');
+    }
+
+    conversation.workspacePath =
+      await this.requireWorkspaceDirectory(workspacePath);
+    conversation.authorityCeiling = this.mergeCapabilityRequests(
+      conversation.authorityCeiling.filter(
+        (request) => !isWorkspaceFilesystemRequest(request),
+      ),
+      this.initialWorkspaceAuthority(),
+    );
+    conversation.updatedAt = Date.now();
+    this.persistConversationRecords();
     this.#queuePublish();
     return this.getSnapshot();
   }
@@ -265,16 +330,30 @@ export class RuntimeService {
       this.configureDemoScenario(rootTaskId, task);
     }
 
+    const authorityCeiling = this.inheritedRootAuthority(
+      conversation,
+      previousRoot,
+    );
     try {
       await this.#scheduler.submit({
         id: rootTaskId,
         goal: task,
-        context: [{ type: 'user', content: task }],
-        maxModelAttempts: 4,
-        budget: { maxCostUsd: 0.05 },
+        characterId: 'coordinator',
+        capabilities: authorityCeiling,
+        context: this.buildRootContext(
+          conversation,
+          rootTaskId,
+          task,
+        ),
+        maxModelAttempts: ROOT_TASK_POLICY.maxModelAttempts,
+        budget: { maxCostUsd: ROOT_TASK_POLICY.maxCostUsd },
       });
+      conversation.authorityCeiling =
+        structuredClone(authorityCeiling);
+      this.persistConversationRecords();
     } catch (error) {
       conversation.rootTaskIds.pop();
+      this.persistConversationRecords();
       throw error;
     }
     this.#ensureSchedulerRunning();
@@ -290,43 +369,143 @@ export class RuntimeService {
 
   private createConversationRecord(): ConversationRecord {
     const now = Date.now();
-    const conversation: ConversationRecord = {
+    return {
       id: randomUUID(),
       title: '新对话',
       createdAt: now,
       updatedAt: now,
       rootTaskIds: [],
+      authorityCeiling: [],
     };
-    this.#conversations.set(conversation.id, conversation);
-    return conversation;
+  }
+
+  private buildRootContext(
+    conversation: ConversationRecord,
+    currentRootTaskId: string,
+    currentTask: string,
+  ): ContextItem[] {
+    const snapshots = this.#store.list();
+    const context: ContextItem[] =
+      conversation.workspacePath === undefined
+        ? []
+        : [
+            {
+              type: 'system',
+              content: [
+                `The conversation workspace is mounted at ${CURRENT_WORKSPACE_RESOURCE}`,
+                'Use paths under this semantic mount for all workspace file operations.',
+                'The host filesystem path is intentionally not exposed to Agents.',
+              ].join(' '),
+            },
+          ];
+    for (const rootTaskId of conversation.rootTaskIds) {
+      if (rootTaskId === currentRootTaskId) {
+        continue;
+      }
+      const root = snapshots.find(
+        (snapshot) => snapshot.id === rootTaskId,
+      );
+      if (!root) {
+        continue;
+      }
+      context.push({ type: 'user', content: root.goal });
+      if (root.state.status !== 'TERMINATED') {
+        continue;
+      }
+      const termination = root.state.termination;
+      switch (termination.kind) {
+        case 'completed':
+          context.push({
+            type: 'assistant',
+            content: this.stringifyValue(termination.output),
+          });
+          break;
+        case 'failed':
+          context.push({
+            type: 'assistant',
+            content: `Previous round failed: ${termination.error}`,
+          });
+          break;
+        case 'cancelled':
+          context.push({
+            type: 'assistant',
+            content: `Previous round was cancelled: ${termination.reason}`,
+          });
+          break;
+        case 'needs_parent_action':
+          context.push({
+            type: 'assistant',
+            content: `Previous round required additional work: ${termination.requiredWork}`,
+          });
+          break;
+      }
+    }
+    context.push({ type: 'user', content: currentTask });
+    return context;
+  }
+
+  private initialWorkspaceAuthority(): CapabilityRequest[] {
+    return createWorkspaceCapabilityRequests({
+      includeTestRun: this.#processSandboxEnabled,
+    });
   }
 
   async #restorePersistedTasks(): Promise<void> {
     const snapshots = this.#store.list();
-    if (snapshots.length === 0) {
-      return;
-    }
-
     const roots = snapshots
       .filter((snapshot) => snapshot.parentTaskId === undefined)
       .sort((left, right) => left.createdAt - right.createdAt);
-    if (roots.length > 0) {
-      this.#conversations.clear();
-      for (const root of roots) {
-        const conversation: ConversationRecord = {
-          id: randomUUID(),
-          title: this.createConversationTitle(root.goal),
-          createdAt: root.createdAt,
-          updatedAt: Math.max(
-            root.updatedAt,
-            ...snapshots
-              .filter((snapshot) => snapshot.rootTaskId === root.id)
-              .map((snapshot) => snapshot.updatedAt),
-          ),
-          rootTaskIds: [root.id],
-        };
-        this.#conversations.set(conversation.id, conversation);
+    this.#conversations.clear();
+    const persistedConversations =
+      this.readPersistedConversationRecords();
+    if (persistedConversations.length > 0) {
+      const rootIds = new Set(roots.map((root) => root.id));
+      for (const persisted of persistedConversations) {
+        const rootTaskIds = persisted.rootTaskIds.filter((rootTaskId) =>
+          rootIds.has(rootTaskId),
+        );
+        this.#conversations.set(persisted.id, {
+          ...persisted,
+          rootTaskIds,
+        });
       }
+    }
+
+    const assignedRootIds = new Set(
+      [...this.#conversations.values()].flatMap(
+        (conversation) => conversation.rootTaskIds,
+      ),
+    );
+    for (const root of roots) {
+      if (assignedRootIds.has(root.id)) {
+        continue;
+      }
+      const treeUpdatedAt = Math.max(
+        root.updatedAt,
+        ...snapshots
+          .filter((snapshot) => snapshot.rootTaskId === root.id)
+          .map((snapshot) => snapshot.updatedAt),
+      );
+      const authorityCeiling = this.rootGrantRequests(root);
+      const conversation: ConversationRecord = {
+        id: randomUUID(),
+        title: this.createConversationTitle(root.goal),
+        createdAt: root.createdAt,
+        updatedAt: treeUpdatedAt,
+        rootTaskIds: [root.id],
+        authorityCeiling,
+      };
+      this.#conversations.set(conversation.id, conversation);
+    }
+    if (this.#conversations.size === 0) {
+      const conversation = this.createConversationRecord();
+      this.#conversations.set(conversation.id, conversation);
+    }
+    this.persistConversationRecords();
+
+    if (snapshots.length === 0) {
+      this.#queuePublish();
+      return;
     }
 
     await this.#scheduler.restoreMany(
@@ -341,6 +520,146 @@ export class RuntimeService {
       this.#ensureSchedulerRunning();
     }
     this.#queuePublish();
+  }
+
+  private async requireWorkspaceDirectory(
+    workspacePath: string,
+  ): Promise<string> {
+    const requestedPath = workspacePath.trim();
+    if (!requestedPath) {
+      throw new Error('Workspace 目录不能为空。');
+    }
+    let canonicalPath: string;
+    try {
+      canonicalPath = await realpath(requestedPath);
+    } catch {
+      throw new Error(`Workspace 目录不存在：${requestedPath}`);
+    }
+    const metadata = await stat(canonicalPath);
+    if (!metadata.isDirectory()) {
+      throw new Error(`Workspace 必须是目录：${canonicalPath}`);
+    }
+    return canonicalPath;
+  }
+
+  /**
+   * 下一轮继承上一轮由宿主签发的 Root Authority Ceiling。
+   *
+   * `human` 来源的 Grant 可能是单次批准，不能跨轮复制；父级来源不可能出现在
+   * Root 上。Conversation 自身保存的 ceiling 同时作为首轮和恢复兜底。
+   */
+  private inheritedRootAuthority(
+    conversation: ConversationRecord,
+    previousRoot: TaskSnapshot | undefined,
+  ): CapabilityRequest[] {
+    return this.mergeCapabilityRequests(
+      conversation.authorityCeiling,
+      ...(previousRoot === undefined
+        ? []
+        : [this.rootGrantRequests(previousRoot)]),
+    );
+  }
+
+  private rootGrantRequests(root: TaskSnapshot): CapabilityRequest[] {
+    if (root.capabilityGrants) {
+      return extractInheritableRootAuthority(root.capabilityGrants);
+    }
+    return (root.capabilities ?? []).map((capability) => ({
+      capability,
+      scope: { kind: 'all' },
+    }));
+  }
+
+  private mergeCapabilityRequests(
+    ...groups: readonly CapabilityRequest[][]
+  ): CapabilityRequest[] {
+    const requests = new Map<string, CapabilityRequest>();
+    for (const request of groups.flat()) {
+      requests.set(
+        capabilityRequestKey(request),
+        structuredClone(request),
+      );
+    }
+    return [...requests.values()];
+  }
+
+  private readPersistedConversationRecords(): ConversationRecord[] {
+    const body = this.#store.readRuntimeMetadata(
+      CONVERSATION_METADATA_KEY,
+    );
+    if (!body) {
+      return [];
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body) as unknown;
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    const conversations: ConversationRecord[] = [];
+    for (const candidate of parsed) {
+      if (
+        !isRecord(candidate) ||
+        typeof candidate['id'] !== 'string' ||
+        typeof candidate['title'] !== 'string' ||
+        typeof candidate['createdAt'] !== 'number' ||
+        typeof candidate['updatedAt'] !== 'number' ||
+        !Array.isArray(candidate['rootTaskIds']) ||
+        !candidate['rootTaskIds'].every(
+          (rootTaskId) => typeof rootTaskId === 'string',
+        )
+      ) {
+        continue;
+      }
+      const workspacePath =
+        typeof candidate['workspacePath'] === 'string'
+          ? candidate['workspacePath']
+          : undefined;
+      const authorityCeiling = parseCapabilityRequests(
+        candidate['authorityCeiling'],
+      );
+      conversations.push({
+        id: candidate['id'],
+        title: candidate['title'],
+        createdAt: candidate['createdAt'],
+        updatedAt: candidate['updatedAt'],
+        rootTaskIds: [...candidate['rootTaskIds']],
+        ...(workspacePath === undefined ? {} : { workspacePath }),
+        authorityCeiling:
+          authorityCeiling.length > 0
+            ? authorityCeiling
+            : workspacePath === undefined
+              ? []
+              : this.initialWorkspaceAuthority(),
+      });
+    }
+    return conversations;
+  }
+
+  private persistConversationRecords(): void {
+    const records = [...this.#conversations.values()].map(
+      (conversation) => ({
+        id: conversation.id,
+        title: conversation.title,
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+        rootTaskIds: [...conversation.rootTaskIds],
+        ...(conversation.workspacePath === undefined
+          ? {}
+          : { workspacePath: conversation.workspacePath }),
+        authorityCeiling: structuredClone(
+          conversation.authorityCeiling,
+        ),
+      }),
+    );
+    this.#store.writeRuntimeMetadata(
+      CONVERSATION_METADATA_KEY,
+      JSON.stringify(records),
+    );
   }
 
   private configureDemoScenario(rootTaskId: string, task: string): void {
@@ -374,10 +693,12 @@ export class RuntimeService {
         children: [
           {
             goal: plannerGoal,
+            character: 'coordinator',
             maxModelAttempts: 3,
           },
           {
             goal: executorGoal,
+            character: 'developer',
             maxModelAttempts: 2,
           },
         ],
@@ -412,6 +733,7 @@ export class RuntimeService {
         children: [
           {
             goal: verifierGoal,
+            character: 'code_auditor',
             maxModelAttempts: 1,
           },
         ],
@@ -482,6 +804,21 @@ export class RuntimeService {
       });
   }
 
+  /**
+   * 把某个根任务解析为它所属 Conversation 的宿主工作区目录。
+   *
+   * 供调度器的 ToolRuntime 解析 `workspace://current/`；无挂载工作区时返回
+   * undefined，涉及文件系统的工具会据此拒绝执行。
+   */
+  #workspaceRootForRootTask(rootTaskId: string): string | undefined {
+    for (const conversation of this.#conversations.values()) {
+      if (conversation.rootTaskIds.includes(rootTaskId)) {
+        return conversation.workspacePath;
+      }
+    }
+    return undefined;
+  }
+
   #touchConversationForLatestTasks(): void {
     const newestByRoot = new Map<string, number>();
     for (const task of this.#store.list()) {
@@ -504,12 +841,15 @@ export class RuntimeService {
   }
 
   #queuePublish(): void {
-    if (this.#publishQueued) {
+    if (this.#closed || this.#publishQueued) {
       return;
     }
     this.#publishQueued = true;
     queueMicrotask(() => {
       this.#publishQueued = false;
+      if (this.#closed) {
+        return;
+      }
       const snapshot = this.getSnapshot();
       for (const listener of this.#listeners) {
         listener(snapshot);
@@ -552,6 +892,9 @@ export class RuntimeService {
       title: conversation.title,
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt,
+      ...(conversation.workspacePath === undefined
+        ? {}
+        : { workspacePath: conversation.workspacePath }),
       status: this.conversationStatus(root),
       agents: conversationTasks.map((task) => this.toAgentView(task)),
       rounds,
@@ -619,6 +962,9 @@ export class RuntimeService {
       rootTaskId: task.rootTaskId,
       depth: task.depth,
       goal: task.goal,
+      ...(task.characterId === undefined
+        ? {}
+        : { characterId: task.characterId }),
       status: task.state.status,
       stateLabel: state.label,
       capabilities: [
@@ -883,4 +1229,57 @@ export class RuntimeService {
     });
   }
 
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isWorkspaceFilesystemRequest(
+  request: CapabilityRequest,
+): boolean {
+  return (
+    WORKSPACE_FILESYSTEM_CAPABILITIES.some(
+      (capability) => capability === request.capability,
+    ) &&
+    request.scope.kind !== 'all' &&
+    request.scope.resource.startsWith(CURRENT_WORKSPACE_RESOURCE)
+  );
+}
+
+function parseCapabilityRequests(value: unknown): CapabilityRequest[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((candidate): CapabilityRequest[] => {
+    if (
+      !isRecord(candidate) ||
+      typeof candidate['capability'] !== 'string' ||
+      !isRecord(candidate['scope'])
+    ) {
+      return [];
+    }
+    const kind = candidate['scope']['kind'];
+    if (kind === 'all') {
+      return [
+        {
+          capability: candidate['capability'],
+          scope: { kind: 'all' },
+        },
+      ];
+    }
+    const resource = candidate['scope']['resource'];
+    if (
+      (kind !== 'exact' && kind !== 'subtree') ||
+      typeof resource !== 'string'
+    ) {
+      return [];
+    }
+    return [
+      {
+        capability: candidate['capability'],
+        scope: { kind, resource },
+      },
+    ];
+  });
 }

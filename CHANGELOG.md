@@ -2,6 +2,66 @@
 
 本项目使用语义化版本号。
 
+## Unreleased
+
+暂无。
+
+## 2.0.0 - 2026-08-27
+
+### Character 角色
+
+- 新增内核级 Character 层：`CharacterDefinition`、`CharacterRegistry`、根
+  `coordinator` 和可创建的 `developer`、`code_auditor`、`researcher`。Character 同时约束工具
+  可见性、能力上限、可申请能力和可创建子角色，角色只能引用已注册定义。
+- 模型请求按 Agent 的 character 过滤可见工具；执行仍由 CapabilityManager 二次
+  校验，工具可见性不再等同于可执行。
+- 当前 Character 指令、可申请能力和父 Agent 可创建的角色目录会进入真实 Provider
+  请求；模型同时获得去除 Grant ID/来源链后的当前可执行 Capability 视图。
+- `spawn_subagents` 的子项新增 `character` 字段。内核校验子角色已注册、在父角色
+  可创建名单内、请求能力落在角色能力上限内，越界时返回结构化 `capability_escalation`
+  拒绝，不会创建子 Agent。
+- `TaskControlBlock`、快照与子任务创建请求携带 `characterId`；省略时保持无角色
+  约束的旧行为。
+
+### 内置工作区 Skills
+
+- 新增首批 bootstrap workspace 工具：`file.read`、`file.write`、`file.create`、`file.delete`、
+  `file.apply_patch`、`directory.list/create/delete` 和 `workspace.search`，
+  可通过 `registerBuiltinTools` 一次注册。
+- 新增 `WorkspaceResolver`：把 `workspace://current/` 别名解析为宿主路径，拒绝
+  `..` 越界，并用 `realpath` 复查符号链接目标仍在挂载目录内。
+- `test.run` 改为 `createTestRunTool(ProcessSandbox)` 工厂；只有宿主注入真正的
+  OS-level 沙箱时才注册，禁止降级为裸 host spawn。
+- `ToolExecutionContext` 新增 `workspaceRoot`；调度器新增 `workspaceRootResolver`
+  选项，把当前任务的挂载目录透传给工具，未挂载时相关工具拒绝执行。
+- 桌面 RuntimeService 注册内置 Skills，并按 Conversation 的 workspace 映射向
+  调度器提供挂载根目录。
+- 新增通用 `McpToolAdapter`，允许复用现成 MCP 工具，同时由本地可信 binding
+  声明 Capability，MCP Server 不参与授权决策。
+- 统一响应 Schema 补齐 `tool_calls`、`async_work`、tool call 参数和 child
+  `character`，真实 Provider 不再只能返回 final/委派类动作。
+
+### 验证
+
+- 新增 Character 注册表、工作区路径防逃逸、内置工具、MCP Adapter、调度器角色
+  约束和 HTTP Provider 工具闭环测试。
+- 真实目标模型 API 冒烟尚未执行；当前验证覆盖 mock HTTP Provider、Fake Provider、
+  类型检查与生产构建。
+- 18 个测试文件、117 个测试通过。
+
+### Conversation Workspace
+
+- 新建 Conversation 时提示用户选择 Workspace 目录，并提供暂时跳过选项；未挂载
+  时 Root 不获得文件系统 Capability，仍可执行不涉及文件 I/O 的任务。
+- 控制平面保存 canonical 宿主路径，Agent 和 Capability 只使用
+  `workspace://current/` 语义挂载点；空闲时可从侧栏入口更换 Workspace。
+- 每轮 Root Agent 自动获得 Workspace 子树内文件与目录的读、写、创建和删除
+  Authority Ceiling，并可向子 Agent 转授更窄的目录范围。
+- 同一 Conversation 的后续 Root 会重新签发上一轮 root 来源的 Authority Ceiling；
+  一次性人工 Grant 不跨轮继承。
+- Conversation、Workspace 映射和多轮 Root 归属写入与任务快照相同的 SQLite
+  事实源，应用重启后不再把每轮 Root 拆成独立 Conversation。
+
 ## 1.3.0 - 2026-08-27
 
 ### Capability 与资源授权

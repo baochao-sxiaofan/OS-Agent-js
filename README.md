@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`1.3.0`
+当前版本：`2.0.0`
 
 ## 核心状态模型
 
@@ -184,9 +184,9 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 
 ## 工具与权限
 
-工具目录和执行权限相互独立。运行时注册的全局工具可以对 Agent 可见；
-Character 专属工具将在 Character 层进一步筛选。工具只声明执行需求，不负责
-决定调用者是否有权执行。
+工具目录和执行权限相互独立。运行时注册的全局工具构成工具目录；每个 Agent 实际
+可见的工具由其 Character 从目录中筛选。工具只声明执行需求，不负责决定调用者是否
+有权执行。
 
 - `requiredCapabilities(input)`：根据调用参数推导能力及具体资源范围；
 - `requiredCapability`：旧工具使用的全局能力简写；
@@ -194,10 +194,46 @@ Character 专属工具将在 Character 层进一步筛选。工具只声明执�
 - 输入校验；
 - 执行函数。
 
+首批内置 workspace 工具包括 `file.read`、`file.write`、`file.create`、`file.delete`、
+`file.apply_patch`、`directory.list/create/delete` 和 `workspace.search`，均作用于
+`workspace://current/` 挂载点并按调用路径推导 `exact`/`subtree` 资源范围。这些
+实现用于 bootstrap 和内核测试；正式接入优先通过 `McpToolAdapter` 复用官方
+`@modelcontextprotocol/server-filesystem`。
+
+`test.run` 由 `createTestRunTool(ProcessSandbox)` 创建，只有宿主注入真正的 OS-level
+进程沙箱后才会注册并加入 Root Ceiling；禁止降级为裸 `child_process.spawn`。
+当前桌面 Runtime 尚未配置 ProcessSandbox，因此不会向模型暴露 `test.run`。
+
+## Character 角色
+
+Character 是内核级角色策略包，而不只是 Prompt。每个角色同时约束四件事：模型可见
+的工具、允许持有的能力上限、允许运行时申请的能力，以及允许创建的子角色。首批内置
+三个可创建角色，根任务使用 `coordinator`：
+
+- `developer`：在分配目录内读写代码，并在沙箱可用时运行测试；
+- `code_auditor`：全工作区只读，发现问题上报父 Agent，不能写文件；
+- `researcher`：联网检索资料并写入指定笔记目录，不改源码。
+
+父 Agent 在 `spawn_subagents` 时可为子 Agent 指定 `character`，但内核强制校验：
+角色必须已注册、必须在父角色的可创建名单内、请求的能力必须落在该角色能力上限内，
+再叠加原有的委派衰减和 workspace 边界。实际授权 = 父可转授范围 ∩ 角色能力上限 ∩
+本次 assignment 资源范围。工具可见性只影响“看得见”，能否执行仍由 CapabilityManager
+在调用前二次校验。
+
 `CapabilityManager` 是授权的唯一裁决入口。授权以 `CapabilityGrant` 持久化，
 包含能力名称、URI 风格资源范围、来源链、可转授标记、期限和可选使用次数。
 父 Agent 创建子 Agent 时只能缩小自己持有且可转授的 Grant，不能创造权限或扩大
 资源范围。
+
+应用会为新 Conversation 提示用户选择 Workspace，也允许暂时跳过。控制平面保存
+经过 `realpath` 规范化的宿主路径，但 Agent 和 Capability 只使用
+`workspace://current/` 语义挂载点。本地 bootstrap ToolRuntime 在每次访问前把别名解析为宿主路径，
+拒绝 `..` 越界，并用 `realpath` 复查符号链接目标仍在挂载目录内。未选择 Workspace
+时，Root 不获得文件系统 Capability，仍可执行不涉及文件 I/O 的任务。选择后，每轮
+Root Agent 自动获得该挂载点子树内的文件与目录读、写、创建和删除权限，并可将更窄的
+子目录范围转授给子 Agent。下一轮 Root 会重新签发上一轮的 Root Authority Ceiling；
+一次性人工 Grant 不会跨轮继承。进程执行、网络、Git 推送和 Workspace 外文件系统
+权限不包含在这组默认文件权限中。
 
 Agent 缺少能力时只提交 `request_capabilities`，不能选择审批人。Manager 首先检查
 Root Authority Ceiling；根任务不覆盖请求能力及资源范围时直接拒绝：
@@ -248,8 +284,13 @@ Tool 调用前和实际执行前都会校验 Grant。缺权、工具不存在或
 - Capability 驱动的工具权限控制
 - 资源范围化 Capability Grant、父级衰减委派和敏感权限人工路由
 - Capability 请求的阻塞、审批、唤醒、快照与审计事件
+- Character 注册表、角色 Prompt、工具可见性、能力上限与子角色约束
+- `developer`、`code_auditor`、`researcher` 和根 `coordinator`
+- bootstrap 工作区文件工具与通用 `McpToolAdapter`
+- mock HTTP Provider 到真实文件写入的完整工具调用闭环
 - 工具阻塞与事件唤醒
 - 任务快照和只追加事件历史
+- Conversation、Workspace 映射和多轮 Root Authority Ceiling 持久化
 - 单进程内存存储实现
 - Electron 桌面控制台与 Windows NSIS 安装包
 - Conversation 多轮对话和按轮次查看 Agent 工程拓扑
@@ -259,12 +300,13 @@ Tool 调用前和实际执行前都会校验 Grant。缺权、工具不存在或
 ```text
 src/
 ├── capability/   # 资源范围、Grant、审批策略和逐级授权
+├── character/    # Character 定义、注册表与内置角色
 ├── context/      # 上下文窗口策略与二次压缩 Adapter
 ├── kernel/       # 状态、任务控制块、上下文和事件
 ├── model/        # Provider 接口与 Fake Provider
 ├── persistence/  # 任务快照和事件存储
 ├── scheduler/    # Agent 池、分层 Ready Queue、准入控制和调度器
-├── tools/        # 工具与 Capability 边界
+├── tools/        # 工具、内置 Skills 与工作区路径解析
 └── types/        # 通用数据类型
 
 desktop/
@@ -336,7 +378,7 @@ npm run desktop:build
 ```
 
 推送到 `main` 后，`.github/workflows/windows-desktop.yml` 会在 Windows Runner 上
-执行检查和测试，并生成 `OS-Agent-Setup-1.3.0-x64.exe`。也可以在 GitHub Actions
+执行检查和测试，并生成 `OS-Agent-Setup-2.0.0-x64.exe`。也可以在 GitHub Actions
 页面手动触发该工作流。
 
 ### 最小 Gemini 网络验证
@@ -410,8 +452,15 @@ npm run benchmark:multi-agent
   `RUNNING` 请求退回 `READY`，并重建 AgentPool、Work Table 结果投递和 timer。
 - 保存过完整 `tool_call` 上下文的运行中本地工具会使用原 `idempotencyKey` 重启；
   没有调用上下文的外部工作仍需对应恢复 Adapter 接管。
-- Conversation 元数据尚未单独持久化；恢复时每个根任务会重建为一个独立
-  Conversation，根任务内部的 Agent 拓扑保持不变。
+- 新建 Conversation 会提示选择 Workspace，也可以暂时不选择；未挂载时仍可继续
+  对话，但 Root 不持有文件系统 Capability。空闲时可从侧栏设置入口更换 Workspace。
+- `workspace://current/` 到宿主目录的映射已由控制平面持久化；bootstrap 文件工具
+  已接入并执行路径与符号链接检查，后续将用官方 filesystem MCP 替换其实现。
+- `test.run` 需要宿主注入 OS-level `ProcessSandbox`；当前桌面 Runtime 未配置该
+  后端，因此不会暴露命令执行工具。
+- `researcher` 的联网能力边界已经定义，但 Web/MCP 搜索工具尚未接入。
+- 真实目标模型 API 的工具调用兼容性尚未冒烟验证；当前只完成 mock HTTP Provider
+  的完整写文件闭环验证。
 - Capability 人工审批已提供内核查询与决议 API，桌面审批界面尚未接入；资源锁仍仅
   预留状态。
 - 轮次摘要和二次压缩已定义 Provider/Adapter 协议，但尚未连接真实模型服务。
@@ -419,11 +468,11 @@ npm run benchmark:multi-agent
 
 ## 后续方向
 
-1. 持久化 Conversation 元数据，保留重启前的多轮对话归属关系。
-2. 增加外部进程和长时工作对应的恢复 Adapter。
-3. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-4. 增加 Provider 级能力探测和更细粒度的模型兼容性矩阵。
-5. 为更多非 OpenAI-compatible 厂商协议增加原生 Adapter。
+1. 接入官方 filesystem MCP 与通用 MCP stdio/Streamable HTTP Client。
+2. 为 `ProcessSandbox` 接入可按 Conversation 隔离的 OS-level 后端。
+3. 接入 Web 搜索和本地预览/UI 检查 Skills。
+4. 增加人工审批和资源锁对应的阻塞/唤醒协议。
+5. 增加 Provider 级能力探测和更细粒度的模型兼容性矩阵。
 6. 增加真实 `ContextCompactor` Adapter。
 7. 通过独立 Adapter 接入成熟的 RAG 方案。
 

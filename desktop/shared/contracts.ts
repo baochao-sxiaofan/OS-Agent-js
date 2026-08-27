@@ -5,6 +5,7 @@ export const IPC_CHANNELS = {
   getModelSettings: 'runtime:get-model-settings',
   getSnapshot: 'runtime:get-snapshot',
   saveModelSettings: 'runtime:save-model-settings',
+  selectWorkspace: 'runtime:select-workspace',
   snapshotChanged: 'runtime:snapshot-changed',
   submitTask: 'runtime:submit-task',
 } as const;
@@ -234,6 +235,7 @@ export type AgentNodeView = {
   parentTaskId?: string;
   depth: number;
   goal: string;
+  characterId?: string;
   status: AgentStatus;
   terminationKind?: AgentTerminationKind;
   stateLabel: string;
@@ -271,6 +273,7 @@ export type ConversationView = {
   title: string;
   createdAt: number;
   updatedAt: number;
+  workspacePath?: string;
   status: ConversationStatus;
   rootTaskId?: string;
   agents: AgentNodeView[];
@@ -298,6 +301,9 @@ export type DesktopApi = {
     input: DiscoverModelsInput,
   ): Promise<DiscoverModelsResult>;
   createConversation(): Promise<RuntimeSnapshotView>;
+  selectWorkspace(
+    conversationId: string,
+  ): Promise<RuntimeSnapshotView | undefined>;
   saveModelSettings(
     input: SaveModelSettingsInput,
   ): Promise<SaveModelSettingsResult>;

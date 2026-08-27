@@ -71,8 +71,24 @@ File Search 等成熟方案。
   父 Agent 直接进入人工审批，人工签发的默认授权应限制为单次内核操作。
 - Capability 请求必须先受 Root Authority Ceiling 约束。普通授权从最近持权祖先开始
   沿父子关系逐级下发，任何中间 Agent 都不能被跳过。
+- 每个新 Conversation 都应提示用户选择 Workspace，但允许暂时不挂载；未挂载时
+  Root 不获得文件系统 Capability。宿主路径只由控制平面保存，Agent 和 Capability
+  使用 `workspace://current/` 语义挂载点。
+- Workspace 只能在 Conversation 没有活动任务时更换，禁止在执行过程中重映射同一
+  语义挂载点。
+- 每轮 Root Agent 从 Conversation Authority Ceiling 重新签发 Workspace 子树内的
+  文件与目录权限；后续轮次只继承 root 来源的 ceiling，不继承一次性人工 Grant。
 - 子 Agent 等待 Capability 属于 Work Table 的非终态进展，必须通过现有
   Completion Mailbox 和批处理 timer 投递，禁止增加独立唤醒通道。
+- Character 是内核级角色策略包，必须同时约束工具可见性、能力上限、可申请能力和
+  可创建子角色；角色只能引用已注册定义，不能凭空创建或提升角色权限。
+- 子 Agent 的 character 必须在父角色的可创建名单内，且请求能力必须落在该角色能力
+  上限内，再叠加委派衰减与 workspace 边界。工具可见性只影响可见性，执行仍由
+  CapabilityManager 二次校验。
+- 工作区文件工具必须通过 ToolRuntime 把 `workspace://current/` 解析为宿主路径，
+  拒绝 `..` 越界，并用 `realpath` 复查符号链接目标仍在挂载目录内。
+- 受控进程执行（如 `test.run`）必须锁定工作区 cwd、使用命令白名单并以参数数组
+  直接执行，禁止经过 shell 或拼接命令；任意 shell 属于敏感能力，不在默认工具集内。
 - Agent 与子 Agent 的上下文遵循最小权限原则：每个任务只能获得其角色所需的
   上下文和工具。
 - 父 Agent 只能转授自己持有、允许转授且资源范围不扩大的 Capability。
@@ -142,7 +158,7 @@ File Search 等成熟方案。
 
 ## 当前状态
 
-当前 `1.3.0` 内核已经实现：
+当前 `2.0.0` 内核已经实现：
 
 1. 任务状态、事件和合法状态转换规则。
 2. 可序列化的 `TaskControlBlock` 快照和只追加事件历史。
@@ -187,13 +203,27 @@ File Search 等成熟方案。
 37. 普通 Capability 从最近持权祖先开始沿父子关系逐级授权，中间 Agent 不可跳过。
 38. Tool 可见性与执行授权分离，并支持按调用参数推导资源范围。
 39. Gemini、Anthropic 和 OpenAI-compatible Provider 共用统一结构化响应协议。
+40. Conversation 绑定并持久化 canonical Workspace；Agent 使用
+    `workspace://current/` 语义挂载点。
+41. 每轮 Root 自动获得 Workspace 子树文件系统 ceiling，后续轮次重新签发上一轮
+    root ceiling，单次人工 Grant 不跨轮继承。
+42. Conversation 元数据与任务快照保存在同一 SQLite 事实源，重启后保留多轮归属。
+43. Character 内核层：定义、注册表、内置 `developer`/`code_auditor`/`researcher`
+    三角色，以及基于角色的工具可见性、能力上限和可创建子角色校验。
+44. 首批 bootstrap 工作区工具：文件读/写/删除、结构化 apply patch、目录
+    列举/创建/删除和子串搜索，全部经 ToolRuntime 做 `workspace://current/`
+    解析与符号链接越界防护。
+45. `test.run` 采用 `ProcessSandbox` 注入契约；未配置 OS-level 沙箱时不注册，
+    禁止退化为裸 `child_process.spawn`。
+46. 通用 `McpToolAdapter` 保留第三方 MCP 的 schema 与执行能力，同时由本地可信
+    binding 声明 Capability，外部 MCP 不能自行决定授权。
 
 后续优先级：
 
-1. 接入桌面人工审批队列、单次决议和 Settings 持久策略。
-2. 定义 Character Agent Type 及其基础权限、工具可见性和上下文策略。
-3. 接入 MCP/Skill Adapter，并由 CapabilityManager 统一约束外部资源访问。
-4. 持久化 Conversation 元数据，保留重启前的多轮对话归属关系。
+1. 用官方 filesystem MCP 替换 bootstrap 文件工具，并接入 MCP stdio/HTTP Client。
+2. 为 `ProcessSandbox` 接入可按 Conversation 隔离的 OS-level 后端。
+3. 接入本地预览/UI 检查 Skills 与 `product_manager` 类角色。
+4. 接入桌面人工审批队列、单次决议和 Settings 持久策略。
 5. 增加外部进程和长时工作对应的恢复 Adapter。
 6. 增加资源锁对应的阻塞/唤醒协议。
 7. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。

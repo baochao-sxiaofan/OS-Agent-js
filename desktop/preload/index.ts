@@ -15,6 +15,11 @@ const api: DesktopApi = {
     await ipcRenderer.invoke(IPC_CHANNELS.discoverModels, input),
   createConversation: async () =>
     await ipcRenderer.invoke(IPC_CHANNELS.createConversation),
+  selectWorkspace: async (conversationId) =>
+    await ipcRenderer.invoke(
+      IPC_CHANNELS.selectWorkspace,
+      conversationId,
+    ),
   saveModelSettings: async (input) =>
     await ipcRenderer.invoke(IPC_CHANNELS.saveModelSettings, input),
   submitTask: async (input) =>

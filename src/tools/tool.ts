@@ -7,6 +7,13 @@ export type ToolExecutionContext = {
   taskId: string;
   signal: AbortSignal;
   idempotencyKey: string;
+  /**
+   * 当前任务挂载的宿主工作区根目录（已消解符号链接）。
+   *
+   * 需要访问文件系统或工作区内命令的工具依赖它把 `workspace://current/` 别名
+   * 解析为真实路径；未挂载工作区时为 undefined，相关工具应拒绝执行。
+   */
+  workspaceRoot?: string;
 };
 
 export type ToolInputValidation =
@@ -21,6 +28,8 @@ export type ToolInputValidation =
 export interface Tool {
   readonly name: string;
   readonly description: string;
+  /** Provider-facing JSON Schema for this tool's input. */
+  readonly inputSchema?: JsonObject;
   /** Compatibility shorthand for a capability applying to all resources. */
   readonly requiredCapability?: string;
   readonly effect: ToolEffect;

@@ -31,6 +31,14 @@ export class ObservableTaskStore implements TaskStore {
     return this.#inner.listSnapshots();
   }
 
+  readRuntimeMetadata(key: string): string | undefined {
+    return this.#inner.readRuntimeMetadata(key);
+  }
+
+  writeRuntimeMetadata(key: string, body: string): void {
+    this.#inner.writeRuntimeMetadata(key, body);
+  }
+
   async persist(task: TaskControlBlock): Promise<void> {
     await this.#inner.persist(task);
     this.#onChanged?.();

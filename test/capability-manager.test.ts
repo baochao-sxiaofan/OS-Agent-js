@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   CapabilityManager,
+  createWorkspaceCapabilityRequests,
+  CURRENT_WORKSPACE_RESOURCE,
+  extractInheritableRootAuthority,
   TaskControlBlock,
+  WORKSPACE_FILESYSTEM_CAPABILITIES,
 } from '../src/index.js';
 
 function createManager() {
@@ -15,6 +19,87 @@ function createManager() {
 }
 
 describe('CapabilityManager', () => {
+  it('creates a workspace-scoped root ceiling and only inherits root grants', () => {
+    const manager = createManager();
+    const workspaceRequests = createWorkspaceCapabilityRequests();
+    const rootGrants = manager.issueRootGrants(
+      'root-round-1',
+      workspaceRequests,
+      10,
+    );
+    const humanGrant = manager.grantByHuman(
+      'root-round-1',
+      'approval-1',
+      [
+        {
+          capability: 'git.push',
+          scope: {
+            kind: 'exact',
+            resource: 'git://repo/origin/main',
+          },
+        },
+      ],
+      20,
+    );
+
+    expect(workspaceRequests.map((request) => request.capability)).toEqual(
+      WORKSPACE_FILESYSTEM_CAPABILITIES,
+    );
+    expect(
+      workspaceRequests.every(
+        (request) =>
+          request.scope.kind === 'subtree' &&
+          request.scope.resource === CURRENT_WORKSPACE_RESOURCE,
+      ),
+    ).toBe(true);
+    expect(
+      manager.check(
+        rootGrants,
+        [
+          {
+            capability: 'file.write',
+            scope: {
+              kind: 'exact',
+              resource: 'workspace://current/src/game.ts',
+            },
+          },
+        ],
+        30,
+      ),
+    ).toMatchObject({ allowed: true });
+    expect(
+      manager.check(
+        rootGrants,
+        [
+          {
+            capability: 'file.write',
+            scope: {
+              kind: 'exact',
+              resource: 'workspace://other/src/game.ts',
+            },
+          },
+        ],
+        30,
+      ),
+    ).toMatchObject({ allowed: false });
+
+    expect(
+      extractInheritableRootAuthority(
+        [...rootGrants, ...humanGrant],
+        30,
+      ),
+    ).toEqual(workspaceRequests);
+    expect(
+      createWorkspaceCapabilityRequests({ includeTestRun: true }),
+    ).toContainEqual({
+      capability: 'test.run',
+      scope: {
+        kind: 'subtree',
+        resource: CURRENT_WORKSPACE_RESOURCE,
+      },
+    });
+  });
+
   it('allows a parent to delegate only a narrower resource scope', () => {
     const manager = createManager();
     const parentGrants = manager.issueRootGrants(

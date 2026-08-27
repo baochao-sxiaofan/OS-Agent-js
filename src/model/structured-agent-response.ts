@@ -12,6 +12,7 @@ import type {
   ModelResponse,
   ModelUsage,
   SubagentSpawnRequest,
+  ToolCallRequest,
 } from './model-provider.js';
 
 export const AGENT_RESPONSE_JSON_SCHEMA = {
@@ -21,11 +22,13 @@ export const AGENT_RESPONSE_JSON_SCHEMA = {
     action: {
       type: 'string',
       enum: [
+        'async_work',
         'final',
         'needs_parent_action',
         'request_capabilities',
         'resolve_capability_request',
         'spawn_subagents',
+        'tool_calls',
         'wait_for_async_work',
       ],
     },
@@ -37,10 +40,7 @@ export const AGENT_RESPONSE_JSON_SCHEMA = {
         additionalProperties: false,
         properties: {
           goal: { type: 'string' },
-          capabilities: {
-            type: 'array',
-            items: { type: 'string' },
-          },
+          character: { type: 'string' },
           requestedCapabilities: {
             type: 'array',
             items: {
@@ -75,6 +75,22 @@ export const AGENT_RESPONSE_JSON_SCHEMA = {
           },
         },
         required: ['goal'],
+      },
+    },
+    calls: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          callId: { type: 'string' },
+          toolName: { type: 'string' },
+          input: {
+            type: 'object',
+            additionalProperties: true,
+          },
+        },
+        required: ['callId', 'toolName', 'input'],
       },
     },
     requiredWork: { type: 'string' },
@@ -125,9 +141,14 @@ export const AGENT_RESPONSE_JSON_SCHEMA = {
 export const STRUCTURED_AGENT_INSTRUCTION = [
   'You are the model worker for OS-Agent-js.',
   'Return only one JSON object and no markdown.',
-  'Select exactly one action: final, needs_parent_action, request_capabilities, resolve_capability_request, spawn_subagents, or wait_for_async_work.',
+  'Select exactly one action: async_work, final, needs_parent_action, request_capabilities, resolve_capability_request, spawn_subagents, tool_calls, or wait_for_async_work.',
   'Use final when the task is complete.',
   'Use spawn_subagents only when delegation.canSpawnSubagents is true and the goal benefits from independent parallel work.',
+  'Use tool_calls to invoke one or more visible tools. Use async_work to start tools and subagents in the same turn.',
+  'For tool_calls include calls as {callId, toolName, input}; use only tools listed in the request and follow each inputSchema.',
+  'The request capabilities list is authoritative for what you currently hold; request missing capabilities instead of assuming access.',
+  'For async_work include at least one child or call.',
+  'When spawning, choose character only from delegation.availableCharacters and request the narrowest required capability scopes.',
   'Use wait_for_async_work only when an async_work_update has unfinished pending work.',
   'When async_work_update.allFinished is true, synthesize its results and normally return final.',
   'Use needs_parent_action only when a child cannot proceed without parent work.',
@@ -135,7 +156,27 @@ export const STRUCTURED_AGENT_INSTRUCTION = [
   'Use resolve_capability_request only when async_work_update.pending contains a waiting_for_capability blocker. Approve or deny its requestRef; the OS remains the final authority.',
   'Always include turnSummary with concise request and outcome strings.',
   'For final include output. For spawn_subagents include a non-empty children array.',
+  'Each child may set a character id to adopt a role; the OS rejects roles you cannot create.',
 ].join(' ');
+
+/** Builds the complete system instruction for one concrete Agent. */
+export function buildStructuredAgentSystemInstruction(
+  request: ModelRequest,
+): string {
+  return [
+    STRUCTURED_AGENT_INSTRUCTION,
+    request.summaryProtocol.instruction,
+    request.character === undefined
+      ? undefined
+      : [
+          `Your character is ${request.character.id} (${request.character.displayName}).`,
+          request.character.instructions,
+          `You may request only these capabilities: ${request.character.requestableCapabilities.join(', ') || 'none'}.`,
+        ].join(' '),
+  ]
+    .filter((part): part is string => part !== undefined)
+    .join(' ');
+}
 
 /**
  * 把内核上下文投影为模型可见上下文。
@@ -192,6 +233,40 @@ export function parseStructuredAgentResponse(
   const turnSummary = parseTurnSummary(envelope['turnSummary']);
 
   switch (action) {
+    case 'tool_calls':
+      return {
+        type: 'tool_calls',
+        calls: parseToolCalls(envelope['calls']),
+        turnSummary,
+        usage,
+      };
+    case 'async_work': {
+      const children =
+        envelope['children'] === undefined
+          ? []
+          : parseChildren(envelope['children']);
+      const calls =
+        envelope['calls'] === undefined
+          ? []
+          : parseToolCalls(envelope['calls']);
+      if (children.length === 0 && calls.length === 0) {
+        throw new Error(
+          'structured output.async_work must include children or calls.',
+        );
+      }
+      if (children.length > 0 && !request.delegation.canSpawnSubagents) {
+        throw new Error(
+          'Model requested subagents when delegation is disabled.',
+        );
+      }
+      return {
+        type: 'async_work',
+        children,
+        calls,
+        turnSummary,
+        usage,
+      };
+    }
     case 'final':
       return {
         type: 'final',
@@ -283,6 +358,25 @@ export function parseStructuredAgentResponse(
   }
 }
 
+function parseToolCalls(
+  value: JsonValue | undefined,
+): ToolCallRequest[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(
+      'structured output.calls must be a non-empty array.',
+    );
+  }
+  return value.map((call, index) => {
+    const path = `structured output.calls[${index}]`;
+    const object = requireObject(call, path);
+    return {
+      callId: requireString(object['callId'], `${path}.callId`),
+      toolName: requireString(object['toolName'], `${path}.toolName`),
+      input: requireObject(object['input'], `${path}.input`),
+    };
+  });
+}
+
 function parseTurnSummary(value: JsonValue | undefined): TurnSummary {
   const summary = requireObject(value, 'structured output.turnSummary');
   return {
@@ -308,6 +402,10 @@ function parseChildren(
   return value.map((child, index) => {
     const path = `structured output.children[${index}]`;
     const object = requireObject(child, path);
+    const character = optionalString(
+      object['character'],
+      `${path}.character`,
+    );
     const capabilities = optionalStringArray(
       object['capabilities'],
       `${path}.capabilities`,
@@ -329,6 +427,7 @@ function parseChildren(
     );
     return {
       goal: requireString(object['goal'], `${path}.goal`),
+      ...(character === undefined ? {} : { character }),
       ...(capabilities === undefined ? {} : { capabilities }),
       ...(requestedCapabilities === undefined
         ? {}

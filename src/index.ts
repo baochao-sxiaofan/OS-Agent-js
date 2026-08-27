@@ -26,6 +26,59 @@ export {
   type CapabilityAncestor,
   type CapabilityManagerOptions,
 } from './capability/capability-manager.js';
+export {
+  createWorkspaceCapabilityRequests,
+  CURRENT_WORKSPACE_RESOURCE,
+  extractInheritableRootAuthority,
+  type WorkspaceCapabilityOptions,
+  WORKSPACE_FILESYSTEM_CAPABILITIES,
+} from './capability/workspace-capabilities.js';
+export {
+  ANY_CAPABILITY,
+  characterAllowsCapability,
+  findCapabilityOutsideCeiling,
+  type CharacterDefinition,
+} from './character/character.js';
+export {
+  CharacterRegistry,
+  UnknownCharacterError,
+} from './character/character-registry.js';
+export {
+  BUILTIN_CHARACTERS,
+  BUILTIN_TOOL_IDS,
+  CODE_AUDITOR_CHARACTER,
+  COORDINATOR_CHARACTER,
+  DEVELOPER_CHARACTER,
+  RESEARCHER_CHARACTER,
+} from './character/builtin-characters.js';
+export {
+  assertHostPathInsideRoot,
+  joinWorkspaceAlias,
+  WorkspaceEscapeError,
+  WorkspaceResolver,
+} from './tools/workspace-fs.js';
+export {
+  createMcpToolAdapter,
+  type McpClientPort,
+  type McpToolBinding,
+} from './tools/mcp-tool-adapter.js';
+export {
+  BUILTIN_TOOLS,
+  directoryCreateTool,
+  directoryDeleteTool,
+  directoryListTool,
+  fileApplyPatchTool,
+  fileCreateTool,
+  fileDeleteTool,
+  fileReadTool,
+  fileWriteTool,
+  createTestRunTool,
+  registerBuiltinTools,
+  type ProcessSandbox,
+  type RegisterBuiltinToolsOptions,
+  type SandboxedProcessRequest,
+  workspaceSearchTool,
+} from './tools/builtin/index.js';
 export type {
   AsyncWorkCapabilityBlocker,
   AsyncWorkPending,
@@ -44,6 +97,7 @@ export type {
   ContextItem,
   ContextSummaryKind,
   ContextSummaryRecord,
+  SubagentSpawnRejectedContextItem,
   ToolCallRejectedContextItem,
   TurnSummary,
 } from './kernel/context.js';
@@ -99,6 +153,11 @@ export {
   OpenAiCompatibleProviderError,
   type OpenAiCompatibleModelProviderOptions,
 } from './model/openai-compatible-model-provider.js';
+export {
+  MiniMaxModelProvider,
+  MiniMaxProviderError,
+  type MiniMaxModelProviderOptions,
+} from './model/minimax-model-provider.js';
 export {
   GeminiModelProvider,
   GeminiProviderError,

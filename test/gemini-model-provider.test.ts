@@ -107,6 +107,15 @@ describe('GeminiModelProvider', () => {
         maxOutputTokens?: number;
         responseMimeType?: string;
         responseJsonSchema?: {
+          properties?: {
+            action?: { enum?: string[] };
+            calls?: unknown;
+            children?: {
+              items?: {
+                properties?: Record<string, unknown>;
+              };
+            };
+          };
           required?: string[];
         };
       };
@@ -119,6 +128,17 @@ describe('GeminiModelProvider', () => {
       'action',
       'turnSummary',
     ]);
+    expect(
+      body.generationConfig?.responseJsonSchema?.properties?.action
+        ?.enum,
+    ).toEqual(expect.arrayContaining(['tool_calls', 'async_work']));
+    expect(
+      body.generationConfig?.responseJsonSchema?.properties,
+    ).toHaveProperty('calls');
+    expect(
+      body.generationConfig?.responseJsonSchema?.properties?.children
+        ?.items?.properties,
+    ).toHaveProperty('character');
   });
 
   it('estimates input tokens and configured cost before admission', () => {

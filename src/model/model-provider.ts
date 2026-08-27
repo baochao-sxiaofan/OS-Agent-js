@@ -52,6 +52,8 @@ export const TURN_SUMMARY_PROTOCOL: TurnSummaryProtocol = {
 export type ToolDescriptor = {
   name: string;
   description: string;
+  /** JSON Schema describing the tool input. */
+  inputSchema?: JsonObject;
 };
 
 export type ToolCallRequest = {
@@ -68,6 +70,8 @@ export type ModelUsage = {
 
 export type SubagentSpawnRequest = {
   goal: string;
+  /** 子 Agent 扮演的 Character 标识；由内核校验是否允许创建。 */
+  character?: string;
   /** Compatibility shorthand for capabilities applying to all resources. */
   capabilities?: CapabilityInput[];
   requestedCapabilities?: CapabilityRequest[];
@@ -134,10 +138,24 @@ export type ModelRequest = {
   goal: string;
   context: readonly ContextItem[];
   tools: readonly ToolDescriptor[];
+  /** Current executable capabilities, projected without internal Grant IDs. */
+  capabilities?: readonly CapabilityRequest[];
+  character?: {
+    id: string;
+    displayName: string;
+    instructions: string;
+    requestableCapabilities: readonly string[];
+  };
   attempt: number;
   summaryProtocol: TurnSummaryProtocol;
   delegation: {
     canSpawnSubagents: boolean;
+    availableCharacters?: readonly {
+      id: string;
+      displayName: string;
+      description: string;
+      capabilityCeiling: readonly string[];
+    }[];
   };
 };
 

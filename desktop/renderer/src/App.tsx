@@ -25,6 +25,7 @@ import { ConversationSidebar } from './components/ConversationSidebar.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
 import { TaskComposer } from './components/TaskComposer.js';
 import { TopologyCanvas } from './components/TopologyCanvas.js';
+import { WorkspaceDialog } from './components/WorkspaceDialog.js';
 import {
   ViewModeSwitch,
   type ViewMode,
@@ -43,7 +44,9 @@ export function App() {
   const [roundDraftConversationId, setRoundDraftConversationId] =
     useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [error, setError] = useState<string>();
+  const promptedWorkspaceConversations = useRef(new Set<string>());
   const previousConversationStatuses = useRef(
     new Map<string, ConversationStatus>(),
   );
@@ -121,6 +124,20 @@ export function App() {
   }, [selectedConversation]);
 
   useEffect(() => {
+    if (
+      !selectedConversation ||
+      selectedConversation.workspacePath ||
+      promptedWorkspaceConversations.current.has(
+        selectedConversation.id,
+      )
+    ) {
+      return;
+    }
+    promptedWorkspaceConversations.current.add(selectedConversation.id);
+    setWorkspaceOpen(true);
+  }, [selectedConversation]);
+
+  useEffect(() => {
     if (!snapshot || !selectedConversation) {
       return;
     }
@@ -159,6 +176,26 @@ export function App() {
       setViewMode('topology');
     } catch (cause) {
       setError(errorMessage(cause));
+    }
+  };
+
+  const selectWorkspace = async (): Promise<boolean> => {
+    if (!selectedConversation) {
+      return false;
+    }
+    try {
+      setError(undefined);
+      const nextSnapshot = await window.osAgent.selectWorkspace(
+        selectedConversation.id,
+      );
+      if (!nextSnapshot) {
+        return false;
+      }
+      setSnapshot(nextSnapshot);
+      return true;
+    } catch (cause) {
+      setError(errorMessage(cause));
+      return false;
     }
   };
 
@@ -210,6 +247,7 @@ export function App() {
         selectedConversationId={selectedConversationId}
         onCreateConversation={() => void createConversation()}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenWorkspace={() => setWorkspaceOpen(true)}
         onSelectConversation={(conversationId) => {
           const nextConversation = snapshot.conversations.find(
             (conversation) => conversation.id === conversationId,
@@ -232,6 +270,11 @@ export function App() {
         <header className="runtime-bar">
           <div className="runtime-title">
             <span>{selectedConversation.title}</span>
+            {selectedConversation.workspacePath && (
+              <small title={selectedConversation.workspacePath}>
+                {workspaceName(selectedConversation.workspacePath)}
+              </small>
+            )}
             <small>
               {snapshot.isDemoMode
                 ? 'LOCAL SIMULATION'
@@ -360,6 +403,15 @@ export function App() {
         onClose={() => setSettingsOpen(false)}
         onSaved={(result) => setSnapshot(result.snapshot)}
       />
+      <WorkspaceDialog
+        open={workspaceOpen}
+        {...(selectedConversation.workspacePath === undefined
+          ? {}
+          : { workspacePath: selectedConversation.workspacePath })}
+        workspaceChangeBlocked={selectedConversation.status === 'active'}
+        onClose={() => setWorkspaceOpen(false)}
+        onSelect={selectWorkspace}
+      />
     </main>
   );
 }
@@ -384,4 +436,8 @@ function RuntimeMetric({
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function workspaceName(workspacePath: string): string {
+  return workspacePath.split(/[\\/]/u).filter(Boolean).at(-1) ?? workspacePath;
 }

@@ -97,6 +97,22 @@ describe('SqliteTaskStore', () => {
     store.close();
   });
 
+  it('stores runtime metadata beside task snapshots', () => {
+    const store = new SqliteTaskStore({ location: ':memory:' });
+
+    expect(store.readRuntimeMetadata('conversations')).toBeUndefined();
+    store.writeRuntimeMetadata('conversations', '{"version":1}');
+    expect(store.readRuntimeMetadata('conversations')).toBe(
+      '{"version":1}',
+    );
+    store.writeRuntimeMetadata('conversations', '{"version":2}');
+    expect(store.readRuntimeMetadata('conversations')).toBe(
+      '{"version":2}',
+    );
+
+    store.close();
+  });
+
   it('persists capability grants and pending approval requests', async () => {
     const store = new SqliteTaskStore({ location: ':memory:' });
     const task = TaskControlBlock.createAgent(

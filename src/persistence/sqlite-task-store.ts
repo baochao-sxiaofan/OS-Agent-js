@@ -58,6 +58,12 @@ export class SqliteTaskStore implements TaskStore {
         PRIMARY KEY (task_id, sequence)
       )
     `);
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS runtime_metadata (
+        key TEXT PRIMARY KEY,
+        body TEXT NOT NULL
+      )
+    `);
     // 按任务树查询（恢复整棵树）时使用。
     this.#db.exec(
       'CREATE INDEX IF NOT EXISTS idx_snapshots_root ON snapshots (root_task_id)',
@@ -140,6 +146,30 @@ export class SqliteTaskStore implements TaskStore {
       .prepare('SELECT body FROM snapshots')
       .all() as { body: string }[];
     return rows.map((row) => JSON.parse(row.body) as TaskSnapshot);
+  }
+
+  /**
+   * 读取与任务快照共用同一 SQLite 事实源的宿主运行时元数据。
+   *
+   * Core 不解释正文格式；桌面控制平面用它持久化 Conversation 与 workspace
+   * 映射，避免任务快照和独立配置文件发生双写漂移。
+   */
+  readRuntimeMetadata(key: string): string | undefined {
+    const row = this.#db
+      .prepare('SELECT body FROM runtime_metadata WHERE key = ?')
+      .get(key) as { body: string } | undefined;
+    return row?.body;
+  }
+
+  /** 原子覆盖一项宿主运行时元数据。 */
+  writeRuntimeMetadata(key: string, body: string): void {
+    this.#db
+      .prepare(`
+        INSERT INTO runtime_metadata (key, body)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET body = excluded.body
+      `)
+      .run(key, body);
   }
 
   /**

@@ -82,6 +82,12 @@ export function AgentInspector({
         <section className="inspector-section">
           <h3>身份</h3>
           <dl className="identity-list">
+            {agent.characterId && (
+              <div>
+                <dt>Character</dt>
+                <dd>{agent.characterId}</dd>
+              </div>
+            )}
             <div>
               <dt>
                 <Hash size={13} />

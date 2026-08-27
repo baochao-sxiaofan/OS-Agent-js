@@ -7,7 +7,7 @@ import type {
 } from './model-provider.js';
 import {
   AGENT_RESPONSE_JSON_SCHEMA,
-  STRUCTURED_AGENT_INSTRUCTION,
+  buildStructuredAgentSystemInstruction,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from './structured-agent-response.js';
@@ -156,8 +156,7 @@ export class GeminiModelProvider implements ModelProvider {
         parts: [
           {
             text: [
-              STRUCTURED_AGENT_INSTRUCTION,
-              request.summaryProtocol.instruction,
+              buildStructuredAgentSystemInstruction(request),
               'The response must follow the supplied JSON schema.',
             ].join(' '),
           },
@@ -185,6 +184,10 @@ export class GeminiModelProvider implements ModelProvider {
   private buildPrompt(request: ModelRequest): string {
     const prompt = {
       goal: request.goal,
+      ...(request.character === undefined
+        ? {}
+        : { character: request.character }),
+      capabilities: request.capabilities ?? [],
       attempt: request.attempt,
       context: request.context.map(serializeContextItemForModel),
       tools: request.tools,

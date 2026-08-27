@@ -67,7 +67,10 @@ export function AgentNodeCard({
       <div className="agent-node__header">
         <span className="agent-node__identity">
           <Bot size={15} />
-          {isRoot ? 'ROOT AGENT' : `AGENT · D${agent.depth}`}
+          {isRoot ? 'ROOT' : `D${agent.depth}`}
+          {agent.characterId
+            ? ` · ${agent.characterId.toUpperCase()}`
+            : ' · AGENT'}
         </span>
         <NodeStateIcon status={agent.status} />
       </div>

@@ -62,6 +62,13 @@ export type CreateAgentRequest = {
   /** Agent 需要完成的任务目标。 */
   goal: string;
   /**
+   * 该任务扮演的 Character 标识。
+   *
+   * 省略时任务不受角色约束（兼容宿主直接创建的根任务与旧测试）。声明后，
+   * 工具可见性、能力上限和可创建子角色都由内核按该角色强制约束。
+   */
+  characterId?: string;
+  /**
    * 宿主授予根任务或父 Agent 请求转授给子任务的能力。
    *
    * 字符串是兼容旧调用方的全局范围简写；资源敏感的新调用应使用结构化输入。
@@ -117,6 +124,8 @@ export type TaskSnapshot = {
   depth: number;
   /** 当前任务需要完成的目标。 */
   goal: string;
+  /** 当前任务扮演的 Character 标识；无角色约束时省略。 */
+  characterId?: string;
   /** CapabilityManager 已签发给当前任务的授权事实。 */
   capabilityGrants?: CapabilityGrant[];
   /** 兼容 1.2.1 及更早快照的旧能力字符串。 */
@@ -165,6 +174,8 @@ export class TaskControlBlock {
   readonly depth: number;
   /** 当前 Agent 的任务目标。 */
   readonly goal: string;
+  /** 当前 Agent 扮演的 Character 标识；无角色约束时为 undefined。 */
+  readonly characterId: string | undefined;
   /** 任务创建时的 Unix 毫秒时间戳。 */
   readonly createdAt: number;
 
@@ -220,6 +231,7 @@ export class TaskControlBlock {
     this.parentTaskId = snapshot.parentTaskId;
     this.depth = snapshot.depth;
     this.goal = snapshot.goal;
+    this.characterId = snapshot.characterId;
     this.createdAt = snapshot.createdAt;
     this.#capabilityGrants = structuredClone(
       snapshot.capabilityGrants ??
@@ -319,6 +331,9 @@ export class TaskControlBlock {
       ...(parent === undefined ? {} : { parentTaskId: parent.id }),
       depth,
       goal: request.goal,
+      ...(request.characterId === undefined
+        ? {}
+        : { characterId: request.characterId }),
       capabilityGrants: [...structuredClone(grants)],
       capabilityRequests: [],
       context: [...(request.context ?? [])],
@@ -1179,6 +1194,9 @@ export class TaskControlBlock {
         : { parentTaskId: this.parentTaskId }),
       depth: this.depth,
       goal: this.goal,
+      ...(this.characterId === undefined
+        ? {}
+        : { characterId: this.characterId }),
       capabilityGrants: structuredClone(this.#capabilityGrants),
       capabilityRequests: structuredClone(this.#capabilityRequests),
       context: structuredClone(this.#context),

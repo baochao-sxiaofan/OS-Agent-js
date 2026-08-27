@@ -5,6 +5,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Settings,
   TriangleAlert,
   Wrench,
 } from 'lucide-react';
@@ -20,6 +21,7 @@ type ConversationSidebarProps = {
   selectedConversationId: string | undefined;
   onCreateConversation: () => void;
   onOpenSettings: () => void;
+  onOpenWorkspace: () => void;
   onSelectConversation: (conversationId: string) => void;
   onToggle: () => void;
 };
@@ -30,6 +32,7 @@ export function ConversationSidebar({
   selectedConversationId,
   onCreateConversation,
   onOpenSettings,
+  onOpenWorkspace,
   onSelectConversation,
   onToggle,
 }: ConversationSidebarProps) {
@@ -116,6 +119,17 @@ export function ConversationSidebar({
         >
           <Wrench size={16} />
           {!collapsed && <span>模型与 API</span>}
+        </button>
+        <button
+          className={`settings-button ${
+            collapsed ? 'settings-button--collapsed' : ''
+          }`}
+          type="button"
+          title="Workspace 设置"
+          onClick={onOpenWorkspace}
+        >
+          <Settings size={16} />
+          {!collapsed && <span>Workspace</span>}
         </button>
       </div>
     </aside>

@@ -44,7 +44,7 @@ export class ToolRegistry {
   /**
    * 返回当前运行时注册的全局工具。
    *
-   * 工具可见性不再由 capability 决定；后续 Character 层会在全局目录上叠加
+   * 工具可见性不由 capability 决定；CharacterRegistry 在全局目录上筛选
    * 角色工具集合。CapabilityManager 只负责某一次具体调用能否执行。
    */
   descriptors(): ToolDescriptor[] {
@@ -52,6 +52,9 @@ export class ToolRegistry {
       .map((tool) => ({
         name: tool.name,
         description: tool.description,
+        ...(tool.inputSchema === undefined
+          ? {}
+          : { inputSchema: structuredClone(tool.inputSchema) }),
       }));
   }
 

@@ -7,7 +7,7 @@ import type {
   ModelUsage,
 } from './model-provider.js';
 import {
-  STRUCTURED_AGENT_INSTRUCTION,
+  buildStructuredAgentSystemInstruction,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from './structured-agent-response.js';
@@ -120,15 +120,16 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
       messages: [
         {
           role: 'system',
-          content: [
-            STRUCTURED_AGENT_INSTRUCTION,
-            request.summaryProtocol.instruction,
-          ].join(' '),
+          content: buildStructuredAgentSystemInstruction(request),
         },
         {
           role: 'user',
           content: JSON.stringify({
             goal: request.goal,
+            ...(request.character === undefined
+              ? {}
+              : { character: request.character }),
+            capabilities: request.capabilities ?? [],
             attempt: request.attempt,
             context: request.context.map(serializeContextItemForModel),
             tools: request.tools,

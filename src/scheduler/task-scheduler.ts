@@ -11,6 +11,7 @@ import {
   CapabilityManager,
   type CapabilityAncestor,
 } from '../capability/capability-manager.js';
+import { CharacterRegistry } from '../character/character-registry.js';
 import type {
   ContextItem,
   ToolCallContextItem,
@@ -91,6 +92,15 @@ export type TaskSchedulerOptions = {
   readyQueue?: ReadyQueue;
   asyncWorkPolicy?: AsyncWorkPolicy;
   capabilityManager?: CapabilityManager;
+  /** Character 注册表；省略时装载首批内置角色。 */
+  characterRegistry?: CharacterRegistry;
+  /**
+   * 把任务解析为宿主工作区根目录。
+   *
+   * 返回 undefined 表示该任务没有挂载工作区，涉及文件系统的工具将拒绝执行。
+   * 内核只把它透传给 ToolRuntime，不缓存真实路径。
+   */
+  workspaceRootResolver?: (task: TaskControlBlock) => string | undefined;
   // 与准入控制共享的时钟，便于测试注入。
   clock?: Clock;
   // 自动唤醒时使用的等待实现，默认基于 setTimeout。
@@ -197,6 +207,10 @@ export class TaskScheduler {
   readonly #store: TaskStore;
   readonly #agentPool: AgentPool;
   readonly #capabilityManager: CapabilityManager;
+  readonly #characterRegistry: CharacterRegistry;
+  readonly #workspaceRootResolver:
+    | ((task: TaskControlBlock) => string | undefined)
+    | undefined;
   readonly #readyQueue: ReadyQueue;
   readonly #asyncWorkPolicy: AsyncWorkPolicy;
   readonly #contextCompactor: ContextCompactor | undefined;
@@ -231,6 +245,9 @@ export class TaskScheduler {
     this.#store = options.store;
     this.#capabilityManager =
       options.capabilityManager ?? new CapabilityManager();
+    this.#characterRegistry =
+      options.characterRegistry ?? new CharacterRegistry();
+    this.#workspaceRootResolver = options.workspaceRootResolver;
     this.#asyncWorkPolicy = {
       ...(options.asyncWorkPolicy ?? { batchWindowMs: 30_000 }),
     };
@@ -326,6 +343,23 @@ export class TaskScheduler {
       suppliedId ??
       this.generateTaskId(request, origin, excludedIds);
     const issuedAt = this.#clock.now();
+    if (request.characterId !== undefined) {
+      this.#characterRegistry.get(request.characterId);
+      const requested =
+        this.#capabilityManager.normalizeRequests(
+          request.capabilities ?? [],
+        );
+      const outsideCeiling =
+        this.#characterRegistry.capabilityOutsideCeiling(
+          request.characterId,
+          requested,
+        );
+      if (outsideCeiling !== undefined) {
+        throw new Error(
+          `Character ${request.characterId} cannot hold capability ${outsideCeiling}.`,
+        );
+      }
+    }
     const capabilityGrants =
       origin.kind === 'root'
         ? this.#capabilityManager.issueRootGrants(
@@ -489,6 +523,46 @@ export class TaskScheduler {
     }
 
     for (const options of childOptions) {
+      if (
+        parent.characterId !== undefined &&
+        options.characterId === undefined
+      ) {
+        return await this.rejectSubagentSpawn(
+          parent,
+          'invalid_spawn_request',
+          'A parent with a Character must assign a Character to every child Agent.',
+        );
+      }
+      if (options.characterId !== undefined) {
+        if (
+          !this.#characterRegistry.canCreateChild(
+            parent.characterId,
+            options.characterId,
+          )
+        ) {
+          return await this.rejectSubagentSpawn(
+            parent,
+            'capability_escalation',
+            `Character ${parent.characterId ?? 'root'} cannot create child character ${options.characterId}.`,
+          );
+        }
+        const normalizedChildRequests =
+          this.#capabilityManager.normalizeRequests(
+            options.capabilities ?? [],
+          );
+        const outsideCeiling =
+          this.#characterRegistry.capabilityOutsideCeiling(
+            options.characterId,
+            normalizedChildRequests,
+          );
+        if (outsideCeiling !== undefined) {
+          return await this.rejectSubagentSpawn(
+            parent,
+            'capability_escalation',
+            `Character ${options.characterId} cannot hold capability ${outsideCeiling}.`,
+          );
+        }
+      }
       const delegation = this.#capabilityManager.validateDelegation(
         parent.capabilityGrants,
         options.capabilities ?? [],
@@ -705,6 +779,22 @@ export class TaskScheduler {
     for (const task of tasks) {
       if (this.#tasks.has(task.id)) {
         throw new Error(`Task is already registered: ${task.id}`);
+      }
+      if (task.characterId !== undefined) {
+        const character = this.#characterRegistry.get(task.characterId);
+        const outsideCeiling =
+          this.#characterRegistry.capabilityOutsideCeiling(
+            character.id,
+            task.capabilityGrants.map((grant) => ({
+              capability: grant.capability,
+              scope: grant.scope,
+            })),
+          );
+        if (outsideCeiling !== undefined) {
+          throw new Error(
+            `Restored character ${character.id} holds capability ${outsideCeiling} outside its ceiling.`,
+          );
+        }
       }
     }
 
@@ -1522,6 +1612,34 @@ export class TaskScheduler {
       await this.#store.persist(task);
       return;
     }
+    const outsideRequestPolicy =
+      this.#characterRegistry.requestableCapabilityOutsidePolicy(
+        task.characterId,
+        check.missing,
+      );
+    if (outsideRequestPolicy !== undefined) {
+      task.appendContext({
+        type: 'capability_request_result',
+        requestRef: requestId,
+        status: 'denied',
+        capabilities: check.missing.map(({ capability, scope }) => ({
+          capability,
+          scope: structuredClone(scope),
+        })),
+        reason: `Character ${task.characterId} cannot request capability ${outsideRequestPolicy}.`,
+      });
+      task.transition(
+        {
+          status: 'READY',
+          enteredAt: this.#clock.now(),
+          reason: 'capability_result_available',
+        },
+        'capability_request_rejected_by_character',
+      );
+      await this.prepareTaskForQueue(task);
+      await this.#store.persist(task);
+      return;
+    }
 
     const ancestors = this.capabilityAncestors(task);
     const authorityChain =
@@ -1862,10 +1980,12 @@ export class TaskScheduler {
     }
     await this.#store.persist(task);
 
+    const workspaceRoot = this.#workspaceRootResolver?.(task);
     return await tool.execute(call.input, {
       taskId: task.id,
       signal: this.requireAbortController(task.id).signal,
       idempotencyKey: `${task.id}:${call.callId}`,
+      ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
     });
   }
 
@@ -2105,6 +2225,9 @@ export class TaskScheduler {
     ];
     return {
       goal: request.goal,
+      ...(request.character === undefined
+        ? {}
+        : { characterId: request.character }),
       ...(requestedCapabilities.length === 0
         ? {}
         : { capabilities: requestedCapabilities }),
@@ -2123,15 +2246,62 @@ export class TaskScheduler {
     attempt: number,
     context: readonly ContextItem[],
   ): ModelRequest {
+    const visibleTools = this.#characterRegistry.visibleTools(
+      task.characterId,
+      this.#tools.descriptors(),
+    );
+    const character =
+      task.characterId === undefined
+        ? undefined
+        : this.#characterRegistry.get(task.characterId);
+    const availableCharacters =
+      this.#characterRegistry.availableChildren(task.characterId);
     return {
       taskId: task.id,
       goal: task.goal,
       context,
-      tools: this.#tools.descriptors(),
+      tools: visibleTools,
+      capabilities: task.capabilityGrants
+        .filter(
+          (grant) =>
+            (grant.execution ?? 'allowed') === 'allowed' &&
+            (grant.expiresAt === undefined ||
+              grant.expiresAt > this.#clock.now()) &&
+            (grant.remainingUses === undefined ||
+              grant.remainingUses > 0),
+        )
+        .map((grant) => ({
+          capability: grant.capability,
+          scope: structuredClone(grant.scope),
+        })),
+      ...(character === undefined
+        ? {}
+        : {
+            character: {
+              id: character.id,
+              displayName: character.displayName,
+              instructions: character.promptFragment,
+              requestableCapabilities: [
+                ...character.requestableCapabilities,
+              ],
+            },
+          }),
       attempt,
       summaryProtocol: TURN_SUMMARY_PROTOCOL,
       delegation: {
         canSpawnSubagents: this.#agentPool.canTaskSpawn(task),
+        ...(this.#agentPool.canTaskSpawn(task)
+          ? {
+              availableCharacters: availableCharacters.map(
+                (definition) => ({
+                  id: definition.id,
+                  displayName: definition.displayName,
+                  description: definition.promptFragment,
+                  capabilityCeiling: [...definition.capabilityCeiling],
+                }),
+              ),
+            }
+          : {}),
       },
     };
   }

@@ -26,6 +26,69 @@ const usage = {
 };
 
 describe('structured agent protocol', () => {
+  it('exposes real tool and character actions in the provider schema', () => {
+    expect(
+      AGENT_RESPONSE_JSON_SCHEMA.properties.action.enum,
+    ).toEqual(
+      expect.arrayContaining(['tool_calls', 'async_work']),
+    );
+    expect(
+      AGENT_RESPONSE_JSON_SCHEMA.properties.children.items.properties,
+    ).toHaveProperty('character');
+    expect(AGENT_RESPONSE_JSON_SCHEMA.properties).toHaveProperty(
+      'calls',
+    );
+  });
+
+  it('parses tool calls and mixed asynchronous work', () => {
+    const toolCall = {
+      callId: 'read-1',
+      toolName: 'file.read',
+      input: { path: 'workspace://current/src/index.ts' },
+    };
+    expect(
+      parseStructuredAgentResponse(
+        JSON.stringify({
+          action: 'tool_calls',
+          calls: [toolCall],
+          turnSummary: {
+            request: 'Read the entrypoint.',
+            outcome: 'Prepared a file read.',
+          },
+        }),
+        request,
+        usage,
+      ),
+    ).toMatchObject({
+      type: 'tool_calls',
+      calls: [toolCall],
+    });
+    expect(
+      parseStructuredAgentResponse(
+        JSON.stringify({
+          action: 'async_work',
+          children: [
+            {
+              goal: 'Audit the code.',
+              character: 'code_auditor',
+            },
+          ],
+          calls: [toolCall],
+          turnSummary: {
+            request: 'Inspect in parallel.',
+            outcome: 'Prepared parallel work.',
+          },
+        }),
+        request,
+        usage,
+      ),
+    ).toMatchObject({
+      type: 'async_work',
+      children: [{ character: 'code_auditor' }],
+      calls: [toolCall],
+    });
+  });
+
   it('does not expose taskId as an allowed child field', () => {
     expect(
       AGENT_RESPONSE_JSON_SCHEMA.properties.children.items.properties,
