@@ -52,6 +52,26 @@ export {
   RESEARCHER_CHARACTER,
 } from './character/builtin-characters.js';
 export {
+  AGENT_WORK_NODE_DEFINITIONS,
+  AGENT_WORK_NODE_KINDS,
+  AGENT_WORK_NODE_STATUSES,
+  agentWorkGraphMode,
+  createAgentWorkGraph,
+  isAgentWorkGraphComplete,
+  readyAgentWorkNodes,
+  validateAgentWorkGraph,
+  validateAgentWorkGraphProposal,
+  type AgentWorkGraph,
+  type AgentWorkGraphMode,
+  type AgentWorkGraphProposal,
+  type AgentWorkNode,
+  type AgentWorkNodeAssignee,
+  type AgentWorkNodeKind,
+  type AgentWorkNodeKindDefinition,
+  type AgentWorkNodeProposal,
+  type AgentWorkNodeStatus,
+} from './graph/agent-work-graph.js';
+export {
   assertHostPathInsideRoot,
   joinWorkspaceAlias,
   WorkspaceEscapeError,
@@ -97,9 +117,11 @@ export type {
   ContextItem,
   ContextSummaryKind,
   ContextSummaryRecord,
+  GraphActionRejectedContextItem,
   SubagentSpawnRejectedContextItem,
   ToolCallRejectedContextItem,
   TurnSummary,
+  WorkGraphRevisionContextItem,
 } from './kernel/context.js';
 export type {
   ContextCompactionRequest,
@@ -208,6 +230,7 @@ export {
 export {
   TaskScheduler,
   type AsyncWorkPolicy,
+  type CoordinationMode,
   type PendingHumanCapabilityApproval,
   type RestoreTasksOptions,
   type SchedulerMetricsSnapshot,

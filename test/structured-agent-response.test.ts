@@ -25,6 +25,14 @@ const usage = {
   costUsd: 0.001,
 };
 
+const graphPlanRequest: ModelRequest = {
+  ...request,
+  graph: {
+    mode: 'plan',
+    availableNodeKinds: [],
+  },
+};
+
 describe('structured agent protocol', () => {
   it('exposes real tool and character actions in the provider schema', () => {
     expect(
@@ -86,6 +94,47 @@ describe('structured agent protocol', () => {
       type: 'async_work',
       children: [{ character: 'code_auditor' }],
       calls: [toolCall],
+    });
+  });
+
+  it('parses an AI-generated work graph only in plan mode', () => {
+    const response = parseStructuredAgentResponse(
+      JSON.stringify({
+        action: 'set_graph',
+        graph: {
+          goal: 'Build the feature.',
+          completionCriteria: ['The feature is verified.'],
+          nodes: [
+            {
+              alias: 'build_feature',
+              kind: 'implement',
+              objective: 'Implement the feature.',
+              dependsOn: [],
+              assignee: { type: 'self' },
+              acceptanceCriteria: ['The implementation exists.'],
+            },
+          ],
+        },
+        turnSummary: {
+          request: 'Plan the feature.',
+          outcome: 'Created one implementation node.',
+        },
+      }),
+      graphPlanRequest,
+      usage,
+    );
+
+    expect(response).toMatchObject({
+      type: 'set_graph',
+      graph: {
+        nodes: [
+          {
+            alias: 'build_feature',
+            kind: 'implement',
+            assignee: { type: 'self' },
+          },
+        ],
+      },
     });
   });
 

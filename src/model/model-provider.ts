@@ -7,6 +7,13 @@ import type {
   CapabilityRequest,
 } from '../capability/capability.js';
 import type { JsonObject, JsonValue } from '../types/json.js';
+import type {
+  AgentWorkGraph,
+  AgentWorkGraphMode,
+  AgentWorkGraphProposal,
+  AgentWorkNode,
+  AgentWorkNodeKindDefinition,
+} from '../graph/agent-work-graph.js';
 
 export type TurnSummaryProtocol = {
   version: 1;
@@ -82,6 +89,25 @@ export type SubagentSpawnRequest = {
 
 export type ModelResponse =
   | {
+      type: 'set_graph';
+      graph: AgentWorkGraphProposal;
+      turnSummary?: TurnSummary;
+      usage: ModelUsage;
+    }
+  | {
+      type: 'complete_node';
+      output: JsonValue;
+      turnSummary?: TurnSummary;
+      usage: ModelUsage;
+    }
+  | {
+      type: 'request_replan';
+      reason: string;
+      partialOutput?: JsonValue;
+      turnSummary?: TurnSummary;
+      usage: ModelUsage;
+    }
+  | {
       type: 'final';
       output: JsonValue;
       turnSummary?: TurnSummary;
@@ -148,6 +174,12 @@ export type ModelRequest = {
   };
   attempt: number;
   summaryProtocol: TurnSummaryProtocol;
+  graph?: {
+    mode: AgentWorkGraphMode;
+    current?: AgentWorkGraph;
+    activeNode?: AgentWorkNode;
+    availableNodeKinds: readonly AgentWorkNodeKindDefinition[];
+  };
   delegation: {
     canSpawnSubagents: boolean;
     availableCharacters?: readonly {

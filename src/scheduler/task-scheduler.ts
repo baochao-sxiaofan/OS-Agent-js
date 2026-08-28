@@ -12,6 +12,12 @@ import {
   type CapabilityAncestor,
 } from '../capability/capability-manager.js';
 import { CharacterRegistry } from '../character/character-registry.js';
+import {
+  AGENT_WORK_NODE_DEFINITIONS,
+  validateAgentWorkGraphProposal,
+  type AgentWorkGraphProposal,
+  type AgentWorkNode,
+} from '../graph/agent-work-graph.js';
 import type {
   ContextItem,
   ToolCallContextItem,
@@ -39,6 +45,7 @@ import type { TaskState, Termination } from '../kernel/task-state.js';
 import type {
   ModelProvider,
   ModelRequest,
+  ModelResponse,
   SubagentSpawnRequest,
   ToolCallRequest,
 } from '../model/model-provider.js';
@@ -81,6 +88,8 @@ export type SchedulerMetricsSnapshot = {
   };
 };
 
+export type CoordinationMode = 'ai_graph' | 'legacy';
+
 export type TaskSchedulerOptions = {
   provider: ModelProvider;
   admission: AdmissionController;
@@ -94,6 +103,8 @@ export type TaskSchedulerOptions = {
   capabilityManager?: CapabilityManager;
   /** Character 注册表；省略时装载首批内置角色。 */
   characterRegistry?: CharacterRegistry;
+  /** 模型协作协议；`ai_graph` 使每个 Agent 从 plan 开始生成自己的局部 Graph。 */
+  coordinationMode?: CoordinationMode;
   /**
    * 把任务解析为宿主工作区根目录。
    *
@@ -115,6 +126,8 @@ export type TaskSchedulerOptions = {
 export type AsyncWorkPolicy = Readonly<{
   batchWindowMs: number;
 }>;
+
+const GRAPH_CHILD_MAX_MODEL_ATTEMPTS = 1_024;
 
 export type SubagentSpawnFailureReason =
   | SpawnRejectionReason
@@ -208,6 +221,7 @@ export class TaskScheduler {
   readonly #agentPool: AgentPool;
   readonly #capabilityManager: CapabilityManager;
   readonly #characterRegistry: CharacterRegistry;
+  readonly #coordinationMode: CoordinationMode;
   readonly #workspaceRootResolver:
     | ((task: TaskControlBlock) => string | undefined)
     | undefined;
@@ -247,6 +261,7 @@ export class TaskScheduler {
       options.capabilityManager ?? new CapabilityManager();
     this.#characterRegistry =
       options.characterRegistry ?? new CharacterRegistry();
+    this.#coordinationMode = options.coordinationMode ?? 'legacy';
     this.#workspaceRootResolver = options.workspaceRootResolver;
     this.#asyncWorkPolicy = {
       ...(options.asyncWorkPolicy ?? { batchWindowMs: 30_000 }),
@@ -490,6 +505,9 @@ export class TaskScheduler {
     parent: TaskControlBlock,
     toolCalls: readonly ToolCallRequest[],
     childOptions: readonly CreateChildAgentRequest[],
+    graphOptions: {
+      graphNodeAliases?: readonly string[];
+    } = {},
   ): Promise<SpawnChildrenResult> {
     if (parent.state.status !== 'RUNNING') {
       return {
@@ -503,6 +521,16 @@ export class TaskScheduler {
         parent,
         'invalid_spawn_request',
         'At least one asynchronous work item is required.',
+      );
+    }
+    if (
+      graphOptions.graphNodeAliases !== undefined &&
+      graphOptions.graphNodeAliases.length !== childOptions.length
+    ) {
+      return await this.rejectSubagentSpawn(
+        parent,
+        'invalid_spawn_request',
+        'Graph node aliases must match the delegated child count.',
       );
     }
     const requestedWorkIds = toolCalls.map((call) => call.callId);
@@ -653,6 +681,17 @@ export class TaskScheduler {
         return child;
       });
       const now = this.#clock.now();
+      for (const [index, child] of children.entries()) {
+        const graphNodeAlias =
+          graphOptions.graphNodeAliases?.[index];
+        if (graphNodeAlias !== undefined) {
+          parent.bindDelegatedWorkGraphNode(
+            graphNodeAlias,
+            child.id,
+            now,
+          );
+        }
+      }
       const work: AsyncWorkRegistration[] = [
         ...resolvedToolCalls.map(({ call }) => ({
           workId: call.callId,
@@ -660,11 +699,17 @@ export class TaskScheduler {
           label: call.toolName,
           toolName: call.toolName,
         })),
-        ...children.map((child) => ({
+        ...children.map((child, index) => ({
           workId: child.id,
           kind: 'subagent' as const,
           label: child.goal,
           childTaskId: child.id,
+          ...(graphOptions.graphNodeAliases?.[index] === undefined
+            ? {}
+            : {
+                graphNodeAlias:
+                  graphOptions.graphNodeAliases[index],
+              }),
         })),
       ];
       // 先建立 Work Table 再提交预留，确保 ID 冲突不会留下孤立子任务或漏扣槽位。
@@ -739,6 +784,11 @@ export class TaskScheduler {
         error: `Failed to send subagent: ${this.errorMessage(error)}`,
       };
       parent.completeSubagentWork(child.id, termination, this.#clock.now());
+      parent.completeDelegatedWorkGraphNode(
+        child.id,
+        termination,
+        this.#clock.now(),
+      );
       parent.recordSubagentResult(child.id, termination);
       await this.handleAsyncWorkProgress(parent);
     }
@@ -892,6 +942,11 @@ export class TaskScheduler {
       return;
     }
     parent.completeSubagentWork(
+      child.id,
+      child.state.termination,
+      this.#clock.now(),
+    );
+    parent.completeDelegatedWorkGraphNode(
       child.id,
       child.state.termination,
       this.#clock.now(),
@@ -1091,6 +1146,10 @@ export class TaskScheduler {
         madeProgress = true;
         continue;
       }
+      if (await this.advanceReadyGraphTask(task)) {
+        madeProgress = true;
+        continue;
+      }
 
       const preparedContext = this.#preparedContexts.get(task.id);
       if (!preparedContext) {
@@ -1141,6 +1200,136 @@ export class TaskScheduler {
     return madeProgress;
   }
 
+  /**
+   * 在不调用模型的情况下推进 Graph 中确定性的调度步骤。
+   *
+   * plan 只负责生成工作图；依赖解锁、self 节点激活和 Character 节点发送均由
+   * OS 完成。返回 true 表示当前 READY 项已经被消费或重新准备。
+   */
+  private async advanceReadyGraphTask(
+    task: TaskControlBlock,
+  ): Promise<boolean> {
+    if (
+      this.#coordinationMode !== 'ai_graph' ||
+      task.workGraph === undefined ||
+      task.workGraphMode === 'plan' ||
+      task.workGraph.currentNodeAlias !== undefined
+    ) {
+      return false;
+    }
+
+    const ready = task.readyWorkGraphNodes();
+    const delegated = ready.filter(
+      (node) => node.assignee.type === 'character',
+    );
+    if (delegated.length > 0) {
+      this.#readyQueue.remove(task.id);
+      this.#preparedContexts.delete(task.id);
+      task.transition(
+        {
+          status: 'RUNNING',
+          enteredAt: this.#clock.now(),
+          providerId: 'os-agent:graph-runtime',
+          requestAttempt: task.modelAttempts,
+          operation: 'graph_dispatch',
+        },
+        'graph_delegation_dispatch',
+      );
+      await this.#store.persist(task);
+      try {
+        const result = await this.startAsyncWork(
+          task,
+          [],
+          delegated.map((node) => this.toGraphChildRequest(node)),
+          { graphNodeAliases: delegated.map((node) => node.alias) },
+        );
+        if (result.spawned) {
+          return true;
+        }
+        for (const node of delegated) {
+          task.failWorkGraphNode(
+            node.alias,
+            result.message,
+            this.#clock.now(),
+          );
+        }
+        if (task.state.status === 'READY') {
+          await this.prepareTaskForQueue(task);
+        }
+        await this.#store.persist(task);
+      } catch (error) {
+        const message = this.errorMessage(error);
+        for (const node of delegated) {
+          task.failWorkGraphNode(
+            node.alias,
+            message,
+            this.#clock.now(),
+          );
+        }
+        if (task.state.status === 'RUNNING') {
+          task.transition(
+            {
+              status: 'READY',
+              enteredAt: this.#clock.now(),
+              reason: 'graph_replan',
+            },
+            'graph_delegation_failed',
+          );
+        }
+        if (task.state.status === 'READY') {
+          await this.prepareTaskForQueue(task);
+        }
+        await this.#store.persist(task);
+      }
+      return true;
+    }
+
+    const selfNode = ready.find(
+      (node) => node.assignee.type === 'self',
+    );
+    if (selfNode) {
+      this.#readyQueue.remove(task.id);
+      this.#preparedContexts.delete(task.id);
+      task.activateSelfWorkGraphNode(
+        selfNode.alias,
+        this.#clock.now(),
+      );
+      await this.prepareTaskForQueue(task);
+      await this.#store.persist(task);
+      return true;
+    }
+
+    const pendingIds = task.activeAsyncWorkPendingIds();
+    if (pendingIds.length > 0) {
+      // 子 Agent 的 capability 申请是一种非终态进展：一旦它已投递到父 Agent
+      // 上下文，父 Agent 必须运行模型作出授权决定，而不能被当作“仍在等待”
+      // 而再次静默阻塞。否则子 Agent 会永远拿不到授权。
+      if (task.hasDeliveredCapabilityBlockerAwaitingDecision()) {
+        return false;
+      }
+      this.#readyQueue.remove(task.id);
+      this.#preparedContexts.delete(task.id);
+      task.transition(
+        {
+          status: 'RUNNING',
+          enteredAt: this.#clock.now(),
+          providerId: 'os-agent:graph-runtime',
+          requestAttempt: task.modelAttempts,
+          operation: 'graph_dispatch',
+        },
+        'graph_wait_dispatch',
+      );
+      await this.settleParentAfterAsyncWorkTurn(task);
+      return true;
+    }
+
+    // Graph 已完成或因失败/依赖无法继续而静止，交回 plan 决定完成或换图。
+    task.enterWorkGraphPlan(this.#clock.now());
+    await this.prepareTaskForQueue(task);
+    await this.#store.persist(task);
+    return true;
+  }
+
   private async handleAdmissionDenied(
     task: TaskControlBlock,
     decision: Exclude<AdmissionDecision, { admitted: true }>,
@@ -1188,9 +1377,114 @@ export class TaskScheduler {
       }
 
       task.recordModelResponse(response.type, response.usage);
+      const graphProtocolError = this.validateGraphResponse(
+        task,
+        response,
+      );
+      if (graphProtocolError !== undefined) {
+        task.completeModelTurn(response.turnSummary);
+        await this.rejectGraphAction(
+          task,
+          response.type,
+          graphProtocolError,
+        );
+        return;
+      }
       switch (response.type) {
+        case 'set_graph': {
+          task.completeModelTurn(response.turnSummary);
+          const validationError = this.validateGraphProposal(
+            task,
+            response.graph,
+          );
+          if (validationError !== undefined) {
+            await this.rejectGraphAction(
+              task,
+              'set_graph',
+              validationError,
+            );
+            return;
+          }
+          task.replaceWorkGraph(response.graph, this.#clock.now());
+          task.transition(
+            {
+              status: 'READY',
+              enteredAt: this.#clock.now(),
+              reason: 'graph_updated',
+            },
+            'work_graph_installed',
+          );
+          await this.prepareTaskForQueue(task);
+          await this.#store.persist(task);
+          return;
+        }
+        case 'complete_node':
+          task.completeModelTurn(response.turnSummary);
+          try {
+            task.completeCurrentWorkGraphNode(
+              response.output,
+              this.#clock.now(),
+            );
+          } catch (error) {
+            await this.rejectGraphAction(
+              task,
+              'complete_node',
+              this.errorMessage(error),
+            );
+            return;
+          }
+          task.transition(
+            {
+              status: 'READY',
+              enteredAt: this.#clock.now(),
+              reason: 'graph_node_ready',
+            },
+            'work_graph_node_completed',
+          );
+          await this.prepareTaskForQueue(task);
+          await this.#store.persist(task);
+          return;
+        case 'request_replan':
+          task.completeModelTurn(response.turnSummary);
+          try {
+            task.requestCurrentWorkGraphReplan(
+              response.reason,
+              this.#clock.now(),
+              response.partialOutput,
+            );
+          } catch (error) {
+            await this.rejectGraphAction(
+              task,
+              'request_replan',
+              this.errorMessage(error),
+            );
+            return;
+          }
+          task.transition(
+            {
+              status: 'READY',
+              enteredAt: this.#clock.now(),
+              reason: 'graph_replan',
+            },
+            'work_graph_replan_requested',
+          );
+          await this.prepareTaskForQueue(task);
+          await this.#store.persist(task);
+          return;
         case 'final':
           task.completeModelTurn(response.turnSummary);
+          if (
+            this.#coordinationMode === 'ai_graph' &&
+            task.workGraph !== undefined &&
+            !task.isWorkGraphComplete()
+          ) {
+            await this.rejectGraphAction(
+              task,
+              'final',
+              'The current work graph still contains unfinished, blocked, or failed nodes.',
+            );
+            return;
+          }
           await this.terminateTask(task, {
             kind: 'completed',
             output: response.output,
@@ -2050,7 +2344,14 @@ export class TaskScheduler {
     task: TaskControlBlock,
     error: unknown,
   ): Promise<void> {
-    if (task.canRetryModel()) {
+    if (!task.canRetryModel()) {
+      await this.terminateTask(task, {
+        kind: 'failed',
+        error: this.errorMessage(error),
+      });
+      return;
+    }
+    if (task.state.status === 'RUNNING') {
       task.transition(
         {
           status: 'READY',
@@ -2059,13 +2360,13 @@ export class TaskScheduler {
         },
         `model_request_failed:${this.errorMessage(error)}`,
       );
-      await this.prepareTaskForQueue(task);
-    } else {
-      await this.terminateTask(task, {
-        kind: 'failed',
-        error: this.errorMessage(error),
-      });
+    } else if (task.state.status === 'BLOCKED') {
+      // 模型动作已经成功登记了异步工作；让现有唤醒路径继续接管。
+      await this.#store.persist(task);
       return;
+    }
+    if (task.state.status === 'READY') {
+      await this.prepareTaskForQueue(task);
     }
     await this.#store.persist(task);
   }
@@ -2185,6 +2486,129 @@ export class TaskScheduler {
     };
   }
 
+  private async rejectGraphAction(
+    task: TaskControlBlock,
+    action: string,
+    message: string,
+  ): Promise<void> {
+    task.appendContext({
+      type: 'graph_action_rejected',
+      action,
+      message,
+    });
+    task.transition(
+      {
+        status: 'READY',
+        enteredAt: this.#clock.now(),
+        reason: 'graph_replan',
+      },
+      `graph_action_rejected:${action}`,
+    );
+    await this.prepareTaskForQueue(task);
+    await this.#store.persist(task);
+  }
+
+  private validateGraphResponse(
+    task: TaskControlBlock,
+    response: ModelResponse,
+  ): string | undefined {
+    if (this.#coordinationMode !== 'ai_graph') {
+      if (
+        response.type === 'set_graph' ||
+        response.type === 'complete_node' ||
+        response.type === 'request_replan'
+      ) {
+        return `Action ${response.type} requires AI Graph mode.`;
+      }
+      return undefined;
+    }
+
+    const mode = task.workGraphMode;
+    const allowed =
+      mode === 'plan'
+        ? new Set<ModelResponse['type']>([
+            'final',
+            'needs_parent_action',
+            'request_capabilities',
+            'resolve_capability_request',
+            'set_graph',
+            'wait_for_async_work',
+          ])
+        : mode === 'execute'
+          ? new Set<ModelResponse['type']>([
+              'async_work',
+              'complete_node',
+              'request_capabilities',
+              'request_replan',
+              'resolve_capability_request',
+              'tool_calls',
+              'wait_for_async_work',
+            ])
+          : new Set<ModelResponse['type']>([
+              'resolve_capability_request',
+              'wait_for_async_work',
+            ]);
+    if (!allowed.has(response.type)) {
+      return `Action ${response.type} is not allowed in graph ${mode} mode.`;
+    }
+    if (
+      mode === 'execute' &&
+      response.type === 'async_work' &&
+      response.children.length > 0
+    ) {
+      return 'Execution nodes cannot create subagents outside the planned graph.';
+    }
+    return undefined;
+  }
+
+  private validateGraphProposal(
+    parent: TaskControlBlock,
+    proposal: AgentWorkGraphProposal,
+  ): string | undefined {
+    try {
+      validateAgentWorkGraphProposal(proposal);
+      for (const node of proposal.nodes) {
+        if (node.assignee.type === 'self') {
+          continue;
+        }
+        if (!this.#agentPool.canTaskSpawn(parent)) {
+          return `Agent ${parent.id} cannot delegate graph node ${node.alias} at the current depth or pool limit.`;
+        }
+        if (
+          !this.#characterRegistry.canCreateChild(
+            parent.characterId,
+            node.assignee.character,
+          )
+        ) {
+          return `Character ${parent.characterId ?? 'root'} cannot create child character ${node.assignee.character}.`;
+        }
+        const normalized =
+          this.#capabilityManager.normalizeRequests(
+            node.assignee.requestedCapabilities,
+          );
+        const outsideCeiling =
+          this.#characterRegistry.capabilityOutsideCeiling(
+            node.assignee.character,
+            normalized,
+          );
+        if (outsideCeiling !== undefined) {
+          return `Character ${node.assignee.character} cannot hold capability ${outsideCeiling}.`;
+        }
+        const delegation = this.#capabilityManager.validateDelegation(
+          parent.capabilityGrants,
+          normalized,
+          this.#clock.now(),
+        );
+        if (!delegation.allowed) {
+          return delegation.reason;
+        }
+      }
+    } catch (error) {
+      return this.errorMessage(error);
+    }
+    return undefined;
+  }
+
   private async notifyParentOfTermination(
     child: TaskControlBlock,
     termination: Termination,
@@ -2198,6 +2622,11 @@ export class TaskScheduler {
     }
     try {
       parent.completeSubagentWork(
+        child.id,
+        termination,
+        this.#clock.now(),
+      );
+      parent.completeDelegatedWorkGraphNode(
         child.id,
         termination,
         this.#clock.now(),
@@ -2241,6 +2670,31 @@ export class TaskScheduler {
     };
   }
 
+  private toGraphChildRequest(
+    node: AgentWorkNode,
+  ): CreateChildAgentRequest {
+    if (node.assignee.type !== 'character') {
+      throw new Error(
+        `Graph node ${node.alias} is not assigned to a character.`,
+      );
+    }
+    return {
+      goal: [
+        node.objective,
+        `Acceptance criteria: ${node.acceptanceCriteria.join('; ')}`,
+      ].join('\n'),
+      characterId: node.assignee.character,
+      capabilities: node.assignee.requestedCapabilities,
+      context: [
+        {
+          type: 'system',
+          content: `This Agent owns parent graph node ${node.alias} (${node.kind}). Plan and complete only this bounded assignment.`,
+        },
+      ],
+      maxModelAttempts: GRAPH_CHILD_MAX_MODEL_ATTEMPTS,
+    };
+  }
+
   private buildModelRequest(
     task: TaskControlBlock,
     attempt: number,
@@ -2256,6 +2710,23 @@ export class TaskScheduler {
         : this.#characterRegistry.get(task.characterId);
     const availableCharacters =
       this.#characterRegistry.availableChildren(task.characterId);
+    const workGraph = task.workGraph;
+    const modelWorkGraph =
+      workGraph === undefined
+        ? undefined
+        : structuredClone(workGraph);
+    if (modelWorkGraph !== undefined) {
+      for (const node of modelWorkGraph.nodes) {
+        delete node.childTaskId;
+        delete node.waitingFor;
+      }
+    }
+    const activeNode =
+      workGraph?.currentNodeAlias === undefined
+        ? undefined
+        : workGraph.nodes.find(
+            (node) => node.alias === workGraph.currentNodeAlias,
+          );
     return {
       taskId: task.id,
       goal: task.goal,
@@ -2288,6 +2759,22 @@ export class TaskScheduler {
           }),
       attempt,
       summaryProtocol: TURN_SUMMARY_PROTOCOL,
+      ...(this.#coordinationMode === 'legacy'
+        ? {}
+        : {
+            graph: {
+              mode: task.workGraphMode,
+              ...(modelWorkGraph === undefined
+                ? {}
+                : { current: modelWorkGraph }),
+              ...(activeNode === undefined
+                ? {}
+                : { activeNode }),
+              availableNodeKinds: structuredClone(
+                AGENT_WORK_NODE_DEFINITIONS,
+              ),
+            },
+          }),
       delegation: {
         canSpawnSubagents: this.#agentPool.canTaskSpawn(task),
         ...(this.#agentPool.canTaskSpawn(task)

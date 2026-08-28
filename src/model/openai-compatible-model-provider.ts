@@ -41,7 +41,7 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
   readonly #apiKey: string;
   readonly #baseUrl: string;
   readonly #model: string;
-  readonly #maxOutputTokens: number;
+  readonly #maxOutputTokens: number | undefined;
   readonly #apiKeyHeader: 'api-key' | 'authorization';
   readonly #maxTokensField: 'max_completion_tokens' | 'max_tokens';
   readonly #fetch: typeof fetch;
@@ -56,7 +56,7 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
     this.#apiKey = options.apiKey.trim();
     this.#baseUrl = options.baseUrl.replace(/\/+$/u, '');
     this.#model = options.model.trim();
-    this.#maxOutputTokens = options.maxOutputTokens ?? 640;
+    this.#maxOutputTokens = options.maxOutputTokens;
     this.#apiKeyHeader = options.apiKeyHeader ?? 'authorization';
     this.#maxTokensField = options.maxTokensField ?? 'max_tokens';
     this.#fetch = options.fetchImplementation ?? globalThis.fetch;
@@ -67,7 +67,7 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
   estimate(request: ModelRequest): ModelRequestEstimate {
     return {
       inputTokens: estimateTokens(JSON.stringify(request)),
-      maxOutputTokens: this.#maxOutputTokens,
+      maxOutputTokens: this.#maxOutputTokens ?? 0,
       estimatedCostUsd: 0,
     };
   }
@@ -134,6 +134,9 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
             context: request.context.map(serializeContextItemForModel),
             tools: request.tools,
             delegation: request.delegation,
+            ...(request.graph === undefined
+              ? {}
+              : { graph: request.graph }),
           }),
         },
       ],
@@ -142,7 +145,9 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
         type: 'json_object',
       },
     };
-    payload[this.#maxTokensField] = this.#maxOutputTokens;
+    if (this.#maxOutputTokens !== undefined) {
+      payload[this.#maxTokensField] = this.#maxOutputTokens;
+    }
     return payload;
   }
 }

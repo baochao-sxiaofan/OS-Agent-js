@@ -15,7 +15,6 @@ import {
 
 const DEFAULT_BASE_URL = 'https://api.minimaxi.com/v1';
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
 const AGENT_RESPONSE_TOOL_NAME = 'submit_agent_response';
 
 export type MiniMaxModelProviderOptions = {
@@ -48,7 +47,7 @@ export class MiniMaxModelProvider implements ModelProvider {
   readonly #apiKey: string;
   readonly #baseUrl: string;
   readonly #model: string;
-  readonly #maxOutputTokens: number;
+  readonly #maxOutputTokens: number | undefined;
   readonly #fetch: typeof fetch;
 
   constructor(options: MiniMaxModelProviderOptions) {
@@ -68,8 +67,7 @@ export class MiniMaxModelProvider implements ModelProvider {
       '',
     );
     this.#model = options.model.trim();
-    this.#maxOutputTokens =
-      options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+    this.#maxOutputTokens = options.maxOutputTokens;
     this.#fetch = options.fetchImplementation ?? globalThis.fetch;
     this.contextWindowTokens =
       options.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
@@ -79,7 +77,7 @@ export class MiniMaxModelProvider implements ModelProvider {
   estimate(request: ModelRequest): ModelRequestEstimate {
     return {
       inputTokens: estimateTokens(JSON.stringify(request)),
-      maxOutputTokens: this.#maxOutputTokens,
+      maxOutputTokens: this.#maxOutputTokens ?? 0,
       estimatedCostUsd: 0,
     };
   }
@@ -128,7 +126,7 @@ export class MiniMaxModelProvider implements ModelProvider {
       );
     }
     return parseAgentResponse(
-      stripThinkingBlock(content),
+      extractStructuredJson(stripThinkingBlock(content)),
       request,
       usage,
       diagnostics,
@@ -136,7 +134,7 @@ export class MiniMaxModelProvider implements ModelProvider {
   }
 
   private buildRequestBody(request: ModelRequest): JsonObject {
-    return {
+    const body: JsonObject = {
       model: this.#model,
       messages: [
         {
@@ -159,11 +157,13 @@ export class MiniMaxModelProvider implements ModelProvider {
             context: request.context.map(serializeContextItemForModel),
             tools: request.tools,
             delegation: request.delegation,
+            ...(request.graph === undefined
+              ? {}
+              : { graph: request.graph }),
           }),
         },
       ],
       stream: false,
-      max_completion_tokens: this.#maxOutputTokens,
       reasoning_split: true,
       tools: [
         {
@@ -178,8 +178,15 @@ export class MiniMaxModelProvider implements ModelProvider {
           },
         },
       ],
-      tool_choice: 'auto',
+      tool_choice: {
+        type: 'function',
+        function: { name: AGENT_RESPONSE_TOOL_NAME },
+      },
     };
+    if (this.#maxOutputTokens !== undefined) {
+      body['max_completion_tokens'] = this.#maxOutputTokens;
+    }
+    return body;
   }
 }
 
@@ -251,6 +258,58 @@ function stripThinkingBlock(text: string): string {
     }
     remaining = remaining.slice(match[0].length).trimStart();
   }
+}
+
+/**
+ * Recover the OS-Agent action object when the model wrote it into free-form
+ * content instead of a clean JSON body. Handles ```json fences and leading or
+ * trailing prose by extracting the first balanced top-level JSON object.
+ */
+function extractStructuredJson(text: string): string {
+  const trimmed = text.trim();
+  const fenced = /```(?:json)?\s*([\s\S]*?)\s*```/iu.exec(trimmed);
+  if (fenced?.[1] !== undefined) {
+    return fenced[1].trim();
+  }
+  if (trimmed.startsWith('{')) {
+    return trimmed;
+  }
+  const balanced = extractFirstJsonObject(trimmed);
+  return balanced ?? trimmed;
+}
+
+function extractFirstJsonObject(text: string): string | undefined {
+  const start = text.indexOf('{');
+  if (start === -1) {
+    return undefined;
+  }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+  return undefined;
 }
 
 function formatResponseDiagnostics(

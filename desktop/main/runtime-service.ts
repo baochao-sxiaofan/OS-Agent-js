@@ -4,6 +4,7 @@ import { realpath, stat } from 'node:fs/promises';
 import {
   AdmissionController,
   AgentPool,
+  agentWorkGraphMode,
   capabilityRequestKey,
   createWorkspaceCapabilityRequests,
   CURRENT_WORKSPACE_RESOURCE,
@@ -76,8 +77,9 @@ const AGENT_POOL_POLICY = {
 } as const;
 
 const ROOT_TASK_POLICY = {
-  maxModelAttempts: 24,
-  maxCostUsd: 1,
+  // 仅作为失控熔断器；正常资源治理由上下文、并发和人工取消承担。
+  maxModelAttempts: 4_096,
+  maxCostUsd: Number.MAX_VALUE,
 } as const;
 
 const CONVERSATION_METADATA_KEY = 'desktop.conversations.v1';
@@ -125,9 +127,10 @@ export class RuntimeService {
       admission: new AdmissionController({
         maxConcurrentRequests: 2,
         requestsPerMinute: 30,
-        tokensPerMinute: 40_000,
+        tokensPerMinute: Number.MAX_SAFE_INTEGER,
       }),
       agentPool: new AgentPool(AGENT_POOL_POLICY),
+      coordinationMode: 'ai_graph',
       asyncWorkPolicy: {
         batchWindowMs: 1_200,
       },
@@ -185,7 +188,7 @@ export class RuntimeService {
     if (this.isBusy) {
       throw new Error('有 Agent 正在运行，请等待当前任务结束后切换模型。');
     }
-    const provider = createConfiguredProvider(config, 192);
+    const provider = createConfiguredProvider(config);
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(new Error('模型协议验证超时。')),
@@ -674,37 +677,70 @@ export class RuntimeService {
     const plannerGoal = '拆解任务目标，明确约束和执行步骤';
     const executorGoal = '根据任务目标形成可交付的执行结果';
     const verifierGoal = '检查执行依据、边界条件与潜在风险';
+    const plannerAssignment = `${plannerGoal}\nAcceptance criteria: 形成清晰且可执行的方案`;
+    const executorAssignment = `${executorGoal}\nAcceptance criteria: 形成可交付的主体结果`;
+    const verifierAssignment = `${verifierGoal}\nAcceptance criteria: 给出明确的风险检查结论`;
     this.#demoChildTaskIds.set(
-      this.#demoTaskKey(rootTaskId, plannerGoal),
+      this.#demoTaskKey(rootTaskId, plannerAssignment),
       plannerId,
     );
     this.#demoChildTaskIds.set(
-      this.#demoTaskKey(rootTaskId, executorGoal),
+      this.#demoTaskKey(rootTaskId, executorAssignment),
       executorId,
     );
     this.#demoChildTaskIds.set(
-      this.#demoTaskKey(plannerId, verifierGoal),
+      this.#demoTaskKey(rootTaskId, verifierAssignment),
       verifierId,
     );
 
     fakeProvider.setResponses(rootTaskId, [
       {
-        type: 'spawn_subagents',
-        children: [
-          {
-            goal: plannerGoal,
-            character: 'coordinator',
-            maxModelAttempts: 3,
-          },
-          {
-            goal: executorGoal,
-            character: 'developer',
-            maxModelAttempts: 2,
-          },
-        ],
+        type: 'set_graph',
+        graph: {
+          goal: task,
+          completionCriteria: ['规划、执行和校验均已完成'],
+          nodes: [
+            {
+              alias: 'plan_solution',
+              kind: 'design',
+              objective: plannerGoal,
+              dependsOn: [],
+              assignee: {
+                type: 'character',
+                character: 'coordinator',
+                requestedCapabilities: [],
+              },
+              acceptanceCriteria: ['形成清晰且可执行的方案'],
+            },
+            {
+              alias: 'build_result',
+              kind: 'implement',
+              objective: executorGoal,
+              dependsOn: ['plan_solution'],
+              assignee: {
+                type: 'character',
+                character: 'developer',
+                requestedCapabilities: [],
+              },
+              acceptanceCriteria: ['形成可交付的主体结果'],
+            },
+            {
+              alias: 'review_result',
+              kind: 'review',
+              objective: verifierGoal,
+              dependsOn: ['build_result'],
+              assignee: {
+                type: 'character',
+                character: 'code_auditor',
+                requestedCapabilities: [],
+              },
+              acceptanceCriteria: ['给出明确的风险检查结论'],
+            },
+          ],
+        },
         turnSummary: {
           request: '分析用户任务并规划执行。',
-          outcome: '创建规划与执行两个子 Agent。',
+          outcome: '生成规划、执行和校验工作图。',
         },
         usage: DEMO_USAGE,
       },
@@ -729,17 +765,33 @@ export class RuntimeService {
     ]);
     fakeProvider.setResponses(plannerId, [
       {
-        type: 'spawn_subagents',
-        children: [
-          {
-            goal: verifierGoal,
-            character: 'code_auditor',
-            maxModelAttempts: 1,
-          },
-        ],
+        type: 'set_graph',
+        graph: {
+          goal: plannerGoal,
+          completionCriteria: ['完成方案设计'],
+          nodes: [
+            {
+              alias: 'design_plan',
+              kind: 'design',
+              objective: plannerGoal,
+              dependsOn: [],
+              assignee: { type: 'self' },
+              acceptanceCriteria: ['形成清晰且可执行的方案'],
+            },
+          ],
+        },
         turnSummary: {
           request: '拆解任务并识别需要校验的内容。',
-          outcome: '完成任务拆解并创建校验 Agent。',
+          outcome: '生成本地设计节点。',
+        },
+        usage: DEMO_USAGE,
+      },
+      {
+        type: 'complete_node',
+        output: '任务结构和执行顺序已经整理完成。',
+        turnSummary: {
+          request: '完成方案设计。',
+          outcome: '方案节点已完成。',
         },
         usage: DEMO_USAGE,
       },
@@ -747,13 +799,44 @@ export class RuntimeService {
         type: 'final',
         output: '任务结构和执行顺序已经整理完成。',
         turnSummary: {
-          request: '吸收校验结果并完成规划。',
-          outcome: '输出经过校验的任务规划。',
+          request: '评估本地工作图。',
+          outcome: '确认方案设计已经完成。',
         },
         usage: DEMO_USAGE,
       },
     ]);
     fakeProvider.setResponses(executorId, [
+      {
+        type: 'set_graph',
+        graph: {
+          goal: executorGoal,
+          completionCriteria: ['形成主体执行结果'],
+          nodes: [
+            {
+              alias: 'implement_result',
+              kind: 'implement',
+              objective: executorGoal,
+              dependsOn: [],
+              assignee: { type: 'self' },
+              acceptanceCriteria: ['形成可交付的主体结果'],
+            },
+          ],
+        },
+        turnSummary: {
+          request: '规划主体执行工作。',
+          outcome: '生成实现节点。',
+        },
+        usage: DEMO_USAGE,
+      },
+      {
+        type: 'complete_node',
+        output: '已根据目标完成主体执行内容。',
+        turnSummary: {
+          request: '执行用户任务。',
+          outcome: '主体执行节点已经完成。',
+        },
+        usage: DEMO_USAGE,
+      },
       {
         type: 'final',
         output: '已根据目标完成主体执行内容。',
@@ -765,6 +848,37 @@ export class RuntimeService {
       },
     ]);
     fakeProvider.setResponses(verifierId, [
+      {
+        type: 'set_graph',
+        graph: {
+          goal: verifierGoal,
+          completionCriteria: ['完成风险检查'],
+          nodes: [
+            {
+              alias: 'review_risks',
+              kind: 'review',
+              objective: verifierGoal,
+              dependsOn: [],
+              assignee: { type: 'self' },
+              acceptanceCriteria: ['给出明确的风险检查结论'],
+            },
+          ],
+        },
+        turnSummary: {
+          request: '规划风险检查。',
+          outcome: '生成审查节点。',
+        },
+        usage: DEMO_USAGE,
+      },
+      {
+        type: 'complete_node',
+        output: '已完成边界条件和风险检查。',
+        turnSummary: {
+          request: '检查执行依据和风险。',
+          outcome: '审查节点已经完成。',
+        },
+        usage: DEMO_USAGE,
+      },
       {
         type: 'final',
         output: '已完成边界条件和风险检查。',
@@ -994,6 +1108,30 @@ export class RuntimeService {
         : {}),
       ...(state.detail === undefined ? {} : { stateDetail: state.detail }),
       ...(state.result === undefined ? {} : { result: state.result }),
+      ...(task.workGraph === undefined
+        ? {}
+        : {
+            workGraph: {
+              revision: task.workGraph.revision,
+              mode: agentWorkGraphMode(task.workGraph),
+              ...(task.workGraph.currentNodeAlias === undefined
+                ? {}
+                : {
+                    currentNodeAlias:
+                      task.workGraph.currentNodeAlias,
+                  }),
+              nodes: task.workGraph.nodes.map((node) => ({
+                alias: node.alias,
+                kind: node.kind,
+                status: node.status,
+                assignee:
+                  node.assignee.type === 'self'
+                    ? 'self'
+                    : node.assignee.character,
+                objective: node.objective,
+              })),
+            },
+          }),
     };
   }
 
@@ -1116,6 +1254,24 @@ export class RuntimeService {
           ...base,
           label: `模型返回 ${event.responseType}`,
           detail: `${event.usage.inputTokens} in / ${event.usage.outputTokens} out`,
+        };
+      case 'work_graph_replaced':
+        return {
+          ...base,
+          label: `工作图更新至 R${event.graph.revision}`,
+          detail: `${event.graph.nodes.length} 个节点`,
+        };
+      case 'work_graph_node_transitioned':
+        return {
+          ...base,
+          label: `${event.nodeAlias} → ${event.to}`,
+          detail: event.reason,
+        };
+      case 'work_graph_phase_changed':
+        return {
+          ...base,
+          label: `Graph ${event.from} → ${event.to}`,
+          detail: `R${event.revision} · ${event.reason}`,
         };
       case 'async_work_registered':
         return {

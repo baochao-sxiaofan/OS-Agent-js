@@ -229,6 +229,21 @@ export type AgentEventView = {
   sequence: number;
 };
 
+export type AgentWorkNodeView = {
+  alias: string;
+  kind: string;
+  status: string;
+  assignee: string;
+  objective: string;
+};
+
+export type AgentWorkGraphView = {
+  revision: number;
+  mode: 'execute' | 'plan' | 'waiting';
+  currentNodeAlias?: string;
+  nodes: AgentWorkNodeView[];
+};
+
 export type AgentNodeView = {
   id: string;
   rootTaskId: string;
@@ -241,6 +256,7 @@ export type AgentNodeView = {
   stateLabel: string;
   stateDetail?: string;
   result?: string;
+  workGraph?: AgentWorkGraphView;
   capabilities: string[];
   modelAttempts: number;
   maxModelAttempts: number;

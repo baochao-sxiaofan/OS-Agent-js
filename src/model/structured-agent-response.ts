@@ -7,6 +7,14 @@ import type {
   ResourceScope,
 } from '../capability/capability.js';
 import type { JsonObject, JsonValue } from '../types/json.js';
+import {
+  AGENT_WORK_NODE_KINDS,
+  validateAgentWorkGraphProposal,
+  type AgentWorkGraphProposal,
+  type AgentWorkNodeAssignee,
+  type AgentWorkNodeKind,
+  type AgentWorkNodeProposal,
+} from '../graph/agent-work-graph.js';
 import type {
   ModelRequest,
   ModelResponse,
@@ -23,16 +31,98 @@ export const AGENT_RESPONSE_JSON_SCHEMA = {
       type: 'string',
       enum: [
         'async_work',
+        'complete_node',
         'final',
         'needs_parent_action',
+        'request_replan',
         'request_capabilities',
         'resolve_capability_request',
+        'set_graph',
         'spawn_subagents',
         'tool_calls',
         'wait_for_async_work',
       ],
     },
     output: { type: 'string' },
+    graph: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        goal: { type: 'string' },
+        completionCriteria: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+        nodes: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              alias: { type: 'string' },
+              kind: {
+                type: 'string',
+                enum: AGENT_WORK_NODE_KINDS,
+              },
+              objective: { type: 'string' },
+              dependsOn: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+              assignee: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  type: {
+                    type: 'string',
+                    enum: ['self', 'character'],
+                  },
+                  character: { type: 'string' },
+                  requestedCapabilities: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        capability: { type: 'string' },
+                        scope: {
+                          type: 'object',
+                          additionalProperties: false,
+                          properties: {
+                            kind: {
+                              type: 'string',
+                              enum: ['all', 'exact', 'subtree'],
+                            },
+                            resource: { type: 'string' },
+                          },
+                          required: ['kind'],
+                        },
+                        reason: { type: 'string' },
+                      },
+                      required: ['capability', 'scope'],
+                    },
+                  },
+                },
+                required: ['type'],
+              },
+              acceptanceCriteria: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: [
+              'alias',
+              'kind',
+              'objective',
+              'dependsOn',
+              'assignee',
+              'acceptanceCriteria',
+            ],
+          },
+        },
+      },
+      required: ['goal', 'completionCriteria', 'nodes'],
+    },
     children: {
       type: 'array',
       items: {
@@ -141,11 +231,11 @@ export const AGENT_RESPONSE_JSON_SCHEMA = {
 export const STRUCTURED_AGENT_INSTRUCTION = [
   'You are the model worker for OS-Agent-js.',
   'Return only one JSON object and no markdown.',
-  'Select exactly one action: async_work, final, needs_parent_action, request_capabilities, resolve_capability_request, spawn_subagents, tool_calls, or wait_for_async_work.',
+  'Select exactly one action listed for the current graph mode.',
   'Use final when the task is complete.',
   'Use spawn_subagents only when delegation.canSpawnSubagents is true and the goal benefits from independent parallel work.',
   'Use tool_calls to invoke one or more visible tools. Use async_work to start tools and subagents in the same turn.',
-  'For tool_calls include calls as {callId, toolName, input}; use only tools listed in the request and follow each inputSchema.',
+  'For tool_calls include calls as {callId, toolName, input}; use only tools listed in the request and follow each inputSchema. Each callId must be unique for the Agent lifetime; in graph mode prefix it with the current node alias.',
   'The request capabilities list is authoritative for what you currently hold; request missing capabilities instead of assuming access.',
   'For async_work include at least one child or call.',
   'When spawning, choose character only from delegation.availableCharacters and request the narrowest required capability scopes.',
@@ -165,6 +255,7 @@ export function buildStructuredAgentSystemInstruction(
 ): string {
   return [
     STRUCTURED_AGENT_INSTRUCTION,
+    graphModeInstruction(request),
     request.summaryProtocol.instruction,
     request.character === undefined
       ? undefined
@@ -233,6 +324,38 @@ export function parseStructuredAgentResponse(
   const turnSummary = parseTurnSummary(envelope['turnSummary']);
 
   switch (action) {
+    case 'set_graph':
+      return {
+        type: 'set_graph',
+        graph: parseAgentWorkGraphProposal(envelope['graph']),
+        turnSummary,
+        usage,
+      };
+    case 'complete_node':
+      return {
+        type: 'complete_node',
+        output:
+          envelope['output'] === undefined
+            ? ''
+            : structuredClone(envelope['output']),
+        turnSummary,
+        usage,
+      };
+    case 'request_replan': {
+      const partialOutput = envelope['partialOutput'];
+      return {
+        type: 'request_replan',
+        reason: requireString(
+          envelope['reason'],
+          'structured output.reason',
+        ),
+        ...(partialOutput === undefined
+          ? {}
+          : { partialOutput: structuredClone(partialOutput) }),
+        turnSummary,
+        usage,
+      };
+    }
     case 'tool_calls':
       return {
         type: 'tool_calls',
@@ -358,6 +481,53 @@ export function parseStructuredAgentResponse(
   }
 }
 
+function graphModeInstruction(request: ModelRequest): string | undefined {
+  const graph = request.graph;
+  if (!graph) {
+    return [
+      'Graph mode is disabled for this task.',
+      'Available actions: async_work, final, needs_parent_action, request_capabilities, resolve_capability_request, spawn_subagents, tool_calls, wait_for_async_work.',
+    ].join(' ');
+  }
+  if (graph.mode === 'plan') {
+    return [
+      'You are in the reserved plan node.',
+      'Assess the Agent goal, current graph results, available node kinds, characters, tools, and capabilities.',
+      'Return set_graph with a complete acyclic work graph, or return final only when no graph exists for a trivial goal or every current graph node is completed or abandoned.',
+      'Only plan mode may create or replace the graph.',
+      'Every delegated Agent starts in its own plan node.',
+      'Available actions: set_graph, final, request_capabilities, resolve_capability_request, wait_for_async_work, needs_parent_action.',
+    ].join(' ');
+  }
+  if (graph.mode === 'execute') {
+    const nodeDefinition = graph.availableNodeKinds.find(
+      (definition) => definition.id === graph.activeNode?.kind,
+    );
+    return [
+      `You are executing work node ${graph.activeNode?.alias ?? 'unknown'} of kind ${graph.activeNode?.kind ?? 'unknown'}.`,
+      graph.activeNode?.objective,
+      graph.activeNode === undefined
+        ? undefined
+        : `Acceptance criteria: ${graph.activeNode.acceptanceCriteria.join('; ')}`,
+      nodeDefinition?.promptFragment,
+      nodeDefinition === undefined
+        ? undefined
+        : `Expected node output: ${nodeDefinition.outputContract}`,
+      'Use the same tools and capabilities owned by this Agent.',
+      'You cannot modify the graph in this mode.',
+      'Return complete_node when this node is finished, or request_replan when the graph must change.',
+      'Available actions: complete_node, request_replan, tool_calls, async_work with tool calls only, request_capabilities, resolve_capability_request, wait_for_async_work.',
+    ]
+      .filter((part): part is string => part !== undefined)
+      .join(' ');
+  }
+  return [
+    'The Agent is waiting for asynchronous graph work.',
+    'Do not replace the graph or declare completion while work is pending.',
+    'Available actions: wait_for_async_work and resolve_capability_request.',
+  ].join(' ');
+}
+
 function parseToolCalls(
   value: JsonValue | undefined,
 ): ToolCallRequest[] {
@@ -440,6 +610,97 @@ function parseChildren(
   });
 }
 
+function parseAgentWorkGraphProposal(
+  value: JsonValue | undefined,
+): AgentWorkGraphProposal {
+  const graph = requireObject(value, 'structured output.graph');
+  const rawNodes = graph['nodes'];
+  if (!Array.isArray(rawNodes) || rawNodes.length === 0) {
+    throw new Error(
+      'structured output.graph.nodes must be a non-empty array.',
+    );
+  }
+  const proposal: AgentWorkGraphProposal = {
+    goal: requireString(
+      graph['goal'],
+      'structured output.graph.goal',
+    ),
+    completionCriteria: requireStringArray(
+      graph['completionCriteria'],
+      'structured output.graph.completionCriteria',
+    ),
+    nodes: rawNodes.map((value, index) =>
+      parseAgentWorkNodeProposal(
+        value,
+        `structured output.graph.nodes[${index}]`,
+      ),
+    ),
+  };
+  validateAgentWorkGraphProposal(proposal);
+  return proposal;
+}
+
+function parseAgentWorkNodeProposal(
+  value: JsonValue,
+  path: string,
+): AgentWorkNodeProposal {
+  const node = requireObject(value, path);
+  const kind = requireString(node['kind'], `${path}.kind`);
+  if (
+    !AGENT_WORK_NODE_KINDS.includes(kind as AgentWorkNodeKind)
+  ) {
+    throw new Error(`${path}.kind is not supported: ${kind}`);
+  }
+  return {
+    alias: requireString(node['alias'], `${path}.alias`),
+    kind: kind as AgentWorkNodeKind,
+    objective: requireString(node['objective'], `${path}.objective`),
+    dependsOn: requireStringArray(
+      node['dependsOn'],
+      `${path}.dependsOn`,
+    ),
+    assignee: parseAgentWorkNodeAssignee(
+      node['assignee'],
+      `${path}.assignee`,
+    ),
+    acceptanceCriteria: requireStringArray(
+      node['acceptanceCriteria'],
+      `${path}.acceptanceCriteria`,
+    ),
+  };
+}
+
+function parseAgentWorkNodeAssignee(
+  value: JsonValue | undefined,
+  path: string,
+): AgentWorkNodeAssignee {
+  const assignee = requireObject(value, path);
+  const type = requireString(assignee['type'], `${path}.type`);
+  if (type === 'self') {
+    return { type };
+  }
+  if (type !== 'character') {
+    throw new Error(`${path}.type is not supported: ${type}`);
+  }
+  const rawCapabilities = assignee['requestedCapabilities'];
+  const requestedCapabilities =
+    rawCapabilities === undefined ||
+    (Array.isArray(rawCapabilities) && rawCapabilities.length === 0)
+      ? []
+      : parseCapabilityRequests(
+          rawCapabilities,
+          `${path}.requestedCapabilities`,
+        );
+  return {
+    type,
+    character: requireString(
+      assignee['character'],
+      `${path}.character`,
+    ),
+    requestedCapabilities,
+  };
+}
+
 function parseCapabilityRequests(
   value: JsonValue | undefined,
   path: string,
@@ -463,6 +724,19 @@ function parseCapabilityRequests(
       ...(reason === undefined ? {} : { reason }),
     };
   });
+}
+
+function requireStringArray(
+  value: JsonValue | undefined,
+  path: string,
+): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== 'string')
+  ) {
+    throw new Error(`${path} must be an array of strings.`);
+  }
+  return [...value] as string[];
 }
 
 function parseResourceScope(

@@ -8,6 +8,10 @@ import type {
   AsyncWorkResult,
 } from './async-work.js';
 import type { Termination } from './task-state.js';
+import type {
+  AgentWorkNodeKind,
+  AgentWorkNodeStatus,
+} from '../graph/agent-work-graph.js';
 
 /**
  * 一轮模型交互的精简摘要。
@@ -172,6 +176,28 @@ export type ToolCallRejectedContextItem = {
   requiredCapabilities?: CapabilityRequest[];
 };
 
+/** 模型提交的 Graph 动作被内核策略拒绝后的可恢复反馈。 */
+export type GraphActionRejectedContextItem = {
+  type: 'graph_action_rejected';
+  action: string;
+  message: string;
+};
+
+/** Graph 换版时保留的上一 revision 结果，避免已完成节点产出从模型上下文消失。 */
+export type WorkGraphRevisionContextItem = {
+  type: 'work_graph_revision';
+  revision: number;
+  goal: string;
+  completionCriteria: string[];
+  nodes: Array<{
+    alias: string;
+    kind: AgentWorkNodeKind;
+    status: AgentWorkNodeStatus;
+    result?: JsonValue;
+    error?: string;
+  }>;
+};
+
 /** CapabilityManager 向请求方投递的最终授权结果。 */
 export type CapabilityRequestResultContextItem = {
   type: 'capability_request_result';
@@ -195,10 +221,12 @@ export type ContextItem =
   | AsyncWorkUpdateContextItem
   | CapabilityRequestResultContextItem
   | ContextSummaryItem
+  | GraphActionRejectedContextItem
   | SubagentResultContextItem
   | SubagentSpawnRejectedContextItem
   | SystemContextItem
   | ToolCallContextItem
   | ToolCallRejectedContextItem
   | ToolResultContextItem
-  | UserContextItem;
+  | UserContextItem
+  | WorkGraphRevisionContextItem;

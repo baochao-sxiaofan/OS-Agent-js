@@ -15,7 +15,6 @@ import {
 const DEFAULT_BASE_URL =
   'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 128;
 
 export type GeminiPricing = {
   inputUsdPerMillionTokens: number;
@@ -46,7 +45,7 @@ type GeminiRequestBody = {
   }>;
   generationConfig: {
     temperature: number;
-    maxOutputTokens: number;
+    maxOutputTokens?: number;
     responseMimeType: 'application/json';
     responseJsonSchema: typeof AGENT_RESPONSE_JSON_SCHEMA;
   };
@@ -69,7 +68,7 @@ export class GeminiModelProvider implements ModelProvider {
   readonly #apiKey: string;
   readonly #model: string;
   readonly #baseUrl: string;
-  readonly #maxOutputTokens: number;
+  readonly #maxOutputTokens: number | undefined;
   readonly #pricing: GeminiPricing;
   readonly #fetch: typeof fetch;
 
@@ -86,8 +85,7 @@ export class GeminiModelProvider implements ModelProvider {
     this.#baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/u, '');
     this.contextWindowTokens =
       options.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
-    this.#maxOutputTokens =
-      options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+    this.#maxOutputTokens = options.maxOutputTokens;
     this.#pricing = options.pricing ?? {
       inputUsdPerMillionTokens: 0,
       outputUsdPerMillionTokens: 0,
@@ -100,10 +98,10 @@ export class GeminiModelProvider implements ModelProvider {
     const inputTokens = estimateTextTokens(this.buildPrompt(request));
     return {
       inputTokens,
-      maxOutputTokens: this.#maxOutputTokens,
+      maxOutputTokens: this.#maxOutputTokens ?? 0,
       estimatedCostUsd: calculateCost(
         inputTokens,
-        this.#maxOutputTokens,
+        this.#maxOutputTokens ?? 0,
         this.#pricing,
       ),
     };
@@ -151,7 +149,7 @@ export class GeminiModelProvider implements ModelProvider {
   }
 
   private buildRequestBody(request: ModelRequest): GeminiRequestBody {
-    return {
+    const body: GeminiRequestBody = {
       systemInstruction: {
         parts: [
           {
@@ -174,11 +172,14 @@ export class GeminiModelProvider implements ModelProvider {
       ],
       generationConfig: {
         temperature: 0,
-        maxOutputTokens: this.#maxOutputTokens,
         responseMimeType: 'application/json',
         responseJsonSchema: AGENT_RESPONSE_JSON_SCHEMA,
       },
     };
+    if (this.#maxOutputTokens !== undefined) {
+      body.generationConfig.maxOutputTokens = this.#maxOutputTokens;
+    }
+    return body;
   }
 
   private buildPrompt(request: ModelRequest): string {
@@ -192,6 +193,7 @@ export class GeminiModelProvider implements ModelProvider {
       context: request.context.map(serializeContextItemForModel),
       tools: request.tools,
       delegation: request.delegation,
+      ...(request.graph === undefined ? {} : { graph: request.graph }),
     };
     return JSON.stringify(prompt);
   }

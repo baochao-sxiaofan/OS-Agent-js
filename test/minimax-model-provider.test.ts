@@ -94,7 +94,7 @@ describe('MiniMaxModelProvider', () => {
       max_completion_tokens?: number;
       reasoning_split?: boolean;
       response_format?: unknown;
-      tool_choice?: string;
+      tool_choice?: unknown;
       tools?: Array<{
         function?: {
           name?: string;
@@ -107,7 +107,10 @@ describe('MiniMaxModelProvider', () => {
     expect(body).toMatchObject({
       max_completion_tokens: 4_096,
       reasoning_split: true,
-      tool_choice: 'auto',
+      tool_choice: {
+        type: 'function',
+        function: { name: 'submit_agent_response' },
+      },
     });
     expect(body).not.toHaveProperty('response_format');
     expect(body.tools?.[0]?.function?.name).toBe(
@@ -129,6 +132,39 @@ describe('MiniMaxModelProvider', () => {
 \`\`\`json
 ${structuredOutput}
 \`\`\``,
+            },
+          },
+        ],
+      }),
+    );
+    const provider = new MiniMaxModelProvider({
+      apiKey: 'test-key',
+      model: 'MiniMax-M3',
+      fetchImplementation,
+    });
+
+    await expect(
+      provider.invoke(request, new AbortController().signal),
+    ).resolves.toMatchObject({
+      type: 'final',
+      output: 'pong',
+    });
+  });
+
+  it('recovers the action object from content wrapped in prose', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        choices: [
+          {
+            finish_reason: 'stop',
+            message: {
+              content: `Model here is the action you requested:\n${structuredOutput}\nLet me know if you need more.`,
+              reasoning_details: [
+                {
+                  type: 'reasoning.text',
+                  text: 'Private model reasoning.',
+                },
+              ],
             },
           },
         ],
@@ -180,18 +216,17 @@ ${structuredOutput}
     );
   });
 
-  it('reserves enough completion tokens in the desktop registry', () => {
+  it('does not inject a desktop completion-token cap by default', () => {
     const provider = createConfiguredProvider(
       {
         providerId: 'minimax',
         apiKey: 'test-key',
         modelId: 'MiniMax-M3',
       },
-      192,
     );
 
     expect(provider).toBeInstanceOf(MiniMaxModelProvider);
-    expect(provider.estimate(request).maxOutputTokens).toBe(4_096);
+    expect(provider.estimate(request).maxOutputTokens).toBe(0);
   });
 });
 

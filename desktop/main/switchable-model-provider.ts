@@ -6,7 +6,9 @@ import type {
 } from '../../src/index.js';
 
 export class SwitchableModelProvider implements ModelProvider {
-  readonly contextWindowTokens = 128_000;
+  // 桌面运行时不再用固定输入 token 预算提前压缩上下文。
+  // Provider/API 自身仍可能拒绝超过真实上下文窗口的请求。
+  readonly contextWindowTokens = Number.MAX_SAFE_INTEGER;
   #delegate: ModelProvider;
 
   constructor(delegate: ModelProvider) {

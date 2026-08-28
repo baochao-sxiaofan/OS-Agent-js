@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`2.0.0`
+当前版本：`2.2.0`
 
 ## 核心状态模型
 
@@ -63,6 +63,40 @@ failed               # 执行失败
 cancelled            # 被取消
 needs_parent_action  # 需要父任务先完成某项前置工作
 ```
+
+## AI Graph 协作模式
+
+桌面 Runtime 使用 `ai_graph` 协作模式。每个 Root 和子 Agent 创建后都先进入由 OS
+保留的 `plan` 控制节点，由模型根据自己的局部目标生成工作图；工作图不是程序员预先
+写死的业务流程。Core 仍保留 `legacy` 模式，供现有 API、基准和迁移场景使用。
+
+```text
+START -> plan -> AI 生成的 Work Graph -> plan -> END
+                    ^                    |
+                    +------ 换版 --------+
+```
+
+首批可选工作节点为 `inspect`、`research`、`design`、`implement`、`integrate`、
+`verify` 和 `review`。`plan` 不由模型放进图中，只有在该控制节点中模型才能提交
+`set_graph` 或最终 `final`；普通节点只能执行工具、完成当前节点，或通过
+`request_replan` 请求回到 plan。
+
+模型只定义节点目标、依赖、验收条件和 assignee。OS 负责校验 DAG、Character、
+Capability 委派和资源上限，自动解锁依赖，并把 Character 节点转换成子 Agent。
+每个子 Agent 仍从自己的 plan 开始生成局部图。工作图作为 TCB Work Table 的一部分
+进入快照和事件历史，换版时上一 revision 的节点结果会进入上下文。
+
+`NodeKind` 与运行状态相互独立：同一个 `design`、`implement` 或 `review` 节点都可能
+处于 `ready`、`running`、`blocked`、`completed` 或 `failed`。Tool 可见性和
+Capability 始终以 Agent 为最小单位，不因 NodeKind 改变；NodeKind 只提供当前职责、
+Prompt 和输出契约。节点等待 Tool、子 Agent、Capability 或人工结果时，继续复用现有
+Completion Mailbox 和任务状态机。
+
+模型调用次数只作为失控熔断器：桌面 Root 上限为 `4096`，AI Graph 创建的子 Agent
+上限为 `1024`。桌面默认不再设置每轮输出 token 上限、输入上下文预算、token/min
+上限或费用上限；正常资源控制由并发限制和人工取消完成，不再要求复杂开发任务在少数
+几个模型回合内结束。Provider 或模型 API 自身仍可能拒绝超过真实上下文窗口或服务端
+输出限制的请求。
 
 ## 增量异步工作任务板
 
@@ -214,7 +248,9 @@ Character 是内核级角色策略包，而不只是 Prompt。每个角色同时
 - `code_auditor`：全工作区只读，发现问题上报父 Agent，不能写文件；
 - `researcher`：联网检索资料并写入指定笔记目录，不改源码。
 
-父 Agent 在 `spawn_subagents` 时可为子 Agent 指定 `character`，但内核强制校验：
+legacy 模式下父 Agent 可通过 `spawn_subagents` 指定 `character`；AI Graph 模式下，
+模型在 plan 中为 Graph 节点指定 Character，由 OS 在依赖满足后创建子 Agent。两条
+路径都会强制校验：
 角色必须已注册、必须在父角色的可创建名单内、请求的能力必须落在该角色能力上限内，
 再叠加原有的委派衰减和 workspace 边界。实际授权 = 父可转授范围 ∩ 角色能力上限 ∩
 本次 assignment 资源范围。工具可见性只影响“看得见”，能否执行仍由 CapabilityManager
@@ -286,6 +322,8 @@ Tool 调用前和实际执行前都会校验 Grant。缺权、工具不存在或
 - Capability 请求的阻塞、审批、唤醒、快照与审计事件
 - Character 注册表、角色 Prompt、工具可见性、能力上限与子角色约束
 - `developer`、`code_auditor`、`researcher` 和根 `coordinator`
+- 每个 Agent 独立生成局部 DAG 的 AI Graph 协作模式
+- OS 托管的 plan 控制节点、依赖解锁、节点阻塞/恢复与 Graph revision
 - bootstrap 工作区文件工具与通用 `McpToolAdapter`
 - mock HTTP Provider 到真实文件写入的完整工具调用闭环
 - 工具阻塞与事件唤醒
@@ -302,6 +340,7 @@ src/
 ├── capability/   # 资源范围、Grant、审批策略和逐级授权
 ├── character/    # Character 定义、注册表与内置角色
 ├── context/      # 上下文窗口策略与二次压缩 Adapter
+├── graph/        # Agent 自主工作图、NodeKind 与结构校验
 ├── kernel/       # 状态、任务控制块、上下文和事件
 ├── model/        # Provider 接口与 Fake Provider
 ├── persistence/  # 任务快照和事件存储
@@ -378,7 +417,7 @@ npm run desktop:build
 ```
 
 推送到 `main` 后，`.github/workflows/windows-desktop.yml` 会在 Windows Runner 上
-执行检查和测试，并生成 `OS-Agent-Setup-2.0.0-x64.exe`。也可以在 GitHub Actions
+执行检查和测试，并生成 `OS-Agent-Setup-2.2.0-x64.exe`。也可以在 GitHub Actions
 页面手动触发该工作流。
 
 ### 最小 Gemini 网络验证

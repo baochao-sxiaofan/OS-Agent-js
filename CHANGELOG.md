@@ -6,6 +6,36 @@
 
 暂无。
 
+## 2.2.0 - 2026-08-28
+
+### AI Graph
+
+- 新增 `ai_graph` 协作模式。每个 Root 和子 Agent 从 OS 保留的 plan 控制节点开始，
+  由模型提交局部 DAG，OS 负责结构校验、持久化、依赖解锁和节点调度。
+- 新增 `inspect`、`research`、`design`、`implement`、`integrate`、`verify`、
+  `review` NodeKind，以及 `set_graph`、`complete_node`、`request_replan`
+  结构化响应。
+- Character assignee 节点由 OS 转换成子 Agent；子 Agent 独立规划自己的局部 Graph，
+  并通过现有 Work Table 和 Completion Mailbox 回传结果。
+- Graph 节点状态与 Agent 的 `READY/RUNNING/BLOCKED/TERMINATED` 状态正交。节点
+  等待 Tool、Capability 或子 Agent 时可以进入 `blocked`，恢复后继续原节点。
+- Tool 可见性和 Capability 继续以 Agent 为最小单位，不随 NodeKind 改变。
+- Work Graph 进入 TCB 快照和事件历史；换版前的节点结果进入上下文，模型侧不暴露
+  子任务内部 ID。
+- 桌面 Inspector 展示 Graph revision、当前模式和节点状态。
+- 桌面 Root 模型调用上限调整为高位熔断值 `4096`，AI Graph 子 Agent 使用 `1024`；
+  桌面默认不再设置每轮输出 token 上限、输入上下文预算、token/min 上限或费用上限。
+- 新增 Graph DAG 校验、快照恢复、self 节点工具阻塞、递归子 Agent Graph、阶段越权
+  拒绝和内部 Task ID 脱敏测试。
+
+### 修复
+
+- 修复 `ai_graph` 模式下子 Agent 向父 Agent 申请 capability 时，父 Agent 不会
+  运行模型处理该申请的问题。此前父 Agent 在 Graph `waiting` 阶段会把已投递的
+  capability blocker 误判为“仍在等待子任务”而再次静默阻塞，导致子 Agent 永远拿
+  不到授权。现在只要 blocker 已投递到父 Agent 上下文，OS 就会让父 Agent 运行
+  模型作出授权决定，随后子 Agent 恢复 `RUNNING` 并继续执行，直到真正返回终态。
+
 ## 2.0.0 - 2026-08-27
 
 ### Character 角色

@@ -84,7 +84,11 @@ export function AgentNodeCard({
         <>
           <p className="agent-node__goal">{agent.goal}</p>
           <div className="agent-node__footer">
-            <span>{agent.stateLabel}</span>
+            <span>
+              {agent.workGraph?.currentNodeAlias ??
+                agent.workGraph?.mode ??
+                agent.stateLabel}
+            </span>
             <span>
               {agent.modelAttempts}/{agent.maxModelAttempts}
             </span>

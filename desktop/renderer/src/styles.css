@@ -1278,11 +1278,51 @@ textarea:focus-visible {
 }
 
 .inspector-section h3 {
+  display: flex;
   margin: 0 0 11px;
+  align-items: center;
+  gap: 6px;
   color: #777772;
   font-size: 10px;
   font-weight: 750;
   text-transform: uppercase;
+}
+
+.work-graph-list {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.work-graph-list li {
+  min-width: 0;
+  border-left: 2px solid #b7b7b0;
+  padding-left: 10px;
+}
+
+.work-graph-list strong,
+.work-graph-list span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.work-graph-list strong {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
+
+.work-graph-list span {
+  margin-top: 3px;
+  color: #777772;
+  font-size: 10px;
+}
+
+.work-graph-list p {
+  margin: 5px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .inspector-goal {

@@ -30,8 +30,6 @@ type ProviderEndpoint = {
   maxTokensField: 'max_completion_tokens' | 'max_tokens';
 };
 
-const MINIMAX_MIN_OUTPUT_TOKENS = 4_096;
-
 export async function discoverProviderModels(
   credentials: ProviderCredentials,
 ): Promise<ModelDescriptor[]> {
@@ -54,29 +52,32 @@ export async function discoverProviderModels(
 
 export function createConfiguredProvider(
   config: ConfiguredProvider,
-  maxOutputTokens = 640,
+  maxOutputTokens?: number,
 ): ModelProvider {
   switch (config.providerId) {
     case 'gemini':
       return new GeminiModelProvider({
         apiKey: config.apiKey,
         model: config.modelId,
-        maxOutputTokens,
+        ...(maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens }),
       });
     case 'anthropic':
       return new AnthropicModelProvider({
         apiKey: config.apiKey,
         model: config.modelId,
-        maxOutputTokens,
+        ...(maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens }),
       });
     case 'minimax':
       return new MiniMaxModelProvider({
         apiKey: config.apiKey,
         model: config.modelId,
-        maxOutputTokens: Math.max(
-          maxOutputTokens,
-          MINIMAX_MIN_OUTPUT_TOKENS,
-        ),
+        ...(maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens }),
       });
     default: {
       const endpoint = providerEndpoint(config);
@@ -87,7 +88,9 @@ export function createConfiguredProvider(
         model: config.modelId,
         apiKeyHeader: endpoint.apiKeyHeader,
         maxTokensField: endpoint.maxTokensField,
-        maxOutputTokens,
+        ...(maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens }),
       });
     }
   }

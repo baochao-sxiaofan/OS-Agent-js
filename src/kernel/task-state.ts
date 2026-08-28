@@ -6,6 +6,9 @@ export type ReadyReason =
   | 'submitted'
   | 'capacity_available'
   | 'context_compacted'
+  | 'graph_node_ready'
+  | 'graph_replan'
+  | 'graph_updated'
   | 'model_retry'
   | 'subagent_result_available'
   | 'tool_call_rejected'
@@ -50,7 +53,7 @@ export type RunningState = {
   enteredAt: number;
   providerId: string;
   requestAttempt: number;
-  operation?: 'context_compaction' | 'model';
+  operation?: 'context_compaction' | 'graph_dispatch' | 'model';
 };
 
 export type BlockedState = {

@@ -10,6 +10,18 @@ import type {
 import { CapabilityManager } from '../capability/capability-manager.js';
 import type { ModelUsage } from '../model/model-provider.js';
 import type { JsonValue } from '../types/json.js';
+import {
+  agentWorkGraphMode,
+  createAgentWorkGraph,
+  isAgentWorkGraphComplete,
+  readyAgentWorkNodes,
+  validateAgentWorkGraph,
+  type AgentWorkGraph,
+  type AgentWorkGraphMode,
+  type AgentWorkGraphProposal,
+  type AgentWorkNode,
+  type AgentWorkNodeStatus,
+} from '../graph/agent-work-graph.js';
 import type {
   AsyncWorkGeneration,
   AsyncWorkRecord,
@@ -136,6 +148,8 @@ export type TaskSnapshot = {
   context: ContextItem[];
   /** 持久化的异步工作批次和 Work Table。 */
   asyncWorkGenerations?: AsyncWorkGeneration[];
+  /** 当前 Agent 自主规划并由内核管理的局部工作图。 */
+  workGraph?: AgentWorkGraph;
   /** 与完整上下文分通道保存的摘要记录。 */
   contextSummaries?: ContextSummaryRecord[];
   /** 下一轮摘要尚未覆盖的完整上下文起始索引。 */
@@ -187,6 +201,8 @@ export class TaskControlBlock {
   #context: ContextItem[];
   /** 按 generation 分组的持久化异步 Work Table。 */
   #asyncWorkGenerations: AsyncWorkGeneration[];
+  /** 当前 Agent 的局部工作图；未生成时表示处于初始 plan。 */
+  #workGraph: AgentWorkGraph | undefined;
   /** 与完整上下文分开保存的摘要通道。 */
   #contextSummaries: ContextSummaryRecord[];
   /** 下一条单轮摘要应覆盖的完整上下文起始位置。 */
@@ -257,6 +273,13 @@ export class TaskControlBlock {
     this.#asyncWorkGenerations = structuredClone(
       snapshot.asyncWorkGenerations ?? [],
     );
+    if (snapshot.workGraph !== undefined) {
+      validateAgentWorkGraph(snapshot.workGraph);
+    }
+    this.#workGraph =
+      snapshot.workGraph === undefined
+        ? undefined
+        : structuredClone(snapshot.workGraph);
     this.#contextSummaries = structuredClone(
       snapshot.contextSummaries ?? [],
     );
@@ -383,6 +406,235 @@ export class TaskControlBlock {
       (candidate) => candidate.closedAt === undefined,
     );
     return generation ? structuredClone(generation) : undefined;
+  }
+
+  /** 获取当前局部工作图的只读副本。 */
+  get workGraph(): AgentWorkGraph | undefined {
+    return this.#workGraph === undefined
+      ? undefined
+      : structuredClone(this.#workGraph);
+  }
+
+  /** 获取当前 Graph 控制模式。 */
+  get workGraphMode(): AgentWorkGraphMode {
+    return agentWorkGraphMode(this.#workGraph);
+  }
+
+  /** 获取依赖已经满足、可由 OS 调度的节点。 */
+  readyWorkGraphNodes(): AgentWorkNode[] {
+    return this.#workGraph === undefined
+      ? []
+      : readyAgentWorkNodes(this.#workGraph);
+  }
+
+  /** 判断当前工作图是否已完成所有必要节点。 */
+  isWorkGraphComplete(): boolean {
+    return (
+      this.#workGraph !== undefined &&
+      isAgentWorkGraphComplete(this.#workGraph)
+    );
+  }
+
+  /** 在 plan 阶段安装新 revision；Graph 是 TCB Work Table 的一部分。 */
+  replaceWorkGraph(
+    proposal: AgentWorkGraphProposal,
+    now: number,
+  ): void {
+    if (this.workGraphMode !== 'plan') {
+      throw new Error('Agent work graph can only be replaced in plan mode.');
+    }
+    if (this.#workGraph !== undefined) {
+      this.#context.push({
+        type: 'work_graph_revision',
+        revision: this.#workGraph.revision,
+        goal: this.#workGraph.goal,
+        completionCriteria: [
+          ...this.#workGraph.completionCriteria,
+        ],
+        nodes: this.#workGraph.nodes.map((node) => ({
+          alias: node.alias,
+          kind: node.kind,
+          status: node.status,
+          ...(node.result === undefined
+            ? {}
+            : { result: structuredClone(node.result) }),
+          ...(node.error === undefined ? {} : { error: node.error }),
+        })),
+      });
+    }
+    const revision = (this.#workGraph?.revision ?? 0) + 1;
+    this.#workGraph = createAgentWorkGraph(proposal, revision, now);
+    this.recordEvent({
+      type: 'work_graph_replaced',
+      graph: structuredClone(this.#workGraph),
+    });
+  }
+
+  /** 激活一个由当前 Agent 自己执行的 ready 节点。 */
+  activateSelfWorkGraphNode(alias: string, now: number): void {
+    const graph = this.requireWorkGraph();
+    if (graph.currentNodeAlias !== undefined) {
+      throw new Error(
+        `Agent work graph already has an active self node: ${graph.currentNodeAlias}`,
+      );
+    }
+    const node = this.requireWorkGraphNode(alias);
+    if (node.assignee.type !== 'self') {
+      throw new Error(`Agent work node is not assigned to self: ${alias}`);
+    }
+    this.assertWorkGraphNodeReady(node);
+    graph.currentNodeAlias = alias;
+    node.startedAt ??= now;
+    this.transitionWorkGraphNode(node, 'ready', 'node_ready');
+    graph.updatedAt = now;
+  }
+
+  /** 把 Character 节点绑定到内核创建的子 Agent，并进入等待态。 */
+  bindDelegatedWorkGraphNode(
+    alias: string,
+    childTaskId: string,
+    now: number,
+  ): void {
+    const graph = this.requireWorkGraph();
+    const node = this.requireWorkGraphNode(alias);
+    if (node.assignee.type !== 'character') {
+      throw new Error(
+        `Agent work node is not assigned to a character: ${alias}`,
+      );
+    }
+    this.assertWorkGraphNodeReady(node);
+    node.childTaskId = childTaskId;
+    node.startedAt ??= now;
+    node.blockedReason = 'waiting_for_subagent';
+    node.waitingFor = [childTaskId];
+    this.transitionWorkGraphNode(
+      node,
+      'blocked',
+      'delegated_to_subagent',
+    );
+    graph.updatedAt = now;
+  }
+
+  /** 完成当前 self 节点，并回到 plan/调度控制面。 */
+  completeCurrentWorkGraphNode(output: JsonValue, now: number): void {
+    const graph = this.requireWorkGraph();
+    const alias = graph.currentNodeAlias;
+    if (alias === undefined) {
+      throw new Error('Agent work graph has no active self node.');
+    }
+    const node = this.requireWorkGraphNode(alias);
+    node.result = structuredClone(output);
+    node.completedAt = now;
+    delete node.blockedReason;
+    delete node.waitingFor;
+    this.transitionWorkGraphNode(node, 'completed', 'node_completed');
+    delete graph.currentNodeAlias;
+    graph.updatedAt = now;
+  }
+
+  /** 当前节点发现计划不再适用时，请求回到 plan 修订工作图。 */
+  requestCurrentWorkGraphReplan(
+    reason: string,
+    now: number,
+    partialOutput?: JsonValue,
+  ): void {
+    const graph = this.requireWorkGraph();
+    const alias = graph.currentNodeAlias;
+    if (alias === undefined) {
+      throw new Error('Agent work graph has no active self node.');
+    }
+    const node = this.requireWorkGraphNode(alias);
+    node.blockedReason = 'needs_replan';
+    node.error = reason;
+    if (partialOutput !== undefined) {
+      node.result = structuredClone(partialOutput);
+    }
+    node.completedAt = now;
+    this.transitionWorkGraphNode(node, 'failed', 'node_needs_replan');
+    delete graph.currentNodeAlias;
+    this.transitionWorkGraphPhase(
+      graph,
+      'planning',
+      'node_needs_replan',
+    );
+    graph.updatedAt = now;
+  }
+
+  /** Graph 无可运行工作时，由 OS 把控制权交还给保留的 plan 节点。 */
+  enterWorkGraphPlan(now: number): void {
+    const graph = this.requireWorkGraph();
+    if (graph.currentNodeAlias !== undefined) {
+      throw new Error(
+        'Cannot enter plan while a self graph node is active.',
+      );
+    }
+    this.transitionWorkGraphPhase(
+      graph,
+      'planning',
+      'graph_quiescent',
+    );
+    graph.updatedAt = now;
+  }
+
+  /** 将子 Agent 终态映射回其 Graph 节点。 */
+  completeDelegatedWorkGraphNode(
+    childTaskId: string,
+    termination: Termination,
+    now: number,
+  ): void {
+    const graph = this.#workGraph;
+    if (!graph) {
+      return;
+    }
+    const node = graph.nodes.find(
+      (candidate) => candidate.childTaskId === childTaskId,
+    );
+    if (!node || node.status !== 'blocked') {
+      return;
+    }
+    node.completedAt = now;
+    node.result = structuredClone(termination);
+    delete node.waitingFor;
+    if (termination.kind === 'completed') {
+      delete node.blockedReason;
+      this.transitionWorkGraphNode(
+        node,
+        'completed',
+        'subagent_completed',
+      );
+    } else {
+      node.blockedReason = 'subagent_failed';
+      node.error =
+        termination.kind === 'failed'
+          ? termination.error
+          : termination.kind === 'cancelled'
+            ? termination.reason
+            : termination.requiredWork;
+      this.transitionWorkGraphNode(node, 'failed', 'subagent_failed');
+    }
+    graph.updatedAt = now;
+  }
+
+  /** 在调度前置校验或发送失败时，将尚未启动的节点转为失败并交回 plan。 */
+  failWorkGraphNode(alias: string, error: string, now: number): void {
+    const graph = this.requireWorkGraph();
+    const node = this.requireWorkGraphNode(alias);
+    if (
+      node.status === 'completed' ||
+      node.status === 'abandoned' ||
+      node.status === 'failed'
+    ) {
+      return;
+    }
+    node.completedAt = now;
+    node.error = error;
+    node.blockedReason = 'dispatch_failed';
+    delete node.waitingFor;
+    this.transitionWorkGraphNode(node, 'failed', 'node_dispatch_failed');
+    if (graph.currentNodeAlias === alias) {
+      delete graph.currentNodeAlias;
+    }
+    graph.updatedAt = now;
   }
 
   /** 获取已经生成的上下文摘要记录。 */
@@ -645,6 +897,7 @@ export class TaskControlBlock {
     assertTaskTransition(this.#state, next);
     const previousStatus = this.#state.status;
     this.#state = structuredClone(next);
+    this.syncCurrentWorkGraphNode(next, reason);
     this.#updatedAt = next.enteredAt;
     this.recordEvent({
       type: 'state_transitioned',
@@ -863,6 +1116,23 @@ export class TaskControlBlock {
   }
 
   /**
+   * 是否存在已投递到本任务上下文、但仍在等待本 Agent 授权决定的 capability blocker。
+   *
+   * 只有 blocker 已经通过 async_work_update 进入上下文（deliveredAt 已设置），模型
+   * 才能在本轮看到并作出授权决定；据此内核才应让父 Agent 运行模型而非再次阻塞。
+   */
+  hasDeliveredCapabilityBlockerAwaitingDecision(): boolean {
+    return (
+      this.activeAsyncWorkGeneration?.work.some(
+        (work) =>
+          work.status === 'waiting_for_capability' &&
+          work.blocker !== undefined &&
+          work.blocker.deliveredAt !== undefined,
+      ) ?? false
+    );
+  }
+
+  /**
    * 将尚未处理但已投递过的 blocker 重新放回 Completion Mailbox。
    *
    * 父 Agent 一轮只能处理一个授权决定时，其余 blocker 会重新走统一批处理窗口。
@@ -974,6 +1244,9 @@ export class TaskControlBlock {
         workId: work.workId,
         kind: work.kind,
         label: work.label,
+        ...(work.graphNodeAlias === undefined
+          ? {}
+          : { graphNodeAlias: work.graphNodeAlias }),
         status: work.status as AsyncWorkTerminalStatus,
         completedAt: work.completedAt ?? now,
         ...(work.output === undefined
@@ -990,6 +1263,9 @@ export class TaskControlBlock {
           workId: work.workId,
           kind: work.kind,
           label: work.label,
+          ...(work.graphNodeAlias === undefined
+            ? {}
+            : { graphNodeAlias: work.graphNodeAlias }),
           startedAt: work.startedAt,
           status:
             work.status === 'waiting_for_capability'
@@ -1110,10 +1386,13 @@ export class TaskControlBlock {
   recordModelResponse(
     responseType:
       | 'async_work'
+      | 'complete_node'
       | 'final'
       | 'needs_parent_action'
+      | 'request_replan'
       | 'request_capabilities'
       | 'resolve_capability_request'
+      | 'set_graph'
       | 'spawn_subagents'
       | 'tool_calls'
       | 'wait_for_async_work',
@@ -1201,6 +1480,9 @@ export class TaskControlBlock {
       capabilityRequests: structuredClone(this.#capabilityRequests),
       context: structuredClone(this.#context),
       asyncWorkGenerations: structuredClone(this.#asyncWorkGenerations),
+      ...(this.#workGraph === undefined
+        ? {}
+        : { workGraph: structuredClone(this.#workGraph) }),
       contextSummaries: structuredClone(this.#contextSummaries),
       nextContextSummaryStartIndex: this.#nextContextSummaryStartIndex,
       state: structuredClone(this.#state),
@@ -1330,6 +1612,104 @@ export class TaskControlBlock {
       sourceEndIndex,
       summary: structuredClone(summary),
     });
+  }
+
+  private requireWorkGraph(): AgentWorkGraph {
+    if (!this.#workGraph) {
+      throw new Error('Agent work graph has not been created.');
+    }
+    return this.#workGraph;
+  }
+
+  private requireWorkGraphNode(alias: string): AgentWorkNode {
+    const node = this.requireWorkGraph().nodes.find(
+      (candidate) => candidate.alias === alias,
+    );
+    if (!node) {
+      throw new Error(`Agent work node is not registered: ${alias}`);
+    }
+    return node;
+  }
+
+  private assertWorkGraphNodeReady(node: AgentWorkNode): void {
+    const ready = this.readyWorkGraphNodes().some(
+      (candidate) => candidate.alias === node.alias,
+    );
+    if (!ready) {
+      throw new Error(`Agent work node is not ready: ${node.alias}`);
+    }
+  }
+
+  private transitionWorkGraphNode(
+    node: AgentWorkNode,
+    status: AgentWorkNodeStatus,
+    reason: string,
+  ): void {
+    const previous = node.status;
+    node.status = status;
+    if (previous === status) {
+      return;
+    }
+    this.recordEvent({
+      type: 'work_graph_node_transitioned',
+      nodeAlias: node.alias,
+      from: previous,
+      to: status,
+      reason,
+    });
+  }
+
+  private transitionWorkGraphPhase(
+    graph: AgentWorkGraph,
+    phase: AgentWorkGraph['phase'],
+    reason: string,
+  ): void {
+    const previous = graph.phase;
+    graph.phase = phase;
+    if (previous === phase) {
+      return;
+    }
+    this.recordEvent({
+      type: 'work_graph_phase_changed',
+      revision: graph.revision,
+      from: previous,
+      to: phase,
+      reason,
+    });
+  }
+
+  private syncCurrentWorkGraphNode(
+    state: TaskState,
+    reason: string,
+  ): void {
+    const alias = this.#workGraph?.currentNodeAlias;
+    if (!alias) {
+      return;
+    }
+    const node = this.requireWorkGraphNode(alias);
+    switch (state.status) {
+      case 'READY':
+        this.transitionWorkGraphNode(node, 'ready', reason);
+        delete node.blockedReason;
+        delete node.waitingFor;
+        return;
+      case 'RUNNING':
+        node.startedAt ??= state.enteredAt;
+        this.transitionWorkGraphNode(node, 'running', reason);
+        return;
+      case 'BLOCKED':
+        node.blockedReason = state.reason;
+        node.waitingFor = [...state.waitingFor];
+        this.transitionWorkGraphNode(node, 'blocked', reason);
+        return;
+      case 'TERMINATED':
+        if (node.status !== 'completed') {
+          node.completedAt = state.enteredAt;
+          node.error = `Agent terminated with ${state.termination.kind}.`;
+          this.transitionWorkGraphNode(node, 'failed', reason);
+        }
+        return;
+    }
   }
 
   /**

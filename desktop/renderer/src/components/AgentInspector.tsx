@@ -5,6 +5,7 @@ import {
   Coins,
   Hash,
   Layers3,
+  Workflow,
   X,
   Zap,
 } from 'lucide-react';
@@ -106,6 +107,32 @@ export function AgentInspector({
             </div>
           </dl>
         </section>
+
+        {agent.workGraph && (
+          <section className="inspector-section">
+            <h3>
+              <Workflow size={14} />
+              Work Graph R{agent.workGraph.revision}
+            </h3>
+            <p className="inspector-state-detail">
+              {agent.workGraph.mode}
+              {agent.workGraph.currentNodeAlias
+                ? ` · ${agent.workGraph.currentNodeAlias}`
+                : ''}
+            </p>
+            <ol className="work-graph-list">
+              {agent.workGraph.nodes.map((node) => (
+                <li key={node.alias}>
+                  <strong>{node.alias}</strong>
+                  <span>
+                    {node.kind} · {node.assignee} · {node.status}
+                  </span>
+                  <p>{node.objective}</p>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
 
         <section className="inspector-section inspector-timeline">
           <h3>事件记录</h3>

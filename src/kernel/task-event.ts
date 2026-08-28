@@ -16,6 +16,10 @@ import type {
   ContextSummaryKind,
   TurnSummary,
 } from './context.js';
+import type {
+  AgentWorkGraph,
+  AgentWorkNodeStatus,
+} from '../graph/agent-work-graph.js';
 import type { TaskState, TaskStatus, Termination } from './task-state.js';
 
 type TaskEventBase = {
@@ -48,14 +52,38 @@ export type ModelResponseRecordedEvent = TaskEventBase & {
   type: 'model_response_recorded';
   responseType:
     | 'async_work'
+    | 'complete_node'
     | 'final'
     | 'needs_parent_action'
+    | 'request_replan'
     | 'request_capabilities'
     | 'resolve_capability_request'
+    | 'set_graph'
     | 'spawn_subagents'
     | 'tool_calls'
     | 'wait_for_async_work';
   usage: ModelUsage;
+};
+
+export type WorkGraphReplacedEvent = TaskEventBase & {
+  type: 'work_graph_replaced';
+  graph: AgentWorkGraph;
+};
+
+export type WorkGraphNodeTransitionedEvent = TaskEventBase & {
+  type: 'work_graph_node_transitioned';
+  nodeAlias: string;
+  from: AgentWorkNodeStatus;
+  to: AgentWorkNodeStatus;
+  reason: string;
+};
+
+export type WorkGraphPhaseChangedEvent = TaskEventBase & {
+  type: 'work_graph_phase_changed';
+  revision: number;
+  from: 'executing' | 'planning';
+  to: 'executing' | 'planning';
+  reason: string;
 };
 
 export type AsyncWorkRegisteredEvent = TaskEventBase & {
@@ -198,4 +226,7 @@ export type TaskEvent =
   | TaskCreatedEvent
   | TaskTerminatedEvent
   | ToolCallRecordedEvent
-  | ToolResultRecordedEvent;
+  | ToolResultRecordedEvent
+  | WorkGraphNodeTransitionedEvent
+  | WorkGraphPhaseChangedEvent
+  | WorkGraphReplacedEvent;

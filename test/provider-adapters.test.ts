@@ -100,8 +100,10 @@ describe('provider adapters', () => {
       'secret-test-key',
     );
     const body = JSON.parse(String(init?.body)) as {
+      max_completion_tokens?: number;
       messages?: Array<{ content?: string; role?: string }>;
     };
+    expect(body).not.toHaveProperty('max_completion_tokens');
     const modelInput = JSON.parse(
       body.messages?.[1]?.content ?? '{}',
     ) as {

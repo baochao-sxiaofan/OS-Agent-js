@@ -131,10 +131,21 @@ describe('GeminiModelProvider', () => {
     expect(
       body.generationConfig?.responseJsonSchema?.properties?.action
         ?.enum,
-    ).toEqual(expect.arrayContaining(['tool_calls', 'async_work']));
+    ).toEqual(
+      expect.arrayContaining([
+        'tool_calls',
+        'async_work',
+        'set_graph',
+        'complete_node',
+        'request_replan',
+      ]),
+    );
     expect(
       body.generationConfig?.responseJsonSchema?.properties,
     ).toHaveProperty('calls');
+    expect(
+      body.generationConfig?.responseJsonSchema?.properties,
+    ).toHaveProperty('graph');
     expect(
       body.generationConfig?.responseJsonSchema?.properties?.children
         ?.items?.properties,

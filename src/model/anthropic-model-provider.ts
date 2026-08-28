@@ -12,6 +12,8 @@ import {
   serializeContextItemForModel,
 } from './structured-agent-response.js';
 
+const DEFAULT_MAX_OUTPUT_TOKENS = 64_000;
+
 export type AnthropicModelProviderOptions = {
   apiKey: string;
   model: string;
@@ -53,7 +55,8 @@ export class AnthropicModelProvider implements ModelProvider {
     this.#baseUrl = (
       options.baseUrl ?? 'https://api.anthropic.com'
     ).replace(/\/+$/u, '');
-    this.#maxOutputTokens = options.maxOutputTokens ?? 640;
+    this.#maxOutputTokens =
+      options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     this.#fetch = options.fetchImplementation ?? globalThis.fetch;
     this.contextWindowTokens = options.contextWindowTokens ?? 200_000;
     this.id = `anthropic:${this.#model}`;
@@ -98,6 +101,9 @@ export class AnthropicModelProvider implements ModelProvider {
               context: request.context.map(serializeContextItemForModel),
               tools: request.tools,
               delegation: request.delegation,
+              ...(request.graph === undefined
+                ? {}
+                : { graph: request.graph }),
             }),
           },
         ],

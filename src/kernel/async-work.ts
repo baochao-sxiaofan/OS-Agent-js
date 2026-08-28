@@ -28,6 +28,7 @@ export type AsyncWorkRegistration = {
   workId: string;
   kind: AsyncWorkKind;
   label: string;
+  graphNodeAlias?: string;
   childTaskId?: string;
   toolName?: string;
 };
@@ -63,6 +64,7 @@ export type AsyncWorkResult = {
   workId: string;
   kind: AsyncWorkKind;
   label: string;
+  graphNodeAlias?: string;
   status: AsyncWorkTerminalStatus;
   completedAt: number;
   output?: JsonValue;
@@ -74,6 +76,7 @@ export type AsyncWorkPending = {
   workId: string;
   kind: AsyncWorkKind;
   label: string;
+  graphNodeAlias?: string;
   startedAt: number;
   status?: 'running' | 'waiting_for_capability';
   blocker?: Omit<AsyncWorkCapabilityBlocker, 'deliveredAt'>;

@@ -82,6 +82,14 @@ File Search 等成熟方案。
   Completion Mailbox 和批处理 timer 投递，禁止增加独立唤醒通道。
 - Character 是内核级角色策略包，必须同时约束工具可见性、能力上限、可申请能力和
   可创建子角色；角色只能引用已注册定义，不能凭空创建或提升角色权限。
+- AI Graph 模式下每个 Agent 都从 OS 保留的 `plan` 控制节点开始；只有 plan 可以
+  安装或替换局部工作图，普通节点只能完成当前工作或请求重新规划。
+- Graph 中的 `NodeKind` 只描述当前职责和输出契约，不是权限主体。Tool 可见性和
+  Capability 始终以 Agent 为最小单位，不能因进入某个节点而扩大权限。
+- Graph 依赖解锁、节点状态转换和 Character 节点发送由 OS 确定性管理；模型负责
+  生成目标、依赖、assignee 与验收条件，不得直接写入运行状态。
+- Graph 是 TCB Work Table 的一部分，必须随任务快照和事件历史持久化。子 Agent
+  拥有自己的局部 Graph，不得获得父 Graph 的内部身份信息。
 - 子 Agent 的 character 必须在父角色的可创建名单内，且请求能力必须落在该角色能力
   上限内，再叠加委派衰减与 workspace 边界。工具可见性只影响可见性，执行仍由
   CapabilityManager 二次校验。
@@ -158,7 +166,7 @@ File Search 等成熟方案。
 
 ## 当前状态
 
-当前 `2.0.0` 内核已经实现：
+当前 `2.2.0` 内核已经实现：
 
 1. 任务状态、事件和合法状态转换规则。
 2. 可序列化的 `TaskControlBlock` 快照和只追加事件历史。
@@ -217,6 +225,13 @@ File Search 等成熟方案。
     禁止退化为裸 `child_process.spawn`。
 46. 通用 `McpToolAdapter` 保留第三方 MCP 的 schema 与执行能力，同时由本地可信
     binding 声明 Capability，外部 MCP 不能自行决定授权。
+47. AI Graph 协作模式：每个 Agent 从 plan 生成局部 DAG，OS 校验、持久化并自动
+    调度依赖；Character 节点映射为拥有独立局部 Graph 的子 Agent。
+48. `inspect`、`research`、`design`、`implement`、`integrate`、`verify` 和
+    `review` 首批 NodeKind，以及 `set_graph`、`complete_node`、
+    `request_replan` 结构化协议。
+49. Graph 节点状态与 Agent 运行状态正交；任意 self 节点等待 Tool、Capability
+    或外部结果时均可进入 `blocked`，恢复后继续原节点。
 
 后续优先级：
 
