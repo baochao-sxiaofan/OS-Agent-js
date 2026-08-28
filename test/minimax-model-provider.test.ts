@@ -28,6 +28,32 @@ const structuredOutput = JSON.stringify({
   },
 });
 
+const toolRequest: ModelRequest = {
+  taskId: 'minimax-tool-test',
+  goal: 'Create the entry file for the game.',
+  context: [{ type: 'user', content: 'build it' }],
+  tools: [
+    {
+      name: 'file.create',
+      description: 'Create a new file in the workspace.',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          path: { type: 'string' },
+          content: { type: 'string' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  ],
+  attempt: 1,
+  summaryProtocol: TURN_SUMMARY_PROTOCOL,
+  delegation: {
+    canSpawnSubagents: false,
+  },
+};
+
 describe('MiniMaxModelProvider', () => {
   it('uses the documented reasoning and function-calling protocol', async () => {
     const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(
@@ -107,10 +133,7 @@ describe('MiniMaxModelProvider', () => {
     expect(body).toMatchObject({
       max_completion_tokens: 4_096,
       reasoning_split: true,
-      tool_choice: {
-        type: 'function',
-        function: { name: 'submit_agent_response' },
-      },
+      tool_choice: 'required',
     });
     expect(body).not.toHaveProperty('response_format');
     expect(body.tools?.[0]?.function?.name).toBe(
@@ -227,6 +250,144 @@ ${structuredOutput}
 
     expect(provider).toBeInstanceOf(MiniMaxModelProvider);
     expect(provider.estimate(request).maxOutputTokens).toBe(0);
+  });
+
+  it('maps a native business tool call to a tool_calls action', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        choices: [
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'native-call-1',
+                  type: 'function',
+                  function: {
+                    name: 'file.create',
+                    arguments: JSON.stringify({
+                      path: 'workspace://current/index.html',
+                      content: '<!doctype html>',
+                    }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    const provider = new MiniMaxModelProvider({
+      apiKey: 'test-key',
+      model: 'MiniMax-M3',
+      fetchImplementation,
+    });
+
+    const result = await provider.invoke(
+      toolRequest,
+      new AbortController().signal,
+    );
+    expect(result).toMatchObject({
+      type: 'tool_calls',
+      calls: [
+        {
+          callId: 'native-call-1',
+          toolName: 'file.create',
+          input: {
+            path: 'workspace://current/index.html',
+            content: '<!doctype html>',
+          },
+        },
+      ],
+    });
+    expect(result.turnSummary).toMatchObject({
+      outcome: expect.stringContaining('file.create'),
+    });
+
+    const [, init] = fetchImplementation.mock.calls[0] ?? [];
+    const body = JSON.parse(String(init?.body)) as {
+      tools?: Array<{ function?: { name?: string } }>;
+    };
+    const toolNames = (body.tools ?? []).map(
+      (tool) => tool.function?.name,
+    );
+    expect(toolNames).toContain('submit_agent_response');
+    expect(toolNames).toContain('file.create');
+  });
+
+  it('rejects a native call to a tool that is not visible this turn', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        choices: [
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'native-call-2',
+                  type: 'function',
+                  function: {
+                    name: 'git.push',
+                    arguments: '{}',
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    const provider = new MiniMaxModelProvider({
+      apiKey: 'test-key',
+      model: 'MiniMax-M3',
+      fetchImplementation,
+    });
+
+    await expect(
+      provider.invoke(toolRequest, new AbortController().signal),
+    ).rejects.toThrow(/unavailable tool: git\.push/u);
+  });
+
+  it('tolerates a missing turnSummary on the control channel', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        choices: [
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'ctrl-1',
+                  type: 'function',
+                  function: {
+                    name: 'submit_agent_response',
+                    arguments: JSON.stringify({
+                      action: 'final',
+                      output: 'done',
+                    }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    const provider = new MiniMaxModelProvider({
+      apiKey: 'test-key',
+      model: 'MiniMax-M3',
+      fetchImplementation,
+    });
+
+    await expect(
+      provider.invoke(request, new AbortController().signal),
+    ).resolves.toMatchObject({
+      type: 'final',
+      output: 'done',
+    });
   });
 });
 

@@ -12,7 +12,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`2.2.0`
+当前版本：`2.2.1`
 
 ## 核心状态模型
 
@@ -417,7 +417,7 @@ npm run desktop:build
 ```
 
 推送到 `main` 后，`.github/workflows/windows-desktop.yml` 会在 Windows Runner 上
-执行检查和测试，并生成 `OS-Agent-Setup-2.2.0-x64.exe`。也可以在 GitHub Actions
+执行检查和测试，并生成 `OS-Agent-Setup-2.2.1-x64.exe`。也可以在 GitHub Actions
 页面手动触发该工作流。
 
 ### 最小 Gemini 网络验证

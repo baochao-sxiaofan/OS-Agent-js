@@ -114,9 +114,27 @@ export class MiniMaxModelProvider implements ModelProvider {
     const usage = parseUsage(responseObject['usage']);
     const diagnostics = formatResponseDiagnostics(choice, message);
 
+    // 通道一：OS 控制动作仍通过 submit_agent_response 提交。
     const toolArguments = extractAgentResponseToolArguments(message);
     if (toolArguments !== undefined) {
       return parseAgentResponse(toolArguments, request, usage, diagnostics);
+    }
+
+    // 通道二：模型直接调用真实业务工具（file.create、workspace.search 等）。
+    // 把原生 tool_call 翻译成统一的 tool_calls envelope，再走同一套解析与
+    // 后续 CapabilityManager 校验，权限判定不受传输格式影响。
+    const businessCalls = extractBusinessToolCalls(message, request);
+    if (businessCalls.length > 0) {
+      return parseAgentResponse(
+        JSON.stringify({
+          action: 'tool_calls',
+          calls: businessCalls,
+          turnSummary: synthesizeTurnSummary(request, businessCalls),
+        }),
+        request,
+        usage,
+        diagnostics,
+      );
     }
 
     const content = message['content'];
@@ -141,8 +159,10 @@ export class MiniMaxModelProvider implements ModelProvider {
           role: 'system',
           content: [
             buildStructuredAgentSystemInstruction(request),
-            `Call ${AGENT_RESPONSE_TOOL_NAME} exactly once with the complete response object.`,
-            'Do not place the response object in message content.',
+            'You may act in one of two ways this turn.',
+            'To run visible workspace tools, call them directly as native function calls using their exact names and input schemas.',
+            `For every other decision (planning a graph, completing a node, requesting capabilities, finishing, etc.), call ${AGENT_RESPONSE_TOOL_NAME} exactly once with the complete OS-Agent action object.`,
+            'Do not place the OS-Agent action object in message content.',
           ].join(' '),
         },
         {
@@ -171,17 +191,25 @@ export class MiniMaxModelProvider implements ModelProvider {
           function: {
             name: AGENT_RESPONSE_TOOL_NAME,
             description:
-              'Submit exactly one complete OS-Agent action for this turn.',
+              'Submit exactly one complete OS-Agent control action for this turn (set_graph, complete_node, request_replan, final, request_capabilities, resolve_capability_request, wait_for_async_work, needs_parent_action, spawn_subagents).',
             parameters: structuredClone(
               AGENT_RESPONSE_JSON_SCHEMA,
             ) as unknown as JsonObject,
           },
         },
+        ...request.tools.map((tool) => ({
+          type: 'function' as const,
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters:
+              tool.inputSchema === undefined
+                ? { type: 'object', additionalProperties: true }
+                : (structuredClone(tool.inputSchema) as unknown as JsonObject),
+          },
+        })),
       ],
-      tool_choice: {
-        type: 'function',
-        function: { name: AGENT_RESPONSE_TOOL_NAME },
-      },
+      tool_choice: 'required',
     };
     if (this.#maxOutputTokens !== undefined) {
       body['max_completion_tokens'] = this.#maxOutputTokens;
@@ -225,12 +253,87 @@ function extractAgentResponseToolArguments(
       `MiniMax called ${AGENT_RESPONSE_TOOL_NAME} more than once.`,
     );
   }
-  if (matchingArguments.length === 0 && toolCalls.length > 0) {
-    throw new MiniMaxProviderError(
-      `MiniMax returned an unsupported tool call instead of ${AGENT_RESPONSE_TOOL_NAME}.`,
-    );
-  }
+  // 未匹配 submit_agent_response 不再直接报错：可能是原生业务工具调用，
+  // 由 extractBusinessToolCalls 处理。
   return matchingArguments[0];
+}
+
+/**
+ * 收集模型对真实业务工具的原生调用，翻译成统一 tool_calls envelope 所需的
+ * `{ callId, toolName, input }`。只接受本轮请求里可见的工具名，避免模型伪造
+ * 工具绕过 Character 可见性；能否执行仍由 CapabilityManager 最终裁决。
+ */
+function extractBusinessToolCalls(
+  message: JsonObject,
+  request: ModelRequest,
+): Array<{ callId: string; toolName: string; input: JsonObject }> {
+  const value = message['tool_calls'];
+  if (value === undefined) {
+    return [];
+  }
+  const toolCalls = requireArray(value, 'choices[0].message.tool_calls');
+  const visibleToolNames = new Set(request.tools.map((tool) => tool.name));
+  const calls: Array<{
+    callId: string;
+    toolName: string;
+    input: JsonObject;
+  }> = [];
+
+  for (const [index, toolCall] of toolCalls.entries()) {
+    const call = requireObject(
+      toolCall,
+      `choices[0].message.tool_calls[${index}]`,
+    );
+    const fn = requireObject(
+      call['function'],
+      `choices[0].message.tool_calls[${index}].function`,
+    );
+    const name = requireString(
+      fn['name'],
+      `choices[0].message.tool_calls[${index}].function.name`,
+    );
+    if (name === AGENT_RESPONSE_TOOL_NAME) {
+      continue;
+    }
+    if (!visibleToolNames.has(name)) {
+      throw new MiniMaxProviderError(
+        `MiniMax called an unavailable tool: ${name}.`,
+      );
+    }
+    const rawArguments =
+      typeof fn['arguments'] === 'string' ? fn['arguments'] : '{}';
+    let input: JsonValue;
+    try {
+      input = JSON.parse(rawArguments || '{}') as JsonValue;
+    } catch {
+      throw new MiniMaxProviderError(
+        `MiniMax tool call ${name} had invalid JSON arguments.`,
+      );
+    }
+    const callId =
+      typeof call['id'] === 'string' && call['id'].trim()
+        ? call['id']
+        : `${name}-${index}`;
+    calls.push({
+      callId,
+      toolName: name,
+      input: isObject(input) ? input : {},
+    });
+  }
+
+  return calls;
+}
+
+/** 为原生工具调用合成一个最小 turnSummary，满足统一协议的必填字段。 */
+function synthesizeTurnSummary(
+  request: ModelRequest,
+  calls: ReadonlyArray<{ toolName: string }>,
+): { request: string; outcome: string } {
+  const toolNames = calls.map((call) => call.toolName).join(', ');
+  return {
+    request: request.goal.slice(0, 200) || 'Execute the assigned work.',
+    outcome: `Invoked workspace tools: ${toolNames}.`,
+  };
 }
 
 function parseAgentResponse(
@@ -240,13 +343,53 @@ function parseAgentResponse(
   diagnostics: string,
 ): ModelResponse {
   try {
-    return parseStructuredAgentResponse(text, request, usage);
+    return parseStructuredAgentResponse(
+      normalizeControlEnvelope(text, request),
+      request,
+      usage,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new MiniMaxProviderError(
       `MiniMax returned an invalid OS-Agent action (${diagnostics}): ${message}`,
     );
   }
+}
+
+/**
+ * 对 submit_agent_response 载荷做无歧义的容错归一化：补齐缺失的 turnSummary，
+ * 并把误写成字符串的 turnSummary 收敛为对象。只修复格式，不改动 action、graph、
+ * capability 等任何影响语义或安全的字段——那些仍由严格校验拒绝。
+ */
+function normalizeControlEnvelope(
+  text: string,
+  request: ModelRequest,
+): string {
+  let parsed: JsonValue;
+  try {
+    parsed = JSON.parse(text) as JsonValue;
+  } catch {
+    return text;
+  }
+  if (!isObject(parsed)) {
+    return text;
+  }
+  const summary = parsed['turnSummary'];
+  if (typeof summary === 'string') {
+    parsed['turnSummary'] = {
+      request: request.goal.slice(0, 200) || 'Continue the assigned work.',
+      outcome: summary.slice(0, 400),
+    };
+  } else if (!isObject(summary)) {
+    parsed['turnSummary'] = {
+      request: request.goal.slice(0, 200) || 'Continue the assigned work.',
+      outcome:
+        typeof parsed['action'] === 'string'
+          ? `Returned ${parsed['action']}.`
+          : 'Returned an OS-Agent action.',
+    };
+  }
+  return JSON.stringify(parsed);
 }
 
 function stripThinkingBlock(text: string): string {
