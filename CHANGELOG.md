@@ -4,7 +4,17 @@
 
 ## Unreleased
 
-暂无。
+- 允许所有内置专业 Character 继续创建非 `coordinator` 子 Agent，并将
+  `coordinator` 固定为 root-only 角色。
+- 达到最大委派深度或其他 AgentPool 上限时，动态隐藏子 Agent action 和 Graph
+  Character assignee，避免确定性失败消耗模型轮次。
+- 多跳 Capability 请求新增中间 Character ceiling 校验，防止递归委派绕过角色权限。
+- `coordinator` 明确支持小型任务的完整自行执行；`code_auditor` 在保持源码只读的
+  同时允许使用受限 `test.run`，为后续多模态 UI 验证预留能力边界。
+- 新增 macOS Seatbelt 进程沙箱后端（`desktop/main/sandbox`）：以 `sandbox-exec`
+  argv 直启受限进程，写入限定在工作区与一次性运行目录、默认断网、清洗环境变量，
+  并在启动时通过真实负向验证探测后端；仅在探测通过时注入 `ProcessSandbox` 并向
+  `coordinator`/`developer`/`code_auditor` 暴露 `test.run`，失败时不降级裸执行。
 
 ## 2.2.1 - 2026-08-28
 

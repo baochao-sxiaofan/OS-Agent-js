@@ -7,7 +7,7 @@ import type {
   ModelUsage,
 } from './model-provider.js';
 import {
-  AGENT_RESPONSE_JSON_SCHEMA,
+  buildAgentResponseJsonSchema,
   buildStructuredAgentSystemInstruction,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
@@ -191,10 +191,8 @@ export class MiniMaxModelProvider implements ModelProvider {
           function: {
             name: AGENT_RESPONSE_TOOL_NAME,
             description:
-              'Submit exactly one complete OS-Agent control action for this turn (set_graph, complete_node, request_replan, final, request_capabilities, resolve_capability_request, wait_for_async_work, needs_parent_action, spawn_subagents).',
-            parameters: structuredClone(
-              AGENT_RESPONSE_JSON_SCHEMA,
-            ) as unknown as JsonObject,
+              'Submit exactly one complete OS-Agent control action allowed by this turn schema.',
+            parameters: buildAgentResponseJsonSchema(request),
           },
         },
         ...request.tools.map((tool) => ({

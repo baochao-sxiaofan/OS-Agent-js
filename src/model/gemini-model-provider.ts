@@ -6,7 +6,7 @@ import type {
   ModelResponse,
 } from './model-provider.js';
 import {
-  AGENT_RESPONSE_JSON_SCHEMA,
+  buildAgentResponseJsonSchema,
   buildStructuredAgentSystemInstruction,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
@@ -47,7 +47,7 @@ type GeminiRequestBody = {
     temperature: number;
     maxOutputTokens?: number;
     responseMimeType: 'application/json';
-    responseJsonSchema: typeof AGENT_RESPONSE_JSON_SCHEMA;
+    responseJsonSchema: JsonObject;
   };
 };
 
@@ -173,7 +173,7 @@ export class GeminiModelProvider implements ModelProvider {
       generationConfig: {
         temperature: 0,
         responseMimeType: 'application/json',
-        responseJsonSchema: AGENT_RESPONSE_JSON_SCHEMA,
+        responseJsonSchema: buildAgentResponseJsonSchema(request),
       },
     };
     if (this.#maxOutputTokens !== undefined) {

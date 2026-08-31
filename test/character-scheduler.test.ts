@@ -8,6 +8,7 @@ import {
   TaskScheduler,
   ToolRegistry,
   registerBuiltinTools,
+  type ProcessSandbox,
   type SubagentSpawnRejectedContextItem,
 } from '../src/index.js';
 
@@ -17,10 +18,15 @@ const usage = {
   costUsd: 0.001,
 };
 
-function createRuntime(taskIds: readonly string[] = []) {
+function createRuntime(
+  taskIds: readonly string[] = [],
+  processSandbox?: ProcessSandbox,
+) {
   const provider = new FakeModelProvider();
   const tools = new ToolRegistry();
-  registerBuiltinTools(tools);
+  registerBuiltinTools(tools, {
+    ...(processSandbox === undefined ? {} : { processSandbox }),
+  });
   const store = new InMemoryTaskStore();
   const admission = new AdmissionController({
     maxConcurrentRequests: 2,
@@ -69,7 +75,8 @@ describe('TaskScheduler character enforcement', () => {
     expect(toolNames).toContain('file.read');
     expect(toolNames).toContain('directory.list');
     expect(toolNames).toContain('workspace.search');
-    // 审计角色看不到任何写入或执行工具。
+    // 审计角色看不到写入工具；当前测试运行时未注入 ProcessSandbox，
+    // 因此全局目录中也不存在 test.run。
     expect(toolNames).not.toContain('file.write');
     expect(toolNames).not.toContain('file.apply_patch');
     expect(toolNames).not.toContain('test.run');
@@ -82,7 +89,13 @@ describe('TaskScheduler character enforcement', () => {
     ).toContain('read-only');
     expect(
       provider.requests[0]?.delegation.availableCharacters,
-    ).toEqual([]);
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'developer' }),
+        expect.objectContaining({ id: 'code_auditor' }),
+        expect.objectContaining({ id: 'researcher' }),
+      ]),
+    );
   });
 
   it('gives a coordinator the registered child-character catalog', async () => {
@@ -103,11 +116,31 @@ describe('TaskScheduler character enforcement', () => {
         (character) => character.id,
       ),
     ).toEqual([
-      'coordinator',
       'developer',
       'code_auditor',
       'researcher',
     ]);
+  });
+
+  it('shows test.run to an auditor only when a sandbox backend exists', async () => {
+    const { provider, scheduler } = createRuntime([], {
+      run: async () => ({ exitCode: 0 }),
+    });
+    const task = await scheduler.submit({
+      id: 'auditor-with-sandbox',
+      goal: 'Run verification without modifying source files.',
+      characterId: 'code_auditor',
+      capabilities: ['test.run'],
+    });
+    provider.setResponses(task.id, [
+      { type: 'final', output: 'verified', usage },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    const toolNames = provider.requests[0]?.tools.map(({ name }) => name);
+    expect(toolNames).toContain('test.run');
+    expect(toolNames).not.toContain('file.write');
   });
 
   it('rejects runtime capability requests outside the character policy', async () => {
@@ -146,11 +179,11 @@ describe('TaskScheduler character enforcement', () => {
     );
   });
 
-  it('rejects a child character the parent may not create', async () => {
+  it('rejects coordinator as a child of every character', async () => {
     const { provider, scheduler } = createRuntime();
     const root = await scheduler.submit({
       id: 'auditor-parent',
-      goal: 'Try to create a developer.',
+      goal: 'Try to create a coordinator.',
       characterId: 'code_auditor',
     });
     provider.setResponses(root.id, [
@@ -158,8 +191,8 @@ describe('TaskScheduler character enforcement', () => {
         type: 'spawn_subagents',
         children: [
           {
-            goal: 'Write some code.',
-            character: 'developer',
+            goal: 'Coordinate more work.',
+            character: 'coordinator',
           },
         ],
         usage,
@@ -174,7 +207,7 @@ describe('TaskScheduler character enforcement', () => {
         item.type === 'subagent_spawn_rejected',
     );
     expect(rejection?.reason).toBe('capability_escalation');
-    expect(rejection?.message).toContain('developer');
+    expect(rejection?.message).toContain('coordinator');
   });
 
   it('rejects delegating a capability outside the child character ceiling', async () => {

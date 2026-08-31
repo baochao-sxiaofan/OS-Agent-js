@@ -82,6 +82,10 @@ File Search 等成熟方案。
   Completion Mailbox 和批处理 timer 投递，禁止增加独立唤醒通道。
 - Character 是内核级角色策略包，必须同时约束工具可见性、能力上限、可申请能力和
   可创建子角色；角色只能引用已注册定义，不能凭空创建或提升角色权限。
+- `coordinator` 属于 root-only Character，不能出现在任何子 Agent 上；其他内置
+  Character 可以递归创建非 coordinator 子角色。
+- `coordinator` 持有最高角色上限，并可在小型任务中自行完成设计、开发和验证；
+  `code_auditor` 保持源码只读，但可以通过受限沙箱执行测试和后续 UI 验证。
 - AI Graph 模式下每个 Agent 都从 OS 保留的 `plan` 控制节点开始；只有 plan 可以
   安装或替换局部工作图，普通节点只能完成当前工作或请求重新规划。
 - Graph 中的 `NodeKind` 只描述当前职责和输出契约，不是权限主体。Tool 可见性和
@@ -102,6 +106,10 @@ File Search 等成熟方案。
 - 父 Agent 只能转授自己持有、允许转授且资源范围不扩大的 Capability。
 - 子 Agent 创建必须同时受到全局存活数量、每棵任务树累计创建数量和最大委派深度
   三类独立限制。
+- 当前 Agent 不满足任一创建条件时，Provider Schema 必须隐藏子 Agent action，并将
+  Graph assignee 收窄为 `self`，避免用一次失败模型轮次探测确定性的内核限制。
+- 多跳 Capability 请求经过的每个中间 Character 都必须允许持有该能力，禁止借后代
+  Agent 绕过父角色的 capability ceiling。
 - 深度调度必须使用加权轮转和老化机制，禁止使用会让浅层任务永久饿死的绝对深度
   优先级。
 - 大型输出应保存到 Artifact Store，并通过 ID 引用，避免反复复制进模型上下文。
@@ -222,7 +230,9 @@ File Search 等成熟方案。
     列举/创建/删除和子串搜索，全部经 ToolRuntime 做 `workspace://current/`
     解析与符号链接越界防护。
 45. `test.run` 采用 `ProcessSandbox` 注入契约；未配置 OS-level 沙箱时不注册，
-    禁止退化为裸 `child_process.spawn`。
+    禁止退化为裸 `child_process.spawn`。macOS 后端（`desktop/main/sandbox`）以
+    `sandbox-exec` argv 直启，写入限定工作区、默认断网、清洗环境变量，启动时经
+    真实负向验证探测，失败即禁用而非降级。
 46. 通用 `McpToolAdapter` 保留第三方 MCP 的 schema 与执行能力，同时由本地可信
     binding 声明 Capability，外部 MCP 不能自行决定授权。
 47. AI Graph 协作模式：每个 Agent 从 plan 生成局部 DAG，OS 校验、持久化并自动

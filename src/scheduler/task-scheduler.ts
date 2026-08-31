@@ -1972,6 +1972,42 @@ export class TaskScheduler {
       await this.#store.persist(task);
       return;
     }
+    if (route.route === 'parent') {
+      const blockedHop = route.delegationPath
+        .map((hop) => this.requireTask(hop.granteeTaskId))
+        .map((grantee) => ({
+          grantee,
+          capability:
+            this.#characterRegistry.capabilityOutsideCeiling(
+              grantee.characterId,
+              check.missing,
+            ),
+        }))
+        .find(({ capability }) => capability !== undefined);
+      if (blockedHop?.capability !== undefined) {
+        task.appendContext({
+          type: 'capability_request_result',
+          requestRef: requestId,
+          status: 'denied',
+          capabilities: check.missing.map(({ capability, scope }) => ({
+            capability,
+            scope: structuredClone(scope),
+          })),
+          reason: `Character ${blockedHop.grantee.characterId} cannot hold capability ${blockedHop.capability} in the delegation path.`,
+        });
+        task.transition(
+          {
+            status: 'READY',
+            enteredAt: this.#clock.now(),
+            reason: 'capability_result_available',
+          },
+          'capability_request_rejected_by_character_path',
+        );
+        await this.prepareTaskForQueue(task);
+        await this.#store.persist(task);
+        return;
+      }
+    }
 
     const record: CapabilityRequestRecord = {
       requestId,
@@ -2051,6 +2087,17 @@ export class TaskScheduler {
     let resolutionReason = reason;
     let grants: CapabilityGrant[] = [];
     const grantee = this.requireTask(hop.granteeTaskId);
+    if (status === 'granted') {
+      const outsideCeiling =
+        this.#characterRegistry.capabilityOutsideCeiling(
+          grantee.characterId,
+          pending.request.requests,
+        );
+      if (outsideCeiling !== undefined) {
+        status = 'denied';
+        resolutionReason = `Character ${grantee.characterId} cannot hold capability ${outsideCeiling} in the delegation path.`;
+      }
+    }
     if (status === 'granted') {
       try {
         grants = this.#capabilityManager.grantByParent(
@@ -2710,6 +2757,9 @@ export class TaskScheduler {
         : this.#characterRegistry.get(task.characterId);
     const availableCharacters =
       this.#characterRegistry.availableChildren(task.characterId);
+    const poolAllowsSubagents = this.#agentPool.canTaskSpawn(task);
+    const canSpawnSubagents =
+      poolAllowsSubagents && availableCharacters.length > 0;
     const workGraph = task.workGraph;
     const modelWorkGraph =
       workGraph === undefined
@@ -2776,8 +2826,8 @@ export class TaskScheduler {
             },
           }),
       delegation: {
-        canSpawnSubagents: this.#agentPool.canTaskSpawn(task),
-        ...(this.#agentPool.canTaskSpawn(task)
+        canSpawnSubagents,
+        ...(canSpawnSubagents
           ? {
               availableCharacters: availableCharacters.map(
                 (definition) => ({

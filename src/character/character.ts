@@ -12,6 +12,8 @@ export type CharacterDefinition = {
   id: string;
   /** 展示用的角色名称。 */
   displayName: string;
+  /** 该角色是否只能用于初始根 Agent，不能出现在任何子 Agent 上。 */
+  rootOnly?: boolean;
   /**
    * 注入模型上下文的职责边界说明。
    *

@@ -236,17 +236,29 @@ turnSummary.outcome  # 一句话描述本轮工作结果
 
 `test.run` 由 `createTestRunTool(ProcessSandbox)` 创建，只有宿主注入真正的 OS-level
 进程沙箱后才会注册并加入 Root Ceiling；禁止降级为裸 `child_process.spawn`。
-当前桌面 Runtime 尚未配置 ProcessSandbox，因此不会向模型暴露 `test.run`。
+macOS 桌面端在启动时通过 `desktop/main/sandbox` 探测 Seatbelt 后端：只有真实的
+工作区外写入负向验证通过，才注入 `MacOSProcessSandbox` 并暴露 `test.run`；探测
+失败时不注册该工具，也不降级为裸执行。该后端以 argv 直接调用 `sandbox-exec`，
+默认断网、清洗环境变量，并把受限进程的写入限定在工作区与一次性隔离运行目录内。
+`sandbox-exec` 已被 Apple 标注为 deprecated，因此该后端是可探测、可禁用的实验性
+实现，后续可替换为 OCI/VM 等更强隔离方案。
 
 ## Character 角色
 
 Character 是内核级角色策略包，而不只是 Prompt。每个角色同时约束四件事：模型可见
 的工具、允许持有的能力上限、允许运行时申请的能力，以及允许创建的子角色。首批内置
-三个可创建角色，根任务使用 `coordinator`：
+三个可创建角色，初始根任务使用 root-only 的 `coordinator`：
 
+- `coordinator`：拥有最高角色上限；小型任务可自行完成设计、开发和验证，复杂任务
+  再按边界委派；
 - `developer`：在分配目录内读写代码，并在沙箱可用时运行测试；
-- `code_auditor`：全工作区只读，发现问题上报父 Agent，不能写文件；
+- `code_auditor`：源码只读，但可在沙箱中运行验证；发现问题后上报，不能修改源码；
 - `researcher`：联网检索资料并写入指定笔记目录，不改源码。
+
+所有内置 Character 都可以继续创建 `developer`、`code_auditor` 或 `researcher`，
+但任何子 Agent 都不能创建 `coordinator`。达到最大委派深度、AgentPool 容量或任务树
+累计创建上限后，模型请求会隐藏子 Agent action 和 Character assignee，只允许当前
+Agent 使用 `self` 节点继续执行。
 
 legacy 模式下父 Agent 可通过 `spawn_subagents` 指定 `character`；AI Graph 模式下，
 模型在 plan 中为 Graph 节点指定 Character，由 OS 在依赖满足后创建子 Agent。两条
@@ -509,7 +521,8 @@ npm run benchmark:multi-agent
 
 1. 接入官方 filesystem MCP 与通用 MCP stdio/Streamable HTTP Client。
 2. 为 `ProcessSandbox` 接入可按 Conversation 隔离的 OS-level 后端。
-3. 接入 Web 搜索和本地预览/UI 检查 Skills。
+3. 接入 Web 搜索，以及供 `code_auditor` 使用的本地预览、浏览器自动化和多模态
+   UI 检查能力。
 4. 增加人工审批和资源锁对应的阻塞/唤醒协议。
 5. 增加 Provider 级能力探测和更细粒度的模型兼容性矩阵。
 6. 增加真实 `ContextCompactor` Adapter。

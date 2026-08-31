@@ -69,11 +69,11 @@ export class CharacterRegistry {
     parentCharacterId: string | undefined,
   ): CharacterDefinition[] {
     if (parentCharacterId === undefined) {
-      return this.list();
+      return this.list().filter((definition) => !definition.rootOnly);
     }
-    return this.get(parentCharacterId).allowedChildCharacters.map(
-      (characterId) => this.get(characterId),
-    );
+    return this.get(parentCharacterId).allowedChildCharacters
+      .map((characterId) => this.get(characterId))
+      .filter((definition) => !definition.rootOnly);
   }
 
   /**
@@ -87,6 +87,9 @@ export class CharacterRegistry {
     childCharacterId: string,
   ): boolean {
     if (!this.has(childCharacterId)) {
+      return false;
+    }
+    if (this.get(childCharacterId).rootOnly) {
       return false;
     }
     if (parentCharacterId === undefined) {

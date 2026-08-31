@@ -26,6 +26,10 @@ import {
   type ProviderCredentials,
 } from './provider-registry.js';
 import { RuntimeService } from './runtime-service.js';
+import {
+  MacOSProcessSandbox,
+  probeMacOSSandbox,
+} from './sandbox/index.js';
 
 const currentDirectory = fileURLToPath(new URL('.', import.meta.url));
 const localDataDirectory = process.env['OS_AGENT_USER_DATA_DIR'];
@@ -125,6 +129,24 @@ function registerIpcHandlers(
   );
 }
 
+/**
+ * 在 darwin 上探测 Seatbelt 后端，仅当真实负向验证通过时才注入进程沙箱。
+ *
+ * 探测失败时返回 undefined：RuntimeService 因此不会注册 test.run，也不会降级为
+ * 不受约束的裸执行。
+ */
+function resolveProcessSandbox(): MacOSProcessSandbox | undefined {
+  const probe = probeMacOSSandbox();
+  if (!probe.available) {
+    console.warn(
+      `[os-agent] Process sandbox disabled; test.run unavailable: ${probe.reason}`,
+    );
+    return undefined;
+  }
+  console.info('[os-agent] macOS process sandbox verified; test.run enabled.');
+  return new MacOSProcessSandbox();
+}
+
 async function selectWorkspaceDirectory(): Promise<string | undefined> {
   const options: OpenDialogOptions = {
     title: '选择 Conversation Workspace',
@@ -199,8 +221,10 @@ app.whenReady().then(async () => {
   const savedConfig = await settingsStore.load(
     process.env['GEMINI_API_KEY'],
   );
+  const processSandbox = resolveProcessSandbox();
   const runtime = new RuntimeService(savedConfig, {
     storeLocation: join(app.getPath('userData'), 'tasks.db'),
+    ...(processSandbox === undefined ? {} : { processSandbox }),
   });
   await runtime.initialize();
   app.once('will-quit', () => runtime.close());

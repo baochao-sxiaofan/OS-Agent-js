@@ -2521,6 +2521,92 @@ describe('TaskScheduler', () => {
     expect(root.state.status).toBe('TERMINATED');
   });
 
+  it('does not route capabilities through an intermediate character ceiling', async () => {
+    const capabilityManager = new CapabilityManager({
+      requestIdGenerator: () => 'blocked-character-path',
+    });
+    const { provider, scheduler } = createRuntime({
+      asyncWorkBatchWindowMs: 1,
+      capabilityManager,
+      maxConcurrentRequests: 1,
+      taskIds: ['auditor-middle', 'developer-leaf'],
+    });
+    const root = await scheduler.submit({
+      id: 'character-path-root',
+      goal: 'Coordinate a nested audit.',
+      characterId: 'coordinator',
+      capabilities: [
+        {
+          capability: 'file.write',
+          scope: {
+            kind: 'subtree',
+            resource: 'file:///repo/src',
+          },
+        },
+      ],
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'spawn_subagents',
+        children: [
+          {
+            goal: 'Audit an implementation branch.',
+            character: 'code_auditor',
+          },
+        ],
+        usage,
+      },
+      { type: 'final', output: 'root complete', usage },
+    ]);
+    provider.setResponses('auditor-middle', [
+      {
+        type: 'spawn_subagents',
+        children: [
+          {
+            goal: 'Inspect whether a source change is needed.',
+            character: 'developer',
+          },
+        ],
+        usage,
+      },
+      { type: 'final', output: 'audit complete', usage },
+    ]);
+    provider.setResponses('developer-leaf', [
+      {
+        type: 'request_capabilities',
+        requests: [
+          {
+            capability: 'file.write',
+            scope: {
+              kind: 'exact',
+              resource: 'file:///repo/src/auth/token.ts',
+            },
+          },
+        ],
+        usage,
+      },
+      { type: 'final', output: 'continued without write access', usage },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    const leaf = scheduler.getTask('developer-leaf');
+    expect(leaf?.capabilityGrants).toEqual([]);
+    expect(leaf?.context).toContainEqual(
+      expect.objectContaining({
+        type: 'capability_request_result',
+        status: 'denied',
+        reason: expect.stringContaining(
+          'Character code_auditor cannot hold capability file.write',
+        ),
+      }),
+    );
+    expect(
+      provider.requests.filter((request) => request.taskId === root.id),
+    ).toHaveLength(2);
+    expect(root.state.status).toBe('TERMINATED');
+  });
+
   it('batches concurrent child capability blockers on the parent work table', async () => {
     const requestIds = ['batch-capability-1', 'batch-capability-2'];
     let releaseBatchWindow: (() => void) | undefined;

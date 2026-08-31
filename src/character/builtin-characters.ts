@@ -20,14 +20,27 @@ export const BUILTIN_TOOL_IDS = {
   testRun: 'test.run',
 } as const;
 
+/**
+ * Coordinator is reserved for root tasks. Every Character may delegate to
+ * bounded specialist roles, while capability attenuation still limits what
+ * each descendant can actually receive.
+ */
+const DELEGATABLE_CHARACTER_IDS = [
+  'developer',
+  'code_auditor',
+  'researcher',
+] as const;
+
 /** 根协调角色：自主拆解任务并在已授权范围内创建专业子 Agent。 */
 export const COORDINATOR_CHARACTER: CharacterDefinition = {
   id: 'coordinator',
   displayName: '任务协调员',
+  rootOnly: true,
   promptFragment: [
     'You are the root coordinator for this conversation.',
     'In plan mode, assess the goal and generate a dependency-aware work graph before acting.',
     'Choose self assignments, delegated Character assignments, or a mixture according to the actual work.',
+    'For a small cohesive goal, complete design, implementation, and verification yourself instead of delegating mechanically.',
     'Delegate bounded objectives rather than forwarding the complete parent goal to one child.',
     'Give each child only the minimum capability scope required for its assignment.',
     'Use integration and verification nodes when independent results must become one deliverable.',
@@ -36,12 +49,7 @@ export const COORDINATOR_CHARACTER: CharacterDefinition = {
   visibleToolIds: Object.values(BUILTIN_TOOL_IDS),
   capabilityCeiling: ['*'],
   requestableCapabilities: ['*'],
-  allowedChildCharacters: [
-    'coordinator',
-    'developer',
-    'code_auditor',
-    'researcher',
-  ],
+  allowedChildCharacters: DELEGATABLE_CHARACTER_IDS,
 };
 
 /**
@@ -89,7 +97,7 @@ export const DEVELOPER_CHARACTER: CharacterDefinition = {
     'directory.delete',
     'test.run',
   ],
-  allowedChildCharacters: [],
+  allowedChildCharacters: DELEGATABLE_CHARACTER_IDS,
 };
 
 /**
@@ -108,10 +116,15 @@ export const CODE_AUDITOR_CHARACTER: CharacterDefinition = {
     BUILTIN_TOOL_IDS.fileRead,
     BUILTIN_TOOL_IDS.directoryList,
     BUILTIN_TOOL_IDS.workspaceSearch,
+    BUILTIN_TOOL_IDS.testRun,
   ],
-  capabilityCeiling: ['file.read', 'directory.read'],
-  requestableCapabilities: ['file.read', 'directory.read'],
-  allowedChildCharacters: [],
+  capabilityCeiling: ['file.read', 'directory.read', 'test.run'],
+  requestableCapabilities: [
+    'file.read',
+    'directory.read',
+    'test.run',
+  ],
+  allowedChildCharacters: DELEGATABLE_CHARACTER_IDS,
 };
 
 /**
@@ -151,7 +164,7 @@ export const RESEARCHER_CHARACTER: CharacterDefinition = {
     'directory.create',
     'network.http.read',
   ],
-  allowedChildCharacters: [],
+  allowedChildCharacters: DELEGATABLE_CHARACTER_IDS,
 };
 
 /** 首批内置 Character，供默认 CharacterRegistry 装载。 */

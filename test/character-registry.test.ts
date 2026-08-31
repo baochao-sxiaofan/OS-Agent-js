@@ -45,7 +45,7 @@ describe('CharacterRegistry', () => {
     ];
     expect(
       registry.visibleTools('code_auditor', tools).map((tool) => tool.name),
-    ).toEqual(['file.read']);
+    ).toEqual(['file.read', 'test.run']);
     expect(registry.visibleTools(undefined, tools)).toHaveLength(3);
   });
 
@@ -68,6 +68,39 @@ describe('CharacterRegistry', () => {
     // 无 character 的父任务不受名单限制，但仍要求子角色存在。
     expect(registry.canCreateChild(undefined, 'developer')).toBe(true);
     expect(registry.canCreateChild(undefined, 'ghost')).toBe(false);
+  });
+
+  it('never exposes or creates a root-only character as a child', () => {
+    const manager: CharacterDefinition = {
+      id: 'manager',
+      displayName: 'Manager',
+      rootOnly: true,
+      promptFragment: 'Coordinate the root task.',
+      visibleToolIds: [],
+      capabilityCeiling: ['*'],
+      requestableCapabilities: [],
+      allowedChildCharacters: ['developer'],
+    };
+    const parent: CharacterDefinition = {
+      id: 'lead',
+      displayName: 'Lead',
+      promptFragment: 'Delegate specialist work.',
+      visibleToolIds: [],
+      capabilityCeiling: ['*'],
+      requestableCapabilities: [],
+      allowedChildCharacters: ['manager', 'developer'],
+    };
+    const registry = new CharacterRegistry([
+      manager,
+      parent,
+      DEVELOPER_CHARACTER,
+    ]);
+
+    expect(registry.availableChildren('lead').map(({ id }) => id)).toEqual([
+      'developer',
+    ]);
+    expect(registry.canCreateChild('lead', 'manager')).toBe(false);
+    expect(registry.canCreateChild(undefined, 'manager')).toBe(false);
   });
 
   it('reports the first capability outside a character ceiling', () => {

@@ -228,25 +228,91 @@ export const AGENT_RESPONSE_JSON_SCHEMA = {
   required: ['action', 'turnSummary'],
 } as const;
 
+/**
+ * Exposes only the control actions that are valid for this exact turn.
+ *
+ * In particular, a leaf Agent does not see child creation fields or Character
+ * assignees after the scheduler has closed delegation because of depth or pool
+ * limits.
+ */
+export function buildAgentResponseJsonSchema(
+  request: ModelRequest,
+): JsonObject {
+  const schema = structuredClone(
+    AGENT_RESPONSE_JSON_SCHEMA,
+  ) as unknown as JsonObject;
+  const properties = requireObject(
+    schema['properties'],
+    'agent response schema.properties',
+  );
+  const action = requireObject(
+    properties['action'],
+    'agent response schema.properties.action',
+  );
+  action['enum'] = availableAgentActions(request);
+
+  const canCreateLegacyChildren =
+    request.graph === undefined &&
+    request.delegation.canSpawnSubagents;
+  if (!canCreateLegacyChildren) {
+    delete properties['children'];
+  }
+
+  if (
+    request.graph?.mode === 'plan' &&
+    !request.delegation.canSpawnSubagents
+  ) {
+    const graph = requireObject(
+      properties['graph'],
+      'agent response schema.properties.graph',
+    );
+    const graphProperties = requireObject(
+      graph['properties'],
+      'agent response schema.properties.graph.properties',
+    );
+    const nodes = requireObject(
+      graphProperties['nodes'],
+      'agent response schema.properties.graph.properties.nodes',
+    );
+    const node = requireObject(
+      nodes['items'],
+      'agent response schema.properties.graph.properties.nodes.items',
+    );
+    const nodeProperties = requireObject(
+      node['properties'],
+      'agent response schema.properties.graph.properties.nodes.items.properties',
+    );
+    const assignee = requireObject(
+      nodeProperties['assignee'],
+      'agent response schema graph node assignee',
+    );
+    assignee['properties'] = {
+      type: {
+        type: 'string',
+        enum: ['self'],
+      },
+    };
+  }
+
+  return schema;
+}
+
 export const STRUCTURED_AGENT_INSTRUCTION = [
   'You are the model worker for OS-Agent-js.',
   'Return only one JSON object and no markdown.',
   'Select exactly one action listed for the current graph mode.',
   'Use final when the task is complete.',
-  'Use spawn_subagents only when delegation.canSpawnSubagents is true and the goal benefits from independent parallel work.',
-  'Use tool_calls to invoke one or more visible tools. Use async_work to start tools and subagents in the same turn.',
+  'Use tool_calls to invoke one or more visible tools. Use async_work to start permitted asynchronous work.',
   'For tool_calls include calls as {callId, toolName, input}; use only tools listed in the request and follow each inputSchema. Each callId must be unique for the Agent lifetime; in graph mode prefix it with the current node alias.',
   'The request capabilities list is authoritative for what you currently hold; request missing capabilities instead of assuming access.',
-  'For async_work include at least one child or call.',
-  'When spawning, choose character only from delegation.availableCharacters and request the narrowest required capability scopes.',
+  'For async_work include at least one permitted work item.',
   'Use wait_for_async_work only when an async_work_update has unfinished pending work.',
   'When async_work_update.allFinished is true, synthesize its results and normally return final.',
   'Use needs_parent_action only when a child cannot proceed without parent work.',
   'Use request_capabilities when work requires capabilities you do not currently hold. Request the capabilities only; the OS chooses the approval route.',
   'Use resolve_capability_request only when async_work_update.pending contains a waiting_for_capability blocker. Approve or deny its requestRef; the OS remains the final authority.',
   'Always include turnSummary with concise request and outcome strings.',
-  'For final include output. For spawn_subagents include a non-empty children array.',
-  'Each child may set a character id to adopt a role; the OS rejects roles you cannot create.',
+  'For final include output.',
 ].join(' ');
 
 /** Builds the complete system instruction for one concrete Agent. */
@@ -256,6 +322,7 @@ export function buildStructuredAgentSystemInstruction(
   return [
     STRUCTURED_AGENT_INSTRUCTION,
     graphModeInstruction(request),
+    delegationInstruction(request),
     request.summaryProtocol.instruction,
     request.character === undefined
       ? undefined
@@ -486,16 +553,17 @@ function graphModeInstruction(request: ModelRequest): string | undefined {
   if (!graph) {
     return [
       'Graph mode is disabled for this task.',
-      'Available actions: async_work, final, needs_parent_action, request_capabilities, resolve_capability_request, spawn_subagents, tool_calls, wait_for_async_work.',
+      `Available actions: ${availableAgentActions(request).join(', ')}.`,
     ].join(' ');
   }
   if (graph.mode === 'plan') {
     return [
       'You are in the reserved plan node.',
-      'Assess the Agent goal, current graph results, available node kinds, characters, tools, and capabilities.',
+      request.delegation.canSpawnSubagents
+        ? 'Assess the Agent goal, current graph results, available node kinds, characters, tools, and capabilities.'
+        : 'Assess the Agent goal, current graph results, available node kinds, tools, and capabilities.',
       'Return set_graph with a complete acyclic work graph, or return final only when no graph exists for a trivial goal or every current graph node is completed or abandoned.',
       'Only plan mode may create or replace the graph.',
-      'Every delegated Agent starts in its own plan node.',
       'Available actions: set_graph, final, request_capabilities, resolve_capability_request, wait_for_async_work, needs_parent_action.',
     ].join(' ');
   }
@@ -526,6 +594,69 @@ function graphModeInstruction(request: ModelRequest): string | undefined {
     'Do not replace the graph or declare completion while work is pending.',
     'Available actions: wait_for_async_work and resolve_capability_request.',
   ].join(' ');
+}
+
+function delegationInstruction(request: ModelRequest): string | undefined {
+  if (!request.delegation.canSpawnSubagents) {
+    return undefined;
+  }
+  if (request.graph?.mode === 'plan') {
+    return [
+      'Delegate bounded graph nodes when independent specialist work is beneficial.',
+      'Choose child roles only from delegation.availableCharacters and request the narrowest required capability scopes.',
+      'Every delegated Agent starts in its own plan node.',
+    ].join(' ');
+  }
+  if (request.graph === undefined) {
+    return [
+      'Use spawn_subagents when the goal benefits from independent work, or async_work to start tools and subagents together.',
+      'Choose child roles only from delegation.availableCharacters and request the narrowest required capability scopes.',
+      'For spawn_subagents include a non-empty children array.',
+    ].join(' ');
+  }
+  return undefined;
+}
+
+function availableAgentActions(request: ModelRequest): string[] {
+  if (request.graph?.mode === 'plan') {
+    return [
+      'set_graph',
+      'final',
+      'request_capabilities',
+      'resolve_capability_request',
+      'wait_for_async_work',
+      'needs_parent_action',
+    ];
+  }
+  if (request.graph?.mode === 'execute') {
+    return [
+      'async_work',
+      'complete_node',
+      'request_capabilities',
+      'request_replan',
+      'resolve_capability_request',
+      'tool_calls',
+      'wait_for_async_work',
+    ];
+  }
+  if (request.graph?.mode === 'waiting') {
+    return [
+      'resolve_capability_request',
+      'wait_for_async_work',
+    ];
+  }
+  return [
+    'async_work',
+    'final',
+    'needs_parent_action',
+    'request_capabilities',
+    'resolve_capability_request',
+    ...(request.delegation.canSpawnSubagents
+      ? ['spawn_subagents']
+      : []),
+    'tool_calls',
+    'wait_for_async_work',
+  ];
 }
 
 function parseToolCalls(

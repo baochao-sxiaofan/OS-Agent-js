@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { TURN_SUMMARY_PROTOCOL, type ModelRequest } from '../src/index.js';
 import {
   AGENT_RESPONSE_JSON_SCHEMA,
+  buildAgentResponseJsonSchema,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from '../src/model/structured-agent-response.js';
@@ -33,6 +34,13 @@ const graphPlanRequest: ModelRequest = {
   },
 };
 
+function asObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Expected an object.');
+  }
+  return value as Record<string, unknown>;
+}
+
 describe('structured agent protocol', () => {
   it('exposes real tool and character actions in the provider schema', () => {
     expect(
@@ -45,6 +53,40 @@ describe('structured agent protocol', () => {
     ).toHaveProperty('character');
     expect(AGENT_RESPONSE_JSON_SCHEMA.properties).toHaveProperty(
       'calls',
+    );
+  });
+
+  it('removes child creation from the schema when delegation is unavailable', () => {
+    const schema = buildAgentResponseJsonSchema({
+      ...request,
+      delegation: { canSpawnSubagents: false },
+    });
+    const properties = asObject(schema['properties']);
+    const action = asObject(properties['action']);
+
+    expect(action['enum']).not.toContain('spawn_subagents');
+    expect(properties).not.toHaveProperty('children');
+  });
+
+  it('exposes only self graph assignees to a leaf Agent', () => {
+    const schema = buildAgentResponseJsonSchema({
+      ...graphPlanRequest,
+      delegation: { canSpawnSubagents: false },
+    });
+    const properties = asObject(schema['properties']);
+    const graph = asObject(properties['graph']);
+    const graphProperties = asObject(graph['properties']);
+    const nodes = asObject(graphProperties['nodes']);
+    const node = asObject(nodes['items']);
+    const nodeProperties = asObject(node['properties']);
+    const assignee = asObject(nodeProperties['assignee']);
+    const assigneeProperties = asObject(assignee['properties']);
+    const type = asObject(assigneeProperties['type']);
+
+    expect(type['enum']).toEqual(['self']);
+    expect(assigneeProperties).not.toHaveProperty('character');
+    expect(assigneeProperties).not.toHaveProperty(
+      'requestedCapabilities',
     );
   });
 

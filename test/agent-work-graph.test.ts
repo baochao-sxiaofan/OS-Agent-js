@@ -332,6 +332,107 @@ describe('Agent work graph', () => {
     );
   });
 
+  it('allows a developer to delegate to depth three and closes delegation there', async () => {
+    const { provider, scheduler } = createGraphRuntime([
+      'developer-middle',
+      'developer-leaf',
+    ]);
+    const root = await scheduler.submit({
+      id: 'recursive-specialists',
+      goal: 'Coordinate recursive implementation.',
+      characterId: 'coordinator',
+      maxModelAttempts: 8,
+    });
+    provider.setResponses(root.id, [
+      {
+        type: 'set_graph',
+        graph: {
+          goal: root.goal,
+          completionCriteria: ['The implementation is complete.'],
+          nodes: [
+            {
+              alias: 'implementation',
+              kind: 'implement',
+              objective: 'Implement the feature.',
+              dependsOn: [],
+              assignee: {
+                type: 'character',
+                character: 'developer',
+                requestedCapabilities: [],
+              },
+              acceptanceCriteria: ['Implementation is returned.'],
+            },
+          ],
+        },
+        usage,
+      },
+      { type: 'final', output: 'Integrated.', usage },
+    ]);
+    provider.setResponses('developer-middle', [
+      {
+        type: 'set_graph',
+        graph: {
+          goal: 'Implement the feature.',
+          completionCriteria: ['The nested implementation is complete.'],
+          nodes: [
+            {
+              alias: 'nested_implementation',
+              kind: 'implement',
+              objective: 'Implement an independent module.',
+              dependsOn: [],
+              assignee: {
+                type: 'character',
+                character: 'developer',
+                requestedCapabilities: [],
+              },
+              acceptanceCriteria: ['The module is returned.'],
+            },
+          ],
+        },
+        usage,
+      },
+      { type: 'final', output: 'Implementation complete.', usage },
+    ]);
+    provider.setResponses('developer-leaf', [
+      { type: 'set_graph', graph: selfGraph, usage },
+      { type: 'complete_node', output: 'Module complete.', usage },
+      { type: 'final', output: 'Leaf complete.', usage },
+    ]);
+
+    await scheduler.runUntilIdle();
+
+    expect(scheduler.getTask('developer-middle')).toMatchObject({
+      depth: 2,
+      characterId: 'developer',
+    });
+    expect(scheduler.getTask('developer-leaf')).toMatchObject({
+      depth: 3,
+      characterId: 'developer',
+    });
+    const middlePlan = provider.requests.find(
+      (request) =>
+        request.taskId === 'developer-middle' &&
+        request.graph?.mode === 'plan',
+    );
+    expect(middlePlan?.delegation.canSpawnSubagents).toBe(true);
+    expect(
+      middlePlan?.delegation.availableCharacters?.map(({ id }) => id),
+    ).toEqual(['developer', 'code_auditor', 'researcher']);
+
+    const leafPlan = provider.requests.find(
+      (request) =>
+        request.taskId === 'developer-leaf' &&
+        request.graph?.mode === 'plan',
+    );
+    expect(leafPlan?.delegation).toEqual({
+      canSpawnSubagents: false,
+    });
+    expect(root.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: { kind: 'completed', output: 'Integrated.' },
+    });
+  });
+
   it('rejects final while a self node is unfinished', async () => {
     const { provider, scheduler } = createGraphRuntime();
     const task = await scheduler.submit({

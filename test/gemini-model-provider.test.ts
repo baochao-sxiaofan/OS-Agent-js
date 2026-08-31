@@ -135,11 +135,13 @@ describe('GeminiModelProvider', () => {
       expect.arrayContaining([
         'tool_calls',
         'async_work',
-        'set_graph',
-        'complete_node',
-        'request_replan',
+        'final',
       ]),
     );
+    expect(
+      body.generationConfig?.responseJsonSchema?.properties?.action
+        ?.enum,
+    ).not.toContain('spawn_subagents');
     expect(
       body.generationConfig?.responseJsonSchema?.properties,
     ).toHaveProperty('calls');
@@ -147,9 +149,8 @@ describe('GeminiModelProvider', () => {
       body.generationConfig?.responseJsonSchema?.properties,
     ).toHaveProperty('graph');
     expect(
-      body.generationConfig?.responseJsonSchema?.properties?.children
-        ?.items?.properties,
-    ).toHaveProperty('character');
+      body.generationConfig?.responseJsonSchema?.properties,
+    ).not.toHaveProperty('children');
   });
 
   it('estimates input tokens and configured cost before admission', () => {
