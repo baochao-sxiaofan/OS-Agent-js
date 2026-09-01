@@ -5,6 +5,9 @@ export type ToolEffect = 'privileged' | 'read_only' | 'side_effect';
 
 export type ToolExecutionContext = {
   taskId: string;
+  /** Root task identity supplied by the scheduler; defaults to taskId for legacy hosts. */
+  rootTaskId?: string;
+  graphNodeAlias?: string;
   signal: AbortSignal;
   idempotencyKey: string;
   /**

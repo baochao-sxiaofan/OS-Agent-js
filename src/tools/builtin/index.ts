@@ -1,4 +1,8 @@
+import type { ArtifactStore } from '../../artifacts/artifact-store.js';
+import type { KnowledgeStore } from '../../knowledge/knowledge-store.js';
 import type { ToolRegistry } from '../tool-registry.js';
+import { createArtifactTools } from './artifact-tools.js';
+import { createGitTools } from './git-tools.js';
 import {
   directoryCreateTool,
   directoryDeleteTool,
@@ -10,6 +14,18 @@ import {
 } from './file-tools.js';
 import { fileApplyPatchTool } from './apply-patch-tool.js';
 import { workspaceSearchTool } from './search-tool.js';
+import { createKnowledgeTools } from './knowledge-tools.js';
+import {
+  createScreenCaptureTool,
+  type CapturedScreen,
+  type ScreenCapturePort,
+} from './screen-capture-tool.js';
+import {
+  createWebTools,
+  type WebAccessPort,
+  type WebFetchResult,
+  type WebSearchResult,
+} from './web-tools.js';
 import {
   createTestRunTool,
   type ProcessSandbox,
@@ -30,7 +46,11 @@ export const BUILTIN_TOOLS = [
 ] as const;
 
 export type RegisterBuiltinToolsOptions = {
+  artifactStore?: ArtifactStore;
+  knowledgeStore?: KnowledgeStore;
   processSandbox?: ProcessSandbox;
+  screenCapture?: ScreenCapturePort;
+  webAccess?: WebAccessPort;
 };
 
 /**
@@ -46,12 +66,43 @@ export function registerBuiltinTools(
   for (const tool of BUILTIN_TOOLS) {
     registry.register(tool);
   }
+  if (options.artifactStore) {
+    for (const tool of createArtifactTools(options.artifactStore)) {
+      registry.register(tool);
+    }
+  }
+  if (options.knowledgeStore) {
+    for (const tool of createKnowledgeTools(options.knowledgeStore)) {
+      registry.register(tool);
+    }
+  }
+  if (options.webAccess) {
+    for (const tool of createWebTools(options.webAccess)) {
+      registry.register(tool);
+    }
+  }
+  if (options.screenCapture) {
+    registry.register(createScreenCaptureTool(options.screenCapture));
+  }
   if (options.processSandbox) {
     registry.register(createTestRunTool(options.processSandbox));
+    for (const tool of createGitTools(options.processSandbox)) {
+      registry.register(tool);
+    }
   }
 }
 
 export {
+  createArtifactTools,
+  createKnowledgeTools,
+  createGitTools,
+  createScreenCaptureTool,
+  createWebTools,
+  type CapturedScreen,
+  type ScreenCapturePort,
+  type WebAccessPort,
+  type WebFetchResult,
+  type WebSearchResult,
   directoryCreateTool,
   directoryDeleteTool,
   directoryListTool,

@@ -119,6 +119,7 @@ describe('TaskScheduler character enforcement', () => {
       'developer',
       'code_auditor',
       'researcher',
+      'tester',
     ]);
   });
 

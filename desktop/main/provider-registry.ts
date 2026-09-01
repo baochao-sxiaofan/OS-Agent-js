@@ -88,6 +88,9 @@ export function createConfiguredProvider(
         model: config.modelId,
         apiKeyHeader: endpoint.apiKeyHeader,
         maxTokensField: endpoint.maxTokensField,
+        supportsReasoningEffort:
+          config.providerId === 'openai' ||
+          config.providerId === 'xai',
         ...(maxOutputTokens === undefined
           ? {}
           : { maxOutputTokens }),

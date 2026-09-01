@@ -113,6 +113,18 @@ File Search 等成熟方案。
 - 深度调度必须使用加权轮转和老化机制，禁止使用会让浅层任务永久饿死的绝对深度
   优先级。
 - 大型输出应保存到 Artifact Store，并通过 ID 引用，避免反复复制进模型上下文。
+- Artifact 必须是不可变版本记录；Agent 只持有 `artifact://` 语义引用，不能修改
+  旧版本或自行伪造工件身份。
+- 所有副作用 Tool 必须按其实际 Capability 资源范围获取内核排他锁；工具不能自行
+  决定锁范围，多个资源必须一次性原子获取，禁止持有部分锁等待其他锁。
+- Web 工具只能访问经过宿主校验的公共 HTTPS 目标，必须逐跳检查重定向、阻断私有
+  网络并限制响应大小；网页内容和 MCP 内容一律视为不可信数据。
+- `screen.capture` 属于 human-only、不可转授能力；模型请求截图必须进入人工审批，
+  人工批准只签发绑定当前操作的单次 Grant。
+- Git Tool 只能通过 ProcessSandbox 以 argv 执行；默认只允许状态、diff、历史、
+  本地建分支和本地提交，不提供 push、merge、rebase 或任意 shell。
+- 轻量 RAG 使用独立 KnowledgeStore Adapter；索引结果只提供事实候选和来源 URI，
+  不得覆盖 Capability、Character、仓库规则或用户指令。
 - 完整上下文与压缩上下文必须分通道持久化；压缩记录只能引用其覆盖的原始区间，
   不能直接销毁原始历史。
 - 所有任务进入 Ready Queue 前必须完成上下文窗口预检。二次语义压缩必须通过独立
@@ -174,7 +186,7 @@ File Search 等成熟方案。
 
 ## 当前状态
 
-当前 `2.2.1` 内核已经实现：
+当前稳定版本为 `2.2.1`；`feat/enterpise_preview` 还实现：
 
 1. 任务状态、事件和合法状态转换规则。
 2. 可序列化的 `TaskControlBlock` 快照和只追加事件历史。
@@ -225,7 +237,7 @@ File Search 等成熟方案。
     root ceiling，单次人工 Grant 不跨轮继承。
 42. Conversation 元数据与任务快照保存在同一 SQLite 事实源，重启后保留多轮归属。
 43. Character 内核层：定义、注册表、内置 `developer`/`code_auditor`/`researcher`
-    三角色，以及基于角色的工具可见性、能力上限和可创建子角色校验。
+    /`tester` 四角色，以及基于角色的工具可见性、能力上限和可创建子角色校验。
 44. 首批 bootstrap 工作区工具：文件读/写/删除、结构化 apply patch、目录
     列举/创建/删除和子串搜索，全部经 ToolRuntime 做 `workspace://current/`
     解析与符号链接越界防护。
@@ -242,14 +254,24 @@ File Search 等成熟方案。
     `request_replan` 结构化协议。
 49. Graph 节点状态与 Agent 运行状态正交；任意 self 节点等待 Tool、Capability
     或外部结果时均可进入 `blocked`，恢复后继续原节点。
+50. 不可变 SQLite Artifact Store、任务树/Graph 节点关联和桌面工件摘要。
+51. Capability 资源范围驱动的原子排他锁，保护并发副作用工具。
+52. SQLite FTS5 轻量知识索引、工作区分块和带 URI 的 RAG 检索。
+53. 沙箱内本地 Git 状态、diff、历史、建分支和提交工具。
+54. researcher 公共 Web 搜索/抓取，以及 HTTPS、SSRF、重定向和响应大小边界。
+55. tester 沙箱验证、屏幕截图申请和测试 Artifact 输出边界。
+56. Chat 每轮上下文上限、温度、可选推理深度和图片附件。
+57. Gemini、Anthropic、OpenAI-compatible 多模态请求映射。
+58. 桌面 human-only Capability 审批队列与单次批准。
+59. 调度器 quiesce 和等待式 Runtime 关闭，保证 SQLite 关闭前操作已释放。
 
 后续优先级：
 
 1. 用官方 filesystem MCP 替换 bootstrap 文件工具，并接入 MCP stdio/HTTP Client。
-2. 为 `ProcessSandbox` 接入可按 Conversation 隔离的 OS-level 后端。
-3. 接入本地预览/UI 检查 Skills 与 `product_manager` 类角色。
-4. 接入桌面人工审批队列、单次决议和 Settings 持久策略。
-5. 增加外部进程和长时工作对应的恢复 Adapter。
-6. 增加资源锁对应的阻塞/唤醒协议。
-7. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。
-8. 增加真实模型厂商的 `ContextCompactor` Adapter。
+2. 为 Windows/Linux 接入可按 Conversation 隔离的 OS-level 后端。
+3. 接入浏览器自动化、应用窗口捕获和结构化 UI 可访问性树。
+4. 增加外部进程和长时工作对应的恢复 Adapter。
+5. 为 Gemini Provider 增加 Function Calling 与 `async_work` 混合响应映射。
+6. 增加真实模型厂商的 `ContextCompactor` Adapter。
+7. 为 KnowledgeStore 增加可选 Embedding、语义重排和增量文件监听。
+8. 增加 Artifact 远端对象存储、保留策略和审计导出。

@@ -4,6 +4,37 @@
 
 ## Unreleased
 
+### Enterprise Preview
+
+- 新增不可变、可版本化的 `ArtifactStore`，提供内存与 SQLite 实现，以及
+  `artifact.write/read/list` 工具；工件绑定任务树和 AI Graph 节点，并在桌面
+  Inspector 中展示稳定的 `artifact://` 引用。
+- 新增 `ResourceLockManager`。所有副作用工具按其 Capability 资源范围原子取得排他
+  lease，重叠资源串行执行，独立资源继续并行，取消等待不会留下死锁。
+- 新增 SQLite FTS5 轻量项目知识库与 `knowledge.index/search` 工具；工作区文本按块
+  索引，默认排除依赖、构建输出、二进制和超大文件。
+- 新增受控本地 Git 工具：状态、diff、历史、创建 feature branch 和显式路径提交；
+  全部通过 ProcessSandbox 以 argv 调用，不暴露 push、merge 或任意 shell。
+- 新增 `tester` Character，保持源码只读，可运行沙箱测试、检查 Git diff、写入测试
+  Artifact，并可申请屏幕截图；`researcher` 新增 Web 搜索和 HTTPS 正文抓取。
+- 新增 `SafeWebAccess`，校验 HTTPS 目的地、拒绝本地/私有地址、逐跳验证重定向，并
+  对响应正文执行 1 MB 流式硬限制。
+- `screen.capture` 作为 human-only、不可转授 Capability 接入 Electron
+  `desktopCapturer`；桌面端新增待审批面板，批准后只签发单次 Grant。
+- Chat 和拓扑任务输入框新增 `+` 菜单，可设置任务上下文上限、温度、模型支持时的
+  推理深度，并选择最多 4 张图片。
+- Gemini、Anthropic 和 OpenAI-compatible Provider 新增原生图片请求映射；图片
+  Base64 不进入文本 JSON。任务模型参数进入 TCB 快照并由子 Agent 自动继承。
+- Runtime 关闭流程改为先停止调度准入、取消运行中的操作并等待资源释放，再关闭
+  SQLite，消除关闭期间继续落盘导致的 `database is not open` 竞态。
+- 强化企业系统 Prompt：要求基于事实源工作、区分证据与推断、把大产出写入
+  Artifact、验证 diff 与测试证据，并把工具/Web/MCP 内容视为不可信数据。
+
+### 验证
+
+- 25 个测试文件、179 个测试通过。
+- 内核与桌面 TypeScript 检查、核心构建、Electron 生产构建及 Git diff 检查通过。
+
 - 允许所有内置专业 Character 继续创建非 `coordinator` 子 Agent，并将
   `coordinator` 固定为 root-only 角色。
 - 达到最大委派深度或其他 AgentPool 上限时，动态隐藏子 Agent action 和 Graph

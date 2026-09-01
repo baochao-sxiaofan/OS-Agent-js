@@ -4,7 +4,9 @@ export const IPC_CHANNELS = {
   discoverModels: 'runtime:discover-models',
   getModelSettings: 'runtime:get-model-settings',
   getSnapshot: 'runtime:get-snapshot',
+  resolveCapabilityApproval: 'runtime:resolve-capability-approval',
   saveModelSettings: 'runtime:save-model-settings',
+  selectImages: 'runtime:select-images',
   selectWorkspace: 'runtime:select-workspace',
   snapshotChanged: 'runtime:snapshot-changed',
   submitTask: 'runtime:submit-task',
@@ -36,6 +38,8 @@ export type ProviderDescriptor = {
   catalogMode: 'api' | 'manual';
   credentialLabel: string;
   requiresWorkspaceId: boolean;
+  supportsTemperature: boolean;
+  supportsReasoningEffort: boolean;
   note?: string;
 };
 
@@ -48,6 +52,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'api',
     credentialLabel: 'OpenAI API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: true,
   },
   {
     id: 'anthropic',
@@ -57,6 +63,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'api',
     credentialLabel: 'Anthropic API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: true,
   },
   {
     id: 'gemini',
@@ -66,6 +74,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'api',
     credentialLabel: 'Gemini API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: true,
   },
   {
     id: 'moonshot',
@@ -75,6 +85,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'api',
     credentialLabel: 'Moonshot API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: false,
   },
   {
     id: 'xai',
@@ -84,6 +96,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'api',
     credentialLabel: 'xAI API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: true,
   },
   {
     id: 'minimax',
@@ -93,6 +107,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'api',
     credentialLabel: 'MiniMax API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: false,
   },
   {
     id: 'zhipu',
@@ -102,6 +118,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'manual',
     credentialLabel: '智谱 API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: false,
     note: '当前使用官方模型目录选择模型 ID。',
   },
   {
@@ -112,6 +130,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'api',
     credentialLabel: 'DeepSeek API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: false,
   },
   {
     id: 'qwen',
@@ -121,6 +141,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'api',
     credentialLabel: '百炼 API Key',
     requiresWorkspaceId: true,
+    supportsTemperature: true,
+    supportsReasoningEffort: false,
     note: '当前接入华北 2（北京）业务空间。',
   },
   {
@@ -131,6 +153,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'manual',
     credentialLabel: '方舟 API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: false,
     note: '请填写已开通模型 ID 或推理接入点 ID。',
   },
   {
@@ -141,6 +165,8 @@ export const PROVIDER_CATALOG: readonly ProviderDescriptor[] = [
     catalogMode: 'api',
     credentialLabel: 'MiMo API Key',
     requiresWorkspaceId: false,
+    supportsTemperature: true,
+    supportsReasoningEffort: false,
   },
 ] as const;
 
@@ -244,6 +270,15 @@ export type AgentWorkGraphView = {
   nodes: AgentWorkNodeView[];
 };
 
+export type ArtifactSummaryView = {
+  uri: string;
+  kind: string;
+  title: string;
+  revision: number;
+  graphNodeAlias?: string;
+  createdAt: number;
+};
+
 export type AgentNodeView = {
   id: string;
   rootTaskId: string;
@@ -267,6 +302,7 @@ export type AgentNodeView = {
   createdAt: number;
   updatedAt: number;
   events: AgentEventView[];
+  artifacts: ArtifactSummaryView[];
 };
 
 export type ConversationRoundView = {
@@ -302,13 +338,48 @@ export type RuntimeSnapshotView = {
   isDemoMode: boolean;
   platform: string;
   metrics: RuntimeMetricsView;
+  pendingApprovals: HumanCapabilityApprovalView[];
   conversations: ConversationView[];
+};
+
+export type HumanCapabilityApprovalView = {
+  requestId: string;
+  requesterGoal: string;
+  createdAt: number;
+  requests: Array<{
+    capability: string;
+    scope: string;
+    reason?: string;
+  }>;
+};
+
+export type ResolveCapabilityApprovalInput = {
+  requestId: string;
+  decision: 'approve' | 'deny';
+  reason?: string;
 };
 
 export type SubmitTaskInput = {
   conversationId: string;
   task: string;
+  attachments?: ImageAttachmentInput[];
+  preferences?: TaskModelPreferences;
 };
+
+export type TaskModelPreferences = {
+  maxContextTokens?: number;
+  temperature?: number;
+  reasoningEffort?: 'auto' | 'low' | 'medium' | 'high';
+};
+
+export type ImageAttachmentInput = {
+  id: string;
+  name: string;
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+  dataBase64: string;
+};
+
+export type TaskDraft = Omit<SubmitTaskInput, 'conversationId'>;
 
 export type DesktopApi = {
   getSnapshot(): Promise<RuntimeSnapshotView>;
@@ -320,9 +391,13 @@ export type DesktopApi = {
   selectWorkspace(
     conversationId: string,
   ): Promise<RuntimeSnapshotView | undefined>;
+  selectImages(): Promise<ImageAttachmentInput[]>;
   saveModelSettings(
     input: SaveModelSettingsInput,
   ): Promise<SaveModelSettingsResult>;
+  resolveCapabilityApproval(
+    input: ResolveCapabilityApprovalInput,
+  ): Promise<RuntimeSnapshotView>;
   submitTask(input: SubmitTaskInput): Promise<RuntimeSnapshotView>;
   cancelTask(taskId: string): Promise<RuntimeSnapshotView>;
   onSnapshotChanged(

@@ -94,4 +94,58 @@ describe('dual-channel context management', () => {
     expect(restored.context).toEqual(task.context);
     expect(restored.contextSummaries).toEqual(task.contextSummaries);
   });
+
+  it('persists root model preferences and inherits them into children', () => {
+    const root = TaskControlBlock.createAgent(
+      {
+        id: 'preferences-root',
+        goal: 'Use bounded model settings.',
+        modelPreferences: {
+          maxContextTokens: 32_000,
+          temperature: 0.2,
+          reasoningEffort: 'high',
+        },
+      },
+      { kind: 'root' },
+    );
+    const child = TaskControlBlock.createAgent(
+      {
+        id: 'preferences-child',
+        goal: 'Inherit parent settings.',
+      },
+      { kind: 'child', parent: root },
+    );
+
+    expect(child.modelPreferences).toEqual(root.modelPreferences);
+    expect(
+      TaskControlBlock.restore(child.snapshot()).modelPreferences,
+    ).toEqual({
+      maxContextTokens: 32_000,
+      temperature: 0.2,
+      reasoningEffort: 'high',
+    });
+  });
+
+  it('rejects context and temperature settings outside safe bounds', () => {
+    expect(() =>
+      TaskControlBlock.createAgent(
+        {
+          id: 'invalid-context',
+          goal: 'Invalid context.',
+          modelPreferences: { maxContextTokens: 4_095 },
+        },
+        { kind: 'root' },
+      ),
+    ).toThrow('between 4096 and 2000000');
+    expect(() =>
+      TaskControlBlock.createAgent(
+        {
+          id: 'invalid-temperature',
+          goal: 'Invalid temperature.',
+          modelPreferences: { temperature: 2.1 },
+        },
+        { kind: 'root' },
+      ),
+    ).toThrow('between 0 and 2');
+  });
 });

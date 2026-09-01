@@ -8,7 +8,10 @@ import type {
   CapabilityRequestRecord,
 } from '../capability/capability.js';
 import { CapabilityManager } from '../capability/capability-manager.js';
-import type { ModelUsage } from '../model/model-provider.js';
+import type {
+  ModelRuntimePreferences,
+  ModelUsage,
+} from '../model/model-provider.js';
 import type { JsonValue } from '../types/json.js';
 import {
   agentWorkGraphMode,
@@ -36,6 +39,7 @@ import type {
   ContextSummaryRecord,
   TurnSummary,
 } from './context.js';
+import { MODEL_IMAGE_MARKER } from './context.js';
 import { assertTaskTransition } from './state-machine.js';
 import type { TaskEvent } from './task-event.js';
 import type { TaskState, Termination } from './task-state.js';
@@ -95,6 +99,8 @@ export type CreateAgentRequest = {
     /** 该任务允许消耗的最高美元金额。 */
     maxCostUsd: number;
   };
+  /** Root-selected model controls; descendants inherit them automatically. */
+  modelPreferences?: ModelRuntimePreferences;
 };
 
 /**
@@ -160,6 +166,8 @@ export type TaskSnapshot = {
   budget: TaskBudget;
   /** 已经启动的模型请求尝试次数。 */
   modelAttempts: number;
+  /** Per-task model controls selected by the user at the root. */
+  modelPreferences?: ModelRuntimePreferences;
   /** 模型请求允许尝试的次数上限。 */
   maxModelAttempts: number;
   /** 任务创建时的 Unix 毫秒时间戳。 */
@@ -213,6 +221,7 @@ export class TaskControlBlock {
   #budget: TaskBudget;
   /** 已经启动的模型请求尝试次数。 */
   #modelAttempts: number;
+  readonly #modelPreferences: ModelRuntimePreferences;
   /** 模型请求允许尝试的次数上限。 */
   #maxModelAttempts: number;
   /** 最近一次可观测修改的时间。 */
@@ -288,6 +297,9 @@ export class TaskControlBlock {
     this.#state = structuredClone(snapshot.state);
     this.#budget = { ...snapshot.budget };
     this.#modelAttempts = snapshot.modelAttempts;
+    this.#modelPreferences = validateModelPreferences(
+      snapshot.modelPreferences ?? {},
+    );
     this.#maxModelAttempts = snapshot.maxModelAttempts;
     this.#updatedAt = snapshot.updatedAt;
     this.#events = structuredClone(snapshot.events);
@@ -369,6 +381,9 @@ export class TaskControlBlock {
         spentCostUsd: 0,
       },
       modelAttempts: 0,
+      modelPreferences: validateModelPreferences(
+        request.modelPreferences ?? parent?.modelPreferences ?? {},
+      ),
       maxModelAttempts: request.maxModelAttempts ?? 3,
       createdAt,
       updatedAt: createdAt,
@@ -665,6 +680,10 @@ export class TaskControlBlock {
   /** 获取已经启动的模型请求尝试次数。 */
   get modelAttempts(): number {
     return this.#modelAttempts;
+  }
+
+  get modelPreferences(): Readonly<ModelRuntimePreferences> {
+    return this.#modelPreferences;
   }
 
   /** 获取模型请求允许尝试的次数上限。 */
@@ -1425,7 +1444,7 @@ export class TaskControlBlock {
       type: 'tool_result_recorded',
       callId,
       toolName,
-      output,
+      output: auditSafeToolOutput(output),
     });
   }
 
@@ -1488,6 +1507,7 @@ export class TaskControlBlock {
       state: structuredClone(this.#state),
       budget: { ...this.#budget },
       modelAttempts: this.#modelAttempts,
+      modelPreferences: structuredClone(this.#modelPreferences),
       maxModelAttempts: this.#maxModelAttempts,
       createdAt: this.createdAt,
       updatedAt: this.#updatedAt,
@@ -1769,4 +1789,64 @@ function restoreLegacyCapabilityGrants(
     ...grant,
     grantId: `legacy:${snapshot.id}:${index}`,
   }));
+}
+
+function auditSafeToolOutput(output: JsonValue): JsonValue {
+  if (
+    typeof output !== 'object' ||
+    output === null ||
+    Array.isArray(output) ||
+    output['marker'] !== MODEL_IMAGE_MARKER
+  ) {
+    return structuredClone(output);
+  }
+  return {
+    marker: MODEL_IMAGE_MARKER,
+    ...(typeof output['mimeType'] === 'string'
+      ? { mimeType: output['mimeType'] }
+      : {}),
+    ...(typeof output['width'] === 'number'
+      ? { width: output['width'] }
+      : {}),
+    ...(typeof output['height'] === 'number'
+      ? { height: output['height'] }
+      : {}),
+    ...(typeof output['sourceName'] === 'string'
+      ? { sourceName: output['sourceName'] }
+      : {}),
+    binaryPayloadRedacted: true,
+  };
+}
+
+function validateModelPreferences(
+  preferences: ModelRuntimePreferences,
+): ModelRuntimePreferences {
+  const maxContextTokens = preferences.maxContextTokens;
+  if (
+    maxContextTokens !== undefined &&
+    (!Number.isInteger(maxContextTokens) ||
+      maxContextTokens < 4_096 ||
+      maxContextTokens > 2_000_000)
+  ) {
+    throw new Error(
+      'Model context limit must be an integer between 4096 and 2000000.',
+    );
+  }
+  const temperature = preferences.temperature;
+  if (
+    temperature !== undefined &&
+    (!Number.isFinite(temperature) ||
+      temperature < 0 ||
+      temperature > 2)
+  ) {
+    throw new Error('Model temperature must be between 0 and 2.');
+  }
+  const reasoningEffort = preferences.reasoningEffort;
+  if (
+    reasoningEffort !== undefined &&
+    !['auto', 'low', 'medium', 'high'].includes(reasoningEffort)
+  ) {
+    throw new Error('Model reasoning effort is invalid.');
+  }
+  return structuredClone(preferences);
 }

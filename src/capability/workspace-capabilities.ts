@@ -23,6 +23,8 @@ export const WORKSPACE_FILESYSTEM_CAPABILITIES = [
 ] as const;
 
 export type WorkspaceCapabilityOptions = {
+  includeArtifactStore?: boolean;
+  includeKnowledgeStore?: boolean;
   includeTestRun?: boolean;
 };
 
@@ -51,6 +53,42 @@ export function createWorkspaceCapabilityRequests(
         resource: CURRENT_WORKSPACE_RESOURCE,
       },
     });
+  }
+  if (options.includeArtifactStore) {
+    requests.push(
+      {
+        capability: 'artifact.read',
+        scope: {
+          kind: 'subtree',
+          resource: 'artifact://task/',
+        },
+      },
+      {
+        capability: 'artifact.write',
+        scope: {
+          kind: 'subtree',
+          resource: 'artifact://task/',
+        },
+      },
+    );
+  }
+  if (options.includeKnowledgeStore) {
+    requests.push(
+      {
+        capability: 'knowledge.read',
+        scope: {
+          kind: 'subtree',
+          resource: CURRENT_WORKSPACE_RESOURCE,
+        },
+      },
+      {
+        capability: 'knowledge.write',
+        scope: {
+          kind: 'subtree',
+          resource: CURRENT_WORKSPACE_RESOURCE,
+        },
+      },
+    );
   }
   return requests;
 }

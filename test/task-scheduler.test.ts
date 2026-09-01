@@ -1068,6 +1068,47 @@ describe('TaskScheduler', () => {
     });
   });
 
+  it('enforces the task-selected context ceiling below the provider limit', async () => {
+    const provider = new FakeModelProvider({
+      contextWindowTokens: 128_000,
+      estimate: {
+        inputTokens: 3_500,
+        maxOutputTokens: 100,
+        estimatedCostUsd: 0.001,
+      },
+    });
+    const scheduler = new TaskScheduler({
+      provider,
+      tools: new ToolRegistry(),
+      store: new InMemoryTaskStore(),
+      admission: new AdmissionController({
+        maxConcurrentRequests: 1,
+        requestsPerMinute: 10,
+        tokensPerMinute: 128_000,
+      }),
+    });
+
+    const task = await scheduler.submit({
+      id: 'bounded-context',
+      goal: 'Respect the user context ceiling.',
+      modelPreferences: {
+        maxContextTokens: 4_096,
+        temperature: 0.2,
+        reasoningEffort: 'medium',
+      },
+      context: [{ type: 'user', content: 'large logical context' }],
+    });
+
+    expect(provider.requests).toHaveLength(0);
+    expect(task.state).toMatchObject({
+      status: 'TERMINATED',
+      termination: {
+        kind: 'failed',
+        error: expect.stringContaining('no context compactor'),
+      },
+    });
+  });
+
   it('wakes a parent when a child fails context preflight', async () => {
     const provider = new FakeModelProvider({
       contextWindowTokens: 100,

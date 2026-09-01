@@ -13,6 +13,7 @@ describe('CharacterRegistry', () => {
     expect(registry.has('developer')).toBe(true);
     expect(registry.has('code_auditor')).toBe(true);
     expect(registry.has('researcher')).toBe(true);
+    expect(registry.has('tester')).toBe(true);
     expect(registry.get('developer').id).toBe(DEVELOPER_CHARACTER.id);
   });
 
@@ -122,5 +123,45 @@ describe('CharacterRegistry', () => {
         { capability: 'anything', scope: { kind: 'all' } },
       ]),
     ).toBeUndefined();
+  });
+
+  it('keeps tester read-only while granting sandboxed execution and screen inspection', () => {
+    const registry = new CharacterRegistry();
+    const tester = registry.get('tester');
+
+    expect(tester.visibleToolIds).toEqual(
+      expect.arrayContaining([
+        'test.run',
+        'screen.capture',
+        'artifact.write',
+        'git.diff',
+      ]),
+    );
+    expect(tester.visibleToolIds).not.toContain('file.write');
+    expect(tester.capabilityCeiling).toEqual(
+      expect.arrayContaining([
+        'test.run',
+        'screen.capture',
+        'artifact.write',
+      ]),
+    );
+    expect(tester.capabilityCeiling).not.toContain('file.write');
+  });
+
+  it('gives researcher network search without source-code mutation tools', () => {
+    const researcher = new CharacterRegistry().get('researcher');
+
+    expect(researcher.visibleToolIds).toEqual(
+      expect.arrayContaining([
+        'web.search',
+        'web.fetch',
+        'knowledge.search',
+        'artifact.write',
+      ]),
+    );
+    expect(researcher.visibleToolIds).not.toContain('file.apply_patch');
+    expect(researcher.visibleToolIds).not.toContain('file.write');
+    expect(researcher.capabilityCeiling).not.toContain('file.write');
+    expect(researcher.capabilityCeiling).toContain('network.http.read');
   });
 });

@@ -75,6 +75,21 @@ export type ModelUsage = {
   costUsd: number;
 };
 
+export type ModelReasoningEffort =
+  | 'auto'
+  | 'low'
+  | 'medium'
+  | 'high';
+
+export type ModelRuntimePreferences = {
+  /** Per-task context ceiling. The scheduler clamps to the provider limit. */
+  maxContextTokens?: number;
+  /** Sampling temperature when the selected provider/model supports it. */
+  temperature?: number;
+  /** Provider-neutral reasoning depth hint. Unsupported providers ignore it. */
+  reasoningEffort?: ModelReasoningEffort;
+};
+
 export type SubagentSpawnRequest = {
   goal: string;
   /** 子 Agent 扮演的 Character 标识；由内核校验是否允许创建。 */
@@ -173,6 +188,7 @@ export type ModelRequest = {
     requestableCapabilities: readonly string[];
   };
   attempt: number;
+  preferences?: ModelRuntimePreferences;
   summaryProtocol: TurnSummaryProtocol;
   graph?: {
     mode: AgentWorkGraphMode;

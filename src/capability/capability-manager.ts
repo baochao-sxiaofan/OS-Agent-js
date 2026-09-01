@@ -38,6 +38,11 @@ export const DEFAULT_CAPABILITY_POLICIES: readonly CapabilityPolicy[] = [
     delegable: false,
   },
   {
+    capabilityPattern: 'screen.capture',
+    approval: 'human',
+    delegable: false,
+  },
+  {
     capabilityPattern: 'deploy.production',
     approval: 'human',
     delegable: false,

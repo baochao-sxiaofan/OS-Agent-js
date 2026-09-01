@@ -171,6 +171,90 @@ describe('GeminiModelProvider', () => {
     expect(estimate.estimatedCostUsd).toBeGreaterThan(0);
   });
 
+  it('maps Gemini temperature, thinking level, and inline image data', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: JSON.stringify({
+                  action: 'final',
+                  output: 'inspected',
+                  turnSummary: {
+                    request: 'Inspect image.',
+                    outcome: 'Inspected image.',
+                  },
+                }) }],
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const provider = new GeminiModelProvider({
+      apiKey: 'test-key',
+      model: 'gemini-3-test',
+      fetchImplementation,
+    });
+
+    await provider.invoke(
+      {
+        ...request,
+        preferences: {
+          temperature: 0.5,
+          reasoningEffort: 'high',
+        },
+        context: [
+          {
+            type: 'user',
+            content: 'Inspect image.',
+            attachments: [
+              {
+                id: 'image-1',
+                name: 'ui.png',
+                mimeType: 'image/png',
+                dataBase64: 'aW1hZ2U=',
+              },
+            ],
+          },
+        ],
+      },
+      new AbortController().signal,
+    );
+
+    const body = JSON.parse(
+      String(fetchImplementation.mock.calls[0]?.[1]?.body),
+    ) as {
+      generationConfig: {
+        temperature: number;
+        thinkingConfig?: { thinkingLevel: string };
+      };
+      contents: Array<{
+        parts: Array<{
+          text?: string;
+          inlineData?: { mimeType: string; data: string };
+        }>;
+      }>;
+    };
+    expect(body.generationConfig).toMatchObject({
+      temperature: 0.5,
+      thinkingConfig: { thinkingLevel: 'HIGH' },
+    });
+    expect(body.contents[0]?.parts).toEqual(
+      expect.arrayContaining([
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ]),
+    );
+    expect(body.contents[0]?.parts[0]?.text).not.toContain('aW1hZ2U=');
+  });
+
   it('surfaces provider errors without including the API key', async () => {
     const provider = new GeminiModelProvider({
       apiKey: 'secret-test-key',

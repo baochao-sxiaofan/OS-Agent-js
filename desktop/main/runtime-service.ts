@@ -11,6 +11,8 @@ import {
   extractInheritableRootAuthority,
   FakeModelProvider,
   registerBuiltinTools,
+  SqliteArtifactStore,
+  SqliteKnowledgeStore,
   TaskScheduler,
   ToolRegistry,
   TURN_SUMMARY_PROTOCOL,
@@ -18,7 +20,9 @@ import {
   type CapabilityRequest,
   type ContextItem,
   type ProcessSandbox,
+  type ScreenCapturePort,
   type TaskSnapshot,
+  type WebAccessPort,
 } from '../../src/index.js';
 import type { TaskEvent } from '../../src/kernel/task-event.js';
 import type {
@@ -62,6 +66,8 @@ export type RuntimeServiceOptions = {
   storeLocation?: string;
   /** Enables `test.run`; must isolate the complete child process tree. */
   processSandbox?: ProcessSandbox;
+  screenCapture?: ScreenCapturePort;
+  webAccess?: WebAccessPort;
 };
 
 const DEMO_USAGE = {
@@ -88,13 +94,18 @@ export class RuntimeService {
   readonly #provider: SwitchableModelProvider;
   #fakeProvider: FakeModelProvider | undefined;
   readonly #store: ObservableTaskStore;
+  readonly #artifactStore: SqliteArtifactStore;
+  readonly #knowledgeStore: SqliteKnowledgeStore;
   readonly #scheduler: TaskScheduler;
   readonly #processSandboxEnabled: boolean;
+  readonly #screenCaptureEnabled: boolean;
+  readonly #webAccessEnabled: boolean;
   readonly #conversations = new Map<string, ConversationRecord>();
   readonly #listeners = new Set<RuntimeListener>();
   readonly #demoChildTaskIds = new Map<string, string>();
   #runPromise: Promise<void> | undefined;
   #initializePromise: Promise<void> | undefined;
+  #closePromise: Promise<void> | undefined;
   #publishQueued = false;
   #closed = false;
 
@@ -109,17 +120,30 @@ export class RuntimeService {
         : undefined;
 
     // 默认使用内存库，桌面端主进程会传入 userData 目录下的持久化文件路径。
-    this.#store = new ObservableTaskStore(
-      options.storeLocation ?? ':memory:',
-    );
+    const storeLocation = options.storeLocation ?? ':memory:';
+    this.#store = new ObservableTaskStore(storeLocation);
+    this.#artifactStore = new SqliteArtifactStore({
+      location: storeLocation,
+    });
+    this.#knowledgeStore = new SqliteKnowledgeStore(storeLocation);
 
     const tools = new ToolRegistry();
     registerBuiltinTools(tools, {
+      artifactStore: this.#artifactStore,
+      knowledgeStore: this.#knowledgeStore,
       ...(options.processSandbox === undefined
         ? {}
         : { processSandbox: options.processSandbox }),
+      ...(options.screenCapture === undefined
+        ? {}
+        : { screenCapture: options.screenCapture }),
+      ...(options.webAccess === undefined
+        ? {}
+        : { webAccess: options.webAccess }),
     });
     this.#processSandboxEnabled = options.processSandbox !== undefined;
+    this.#screenCaptureEnabled = options.screenCapture !== undefined;
+    this.#webAccessEnabled = options.webAccess !== undefined;
     this.#scheduler = new TaskScheduler({
       provider: this.#provider,
       tools,
@@ -163,9 +187,9 @@ export class RuntimeService {
     await this.#initializePromise;
   }
 
-  close(): void {
-    this.#closed = true;
-    this.#store.close();
+  async close(): Promise<void> {
+    this.#closePromise ??= this.#close();
+    await this.#closePromise;
   }
 
   subscribe(listener: RuntimeListener): () => void {
@@ -248,6 +272,23 @@ export class RuntimeService {
           limit: AGENT_POOL_POLICY.maxLiveAgents,
         },
       },
+      pendingApprovals: this.#scheduler
+        .pendingHumanCapabilityApprovals()
+        .map((approval) => ({
+          requestId: approval.requestId,
+          requesterGoal: approval.requesterGoal,
+          createdAt: approval.createdAt,
+          requests: approval.requests.map((request) => ({
+            capability: request.capability,
+            scope:
+              request.scope.kind === 'all'
+                ? 'all resources'
+                : `${request.scope.kind}:${request.scope.resource}`,
+            ...(request.reason === undefined
+              ? {}
+              : { reason: request.reason }),
+          })),
+        })),
       conversations: [...this.#conversations.values()]
         .sort((left, right) => right.updatedAt - left.updatedAt)
         .map((conversation) =>
@@ -347,7 +388,11 @@ export class RuntimeService {
           conversation,
           rootTaskId,
           task,
+          input.attachments,
         ),
+        ...(input.preferences === undefined
+          ? {}
+          : { modelPreferences: input.preferences }),
         maxModelAttempts: ROOT_TASK_POLICY.maxModelAttempts,
         budget: { maxCostUsd: ROOT_TASK_POLICY.maxCostUsd },
       });
@@ -370,6 +415,24 @@ export class RuntimeService {
     return this.getSnapshot();
   }
 
+  async resolveCapabilityApproval(
+    requestId: string,
+    decision: 'approve' | 'deny',
+    reason?: string,
+  ): Promise<RuntimeSnapshotView> {
+    if (this.#closed) {
+      throw new Error('Runtime is closed.');
+    }
+    await this.#scheduler.resolveHumanCapabilityRequest(
+      requestId,
+      decision,
+      reason,
+    );
+    this.#ensureSchedulerRunning();
+    this.#queuePublish();
+    return this.getSnapshot();
+  }
+
   private createConversationRecord(): ConversationRecord {
     const now = Date.now();
     return {
@@ -378,7 +441,7 @@ export class RuntimeService {
       createdAt: now,
       updatedAt: now,
       rootTaskIds: [],
-      authorityCeiling: [],
+      authorityCeiling: this.initialRuntimeAuthority(),
     };
   }
 
@@ -386,6 +449,7 @@ export class RuntimeService {
     conversation: ConversationRecord,
     currentRootTaskId: string,
     currentTask: string,
+    attachments?: SubmitTaskInput['attachments'],
   ): ContextItem[] {
     const snapshots = this.#store.list();
     const context: ContextItem[] =
@@ -443,14 +507,66 @@ export class RuntimeService {
           break;
       }
     }
-    context.push({ type: 'user', content: currentTask });
+    context.push({
+      type: 'user',
+      content: currentTask,
+      ...(attachments === undefined || attachments.length === 0
+        ? {}
+        : { attachments: structuredClone(attachments) }),
+    });
     return context;
   }
 
   private initialWorkspaceAuthority(): CapabilityRequest[] {
-    return createWorkspaceCapabilityRequests({
+    const requests = createWorkspaceCapabilityRequests({
+      includeKnowledgeStore: true,
       includeTestRun: this.#processSandboxEnabled,
     });
+    if (this.#processSandboxEnabled) {
+      requests.push(
+        {
+          capability: 'git.read',
+          scope: {
+            kind: 'subtree',
+            resource: CURRENT_WORKSPACE_RESOURCE,
+          },
+        },
+        {
+          capability: 'git.write',
+          scope: {
+            kind: 'subtree',
+            resource: CURRENT_WORKSPACE_RESOURCE,
+          },
+        },
+      );
+    }
+    return requests;
+  }
+
+  private initialRuntimeAuthority(): CapabilityRequest[] {
+    const requests: CapabilityRequest[] = [
+      {
+        capability: 'artifact.read',
+        scope: { kind: 'subtree', resource: 'artifact://task/' },
+      },
+      {
+        capability: 'artifact.write',
+        scope: { kind: 'subtree', resource: 'artifact://task/' },
+      },
+    ];
+    if (this.#screenCaptureEnabled) {
+      requests.push({
+        capability: 'screen.capture',
+        scope: { kind: 'exact', resource: 'screen://primary' },
+      });
+    }
+    if (this.#webAccessEnabled) {
+      requests.push({
+        capability: 'network.http.read',
+        scope: { kind: 'all' },
+      });
+    }
+    return requests;
   }
 
   async #restorePersistedTasks(): Promise<void> {
@@ -632,12 +748,13 @@ export class RuntimeService {
         updatedAt: candidate['updatedAt'],
         rootTaskIds: [...candidate['rootTaskIds']],
         ...(workspacePath === undefined ? {} : { workspacePath }),
-        authorityCeiling:
-          authorityCeiling.length > 0
-            ? authorityCeiling
-            : workspacePath === undefined
-              ? []
-              : this.initialWorkspaceAuthority(),
+        authorityCeiling: this.mergeCapabilityRequests(
+          this.initialRuntimeAuthority(),
+          authorityCeiling,
+          ...(workspacePath === undefined
+            ? []
+            : [this.initialWorkspaceAuthority()]),
+        ),
       });
     }
     return conversations;
@@ -896,7 +1013,7 @@ export class RuntimeService {
   }
 
   #ensureSchedulerRunning(): void {
-    if (this.#runPromise) {
+    if (this.#closed || this.#runPromise) {
       return;
     }
 
@@ -910,12 +1027,23 @@ export class RuntimeService {
         this.#runPromise = undefined;
         this.#queuePublish();
         if (
-          this.#scheduler.readyQueueSize > 0 ||
-          this.#scheduler.activeOperationCount > 0
+          !this.#closed &&
+          (this.#scheduler.readyQueueSize > 0 ||
+            this.#scheduler.activeOperationCount > 0)
         ) {
           this.#ensureSchedulerRunning();
         }
       });
+  }
+
+  async #close(): Promise<void> {
+    this.#closed = true;
+    this.#listeners.clear();
+    await this.#scheduler.shutdown();
+    await this.#runPromise;
+    this.#artifactStore.close();
+    this.#knowledgeStore.close();
+    this.#store.close();
   }
 
   /**
@@ -1097,6 +1225,22 @@ export class RuntimeService {
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
       events: task.events.map((event) => this.toEventView(event)),
+      artifacts: this.#artifactStore
+        .list({
+          rootTaskId: task.rootTaskId,
+          taskId: task.id,
+          limit: 50,
+        })
+        .map((artifact) => ({
+          uri: artifact.uri,
+          kind: artifact.kind,
+          title: artifact.title,
+          revision: artifact.revision,
+          ...(artifact.graphNodeAlias === undefined
+            ? {}
+            : { graphNodeAlias: artifact.graphNodeAlias }),
+          createdAt: artifact.createdAt,
+        })),
     };
     return {
       ...base,

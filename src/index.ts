@@ -50,7 +50,33 @@ export {
   COORDINATOR_CHARACTER,
   DEVELOPER_CHARACTER,
   RESEARCHER_CHARACTER,
+  TESTER_CHARACTER,
 } from './character/builtin-characters.js';
+export {
+  ARTIFACT_KINDS,
+  InMemoryArtifactStore,
+  SqliteArtifactStore,
+  type ArtifactKind,
+  type ArtifactQuery,
+  type ArtifactRecord,
+  type ArtifactStore,
+  type CreateArtifactInput,
+  type SqliteArtifactStoreOptions,
+} from './artifacts/artifact-store.js';
+export {
+  InMemoryKnowledgeStore,
+  SqliteKnowledgeStore,
+  workspaceKnowledgeKey,
+  type KnowledgeChunk,
+  type KnowledgeSearchHit,
+  type KnowledgeStore,
+} from './knowledge/knowledge-store.js';
+export {
+  ResourceLockLease,
+  ResourceLockManager,
+  type ResourceLockRequest,
+  type ResourceLockSnapshot,
+} from './locks/resource-lock-manager.js';
 export {
   AGENT_WORK_NODE_DEFINITIONS,
   AGENT_WORK_NODE_KINDS,
@@ -92,11 +118,21 @@ export {
   fileDeleteTool,
   fileReadTool,
   fileWriteTool,
+  createArtifactTools,
+  createGitTools,
+  createKnowledgeTools,
+  createScreenCaptureTool,
   createTestRunTool,
+  createWebTools,
   registerBuiltinTools,
+  type CapturedScreen,
   type ProcessSandbox,
   type RegisterBuiltinToolsOptions,
   type SandboxedProcessRequest,
+  type ScreenCapturePort,
+  type WebAccessPort,
+  type WebFetchResult,
+  type WebSearchResult,
   workspaceSearchTool,
 } from './tools/builtin/index.js';
 export type {
@@ -111,10 +147,12 @@ export type {
   AsyncWorkTerminalStatus,
 } from './kernel/async-work.js';
 export { isAsyncWorkTerminalStatus } from './kernel/async-work.js';
+export { MODEL_IMAGE_MARKER } from './kernel/context.js';
 export type {
   AsyncWorkUpdateContextItem,
   CapabilityRequestResultContextItem,
   ContextItem,
+  ImageAttachment,
   ContextSummaryKind,
   ContextSummaryRecord,
   GraphActionRejectedContextItem,
@@ -188,9 +226,11 @@ export {
 } from './model/gemini-model-provider.js';
 export type {
   ModelProvider,
+  ModelReasoningEffort,
   ModelRequest,
   ModelRequestEstimate,
   ModelResponse,
+  ModelRuntimePreferences,
   ModelUsage,
   SubagentSpawnRequest,
   ToolCallRequest,

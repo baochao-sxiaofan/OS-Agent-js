@@ -17,9 +17,11 @@ import {
 import type {
   ConversationStatus,
   RuntimeSnapshotView,
+  TaskDraft,
 } from '../../shared/contracts.js';
 import { AgentCapacityMeter } from './components/AgentCapacityMeter.js';
 import { AgentInspector } from './components/AgentInspector.js';
+import { CapabilityApprovalPanel } from './components/CapabilityApprovalPanel.js';
 import { ConversationFlow } from './components/ConversationFlow.js';
 import { ConversationSidebar } from './components/ConversationSidebar.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
@@ -199,7 +201,7 @@ export function App() {
     }
   };
 
-  const submitTask = async (task: string, source: ViewMode) => {
+  const submitTask = async (draft: TaskDraft, source: ViewMode) => {
     if (!selectedConversation) {
       return;
     }
@@ -207,7 +209,7 @@ export function App() {
       setError(undefined);
       const nextSnapshot = await window.osAgent.submitTask({
         conversationId: selectedConversation.id,
-        task,
+        ...draft,
       });
       setSnapshot(nextSnapshot);
       const updatedConversation = nextSnapshot.conversations.find(
@@ -228,6 +230,24 @@ export function App() {
       setSnapshot(await window.osAgent.cancelTask(taskId));
     } catch (cause) {
       setError(errorMessage(cause));
+    }
+  };
+
+  const resolveCapabilityApproval = async (
+    requestId: string,
+    decision: 'approve' | 'deny',
+  ) => {
+    try {
+      setError(undefined);
+      setSnapshot(
+        await window.osAgent.resolveCapabilityApproval({
+          requestId,
+          decision,
+        }),
+      );
+    } catch (cause) {
+      setError(errorMessage(cause));
+      throw cause;
     }
   };
 
@@ -312,8 +332,10 @@ export function App() {
           {viewMode === 'conversation' ? (
             <ConversationFlow
               conversation={selectedConversation}
-              onSubmit={async (task) =>
-                await submitTask(task, 'conversation')
+              onError={setError}
+              providerId={snapshot.providerId}
+              onSubmit={async (draft) =>
+                await submitTask(draft, 'conversation')
               }
               onOpenTopology={(rootTaskId) => {
                 setSelectedAgentId(undefined);
@@ -326,8 +348,10 @@ export function App() {
               {topologyConversation?.agents.length === 0 ||
               roundDraftConversationId === selectedConversation.id ? (
                 <TaskComposer
-                  onSubmit={async (task) =>
-                    await submitTask(task, 'topology')
+                  onError={setError}
+                  providerId={snapshot.providerId}
+                  onSubmit={async (draft) =>
+                    await submitTask(draft, 'topology')
                   }
                 />
               ) : topologyConversation ? (
@@ -397,6 +421,10 @@ export function App() {
           </button>
         </div>
       )}
+      <CapabilityApprovalPanel
+        approvals={snapshot.pendingApprovals}
+        onResolve={resolveCapabilityApproval}
+      />
 
       <SettingsDialog
         open={settingsOpen}

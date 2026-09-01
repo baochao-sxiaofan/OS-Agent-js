@@ -8,6 +8,8 @@ import type {
 import {
   buildAgentResponseJsonSchema,
   buildStructuredAgentSystemInstruction,
+  estimateModelInputTokens,
+  extractModelImages,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from './structured-agent-response.js';
@@ -39,15 +41,24 @@ type GeminiRequestBody = {
   };
   contents: Array<{
     role: 'user';
-    parts: Array<{
-      text: string;
-    }>;
+    parts: Array<
+      | { text: string }
+      | {
+          inlineData: {
+            mimeType: string;
+            data: string;
+          };
+        }
+    >;
   }>;
   generationConfig: {
     temperature: number;
     maxOutputTokens?: number;
     responseMimeType: 'application/json';
     responseJsonSchema: JsonObject;
+    thinkingConfig?: {
+      thinkingLevel: 'HIGH' | 'LOW' | 'MEDIUM';
+    };
   };
 };
 
@@ -95,7 +106,7 @@ export class GeminiModelProvider implements ModelProvider {
   }
 
   estimate(request: ModelRequest): ModelRequestEstimate {
-    const inputTokens = estimateTextTokens(this.buildPrompt(request));
+    const inputTokens = estimateModelInputTokens(request);
     return {
       inputTokens,
       maxOutputTokens: this.#maxOutputTokens ?? 0,
@@ -149,6 +160,7 @@ export class GeminiModelProvider implements ModelProvider {
   }
 
   private buildRequestBody(request: ModelRequest): GeminiRequestBody {
+    const images = extractModelImages(request.context);
     const body: GeminiRequestBody = {
       systemInstruction: {
         parts: [
@@ -167,17 +179,36 @@ export class GeminiModelProvider implements ModelProvider {
             {
               text: this.buildPrompt(request),
             },
+            ...images.map((image) => ({
+              inlineData: {
+                mimeType: image.mimeType,
+                data: image.dataBase64,
+              },
+            })),
           ],
         },
       ],
       generationConfig: {
-        temperature: 0,
+        temperature: request.preferences?.temperature ?? 0,
         responseMimeType: 'application/json',
         responseJsonSchema: buildAgentResponseJsonSchema(request),
       },
     };
     if (this.#maxOutputTokens !== undefined) {
       body.generationConfig.maxOutputTokens = this.#maxOutputTokens;
+    }
+    if (
+      this.#model.startsWith('gemini-3') &&
+      request.preferences?.reasoningEffort !== undefined &&
+      request.preferences.reasoningEffort !== 'auto'
+    ) {
+      body.generationConfig.thinkingConfig = {
+        thinkingLevel:
+          request.preferences.reasoningEffort.toUpperCase() as
+            | 'HIGH'
+            | 'LOW'
+            | 'MEDIUM',
+      };
     }
     return body;
   }
@@ -197,10 +228,6 @@ export class GeminiModelProvider implements ModelProvider {
     };
     return JSON.stringify(prompt);
   }
-}
-
-function estimateTextTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 function calculateCost(

@@ -51,6 +51,10 @@ import type {
 } from '../model/model-provider.js';
 import { TURN_SUMMARY_PROTOCOL } from '../model/model-provider.js';
 import type { TaskStore } from '../persistence/task-store.js';
+import {
+  ResourceLockManager,
+  type ResourceLockRequest,
+} from '../locks/resource-lock-manager.js';
 import type { JsonObject, JsonValue } from '../types/json.js';
 import { ToolNotFoundError, ToolRegistry } from '../tools/tool-registry.js';
 import type { Tool } from '../tools/tool.js';
@@ -101,6 +105,7 @@ export type TaskSchedulerOptions = {
   readyQueue?: ReadyQueue;
   asyncWorkPolicy?: AsyncWorkPolicy;
   capabilityManager?: CapabilityManager;
+  resourceLockManager?: ResourceLockManager;
   /** Character 注册表；省略时装载首批内置角色。 */
   characterRegistry?: CharacterRegistry;
   /** 模型协作协议；`ai_graph` 使每个 Agent 从 plan 开始生成自己的局部 Graph。 */
@@ -128,6 +133,7 @@ export type AsyncWorkPolicy = Readonly<{
 }>;
 
 const GRAPH_CHILD_MAX_MODEL_ATTEMPTS = 1_024;
+const RESOURCE_LOCK_TIMEOUT_MS = 120_000;
 
 export type SubagentSpawnFailureReason =
   | SpawnRejectionReason
@@ -150,6 +156,7 @@ type PendingContextCompaction = {
   context: readonly ContextItem[];
   parentWakeupBoost: boolean;
   sourceEndIndex: number;
+  targetTokens: number;
 };
 
 type AsyncWorkTimer = {
@@ -220,6 +227,7 @@ export class TaskScheduler {
   readonly #store: TaskStore;
   readonly #agentPool: AgentPool;
   readonly #capabilityManager: CapabilityManager;
+  readonly #resourceLockManager: ResourceLockManager;
   readonly #characterRegistry: CharacterRegistry;
   readonly #coordinationMode: CoordinationMode;
   readonly #workspaceRootResolver:
@@ -248,6 +256,7 @@ export class TaskScheduler {
     request: Readonly<CreateAgentRequest>,
     origin: AgentCreationOrigin,
   ) => string;
+  #shuttingDown = false;
   // 最近一次因限流被拒的最早可重试时刻，run() 用它决定休眠多久后自动唤醒。
   #nextRetryAt: number | undefined;
   #operationSequence = 0;
@@ -259,6 +268,8 @@ export class TaskScheduler {
     this.#store = options.store;
     this.#capabilityManager =
       options.capabilityManager ?? new CapabilityManager();
+    this.#resourceLockManager =
+      options.resourceLockManager ?? new ResourceLockManager();
     this.#characterRegistry =
       options.characterRegistry ?? new CharacterRegistry();
     this.#coordinationMode = options.coordinationMode ?? 'legacy';
@@ -321,6 +332,9 @@ export class TaskScheduler {
   }
 
   async submit(request: CreateAgentRequest): Promise<TaskControlBlock> {
+    if (this.#shuttingDown) {
+      throw new Error('Task scheduler is shutting down.');
+    }
     const task = this.createAgent(request, { kind: 'root' });
     if (this.#tasks.has(task.id)) {
       throw new Error(`Task ID has already been used: ${task.id}`);
@@ -1088,6 +1102,17 @@ export class TaskScheduler {
 
   async runUntilIdle(): Promise<SchedulerRunResult> {
     while (true) {
+      if (this.#shuttingDown) {
+        if (this.#operations.size > 0) {
+          await Promise.allSettled([...this.#operations.values()]);
+        }
+        return {
+          activeOperations: 0,
+          pendingReadyTasks:
+            this.#readyQueue.size + this.#pendingContextCompactions.size,
+          stalled: false,
+        };
+      }
       const compactionProgress = await this.scheduleContextCompactions();
       const schedulingProgress = await this.scheduleReadyTasks();
       const madeProgress = compactionProgress || schedulingProgress;
@@ -1130,10 +1155,37 @@ export class TaskScheduler {
     }
   }
 
+  /**
+   * Stop admitting new work, abort in-flight host/model operations, and wait
+   * until every tracked operation has released its resources.
+   *
+   * RUNNING snapshots intentionally remain recoverable; a later process
+   * restores them as READY through the existing recovery path.
+   */
+  async shutdown(): Promise<void> {
+    if (!this.#shuttingDown) {
+      this.#shuttingDown = true;
+      for (const timer of this.#asyncWorkTimers.values()) {
+        timer.controller.abort(new Error('Task scheduler is shutting down.'));
+      }
+      this.#asyncWorkTimers.clear();
+      for (const controller of this.#abortControllers.values()) {
+        if (!controller.signal.aborted) {
+          controller.abort(new Error('Task scheduler is shutting down.'));
+        }
+      }
+    }
+
+    while (this.#operations.size > 0) {
+      await Promise.allSettled([...this.#operations.values()]);
+    }
+    await Promise.allSettled([...this.#asyncWorkMutations.values()]);
+  }
+
   private async scheduleReadyTasks(): Promise<boolean> {
     let madeProgress = false;
 
-    while (this.#readyQueue.size > 0) {
+    while (!this.#shuttingDown && this.#readyQueue.size > 0) {
       const task = this.#readyQueue.peek();
       if (!task) {
         break;
@@ -1372,7 +1424,7 @@ export class TaskScheduler {
       const response = await this.#provider.invoke(request, signal);
       lease.close();
 
-      if (task.state.status === 'TERMINATED') {
+      if (this.#shuttingDown || task.state.status === 'TERMINATED') {
         return;
       }
 
@@ -1571,7 +1623,7 @@ export class TaskScheduler {
       }
     } catch (error) {
       lease.close();
-      if (task.state.status === 'TERMINATED') {
+      if (this.#shuttingDown || task.state.status === 'TERMINATED') {
         return;
       }
       if (
@@ -2322,12 +2374,43 @@ export class TaskScheduler {
     await this.#store.persist(task);
 
     const workspaceRoot = this.#workspaceRootResolver?.(task);
-    return await tool.execute(call.input, {
-      taskId: task.id,
-      signal: this.requireAbortController(task.id).signal,
-      idempotencyKey: `${task.id}:${call.callId}`,
-      ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
-    });
+    const signal = this.requireAbortController(task.id).signal;
+    const lockRequests: ResourceLockRequest[] =
+      tool.effect === 'read_only'
+        ? []
+        : requiredCapabilities.map(({ capability, scope }) => ({
+            scope:
+              scope.kind === 'all'
+                ? {
+                    kind: 'exact',
+                    resource: `capability://${encodeURIComponent(capability)}`,
+                  }
+                : structuredClone(scope),
+            mode: 'exclusive',
+          }));
+    const lockSignal = AbortSignal.any([
+      signal,
+      AbortSignal.timeout(RESOURCE_LOCK_TIMEOUT_MS),
+    ]);
+    const lease = await this.#resourceLockManager.acquire(
+      task.id,
+      lockRequests,
+      lockSignal,
+    );
+    try {
+      return await tool.execute(call.input, {
+        taskId: task.id,
+        rootTaskId: task.rootTaskId,
+        ...(task.workGraph?.currentNodeAlias === undefined
+          ? {}
+          : { graphNodeAlias: task.workGraph.currentNodeAlias }),
+        signal,
+        idempotencyKey: `${task.id}:${call.callId}`,
+        ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+      });
+    } finally {
+      lease.close();
+    }
   }
 
   private resolveTool(call: ToolCallRequest): Tool {
@@ -2808,6 +2891,7 @@ export class TaskScheduler {
             },
           }),
       attempt,
+      preferences: structuredClone(task.modelPreferences),
       summaryProtocol: TURN_SUMMARY_PROTOCOL,
       ...(this.#coordinationMode === 'legacy'
         ? {}
@@ -2857,7 +2941,16 @@ export class TaskScheduler {
     this.#pendingContextCompactions.delete(task.id);
 
     const attempt = task.modelAttempts + 1;
-    const selection = this.#contextWindowManager.select(
+    const requestedContextLimit =
+      task.modelPreferences.maxContextTokens;
+    const contextWindowManager = new ContextWindowManager(
+      Math.min(
+        requestedContextLimit ?? this.#provider.contextWindowTokens,
+        this.#provider.contextWindowTokens,
+      ),
+      this.#contextWindowManager.policy,
+    );
+    const selection = contextWindowManager.select(
       task.context,
       task.contextSummaries,
       (context) =>
@@ -2903,6 +2996,7 @@ export class TaskScheduler {
     const compactionRequest = this.buildContextCompactionRequest(
       task,
       selection.context,
+      contextWindowManager.targetTokens,
     );
     const compactionEstimate =
       this.#contextCompactor.estimate(compactionRequest);
@@ -2922,11 +3016,12 @@ export class TaskScheduler {
       context: structuredClone(selection.context),
       parentWakeupBoost: options.parentWakeupBoost ?? false,
       sourceEndIndex: task.context.length,
+      targetTokens: contextWindowManager.targetTokens,
     });
   }
 
   private async scheduleContextCompactions(): Promise<boolean> {
-    if (!this.#contextCompactor) {
+    if (this.#shuttingDown || !this.#contextCompactor) {
       return false;
     }
     let madeProgress = false;
@@ -2935,6 +3030,9 @@ export class TaskScheduler {
       taskId,
       pending,
     ] of this.#pendingContextCompactions) {
+      if (this.#shuttingDown) {
+        break;
+      }
       const task = this.#tasks.get(taskId);
       if (!task || task.state.status !== 'READY') {
         this.#pendingContextCompactions.delete(taskId);
@@ -2943,6 +3041,7 @@ export class TaskScheduler {
       const request = this.buildContextCompactionRequest(
         task,
         pending.context,
+        pending.targetTokens,
       );
       const estimate = this.#contextCompactor.estimate(request);
       const decision = this.#admission.tryAcquire(
@@ -3013,7 +3112,7 @@ export class TaskScheduler {
     try {
       const result = await compactor.compact(request, signal);
       lease.close();
-      if (task.state.status === 'TERMINATED') {
+      if (this.#shuttingDown || task.state.status === 'TERMINATED') {
         return;
       }
       task.recordSecondaryContextSummary(
@@ -3035,7 +3134,7 @@ export class TaskScheduler {
       await this.#store.persist(task);
     } catch (error) {
       lease.close();
-      if (task.state.status === 'TERMINATED') {
+      if (this.#shuttingDown || task.state.status === 'TERMINATED') {
         return;
       }
       await this.terminateTask(task, {
@@ -3048,12 +3147,13 @@ export class TaskScheduler {
   private buildContextCompactionRequest(
     task: TaskControlBlock,
     context: readonly ContextItem[],
+    targetTokens = this.#contextWindowManager.targetTokens,
   ): ContextCompactionRequest {
     return createContextCompactionRequest({
       taskId: task.id,
       goal: task.goal,
       context,
-      targetTokens: this.#contextWindowManager.targetTokens,
+      targetTokens,
     });
   }
 

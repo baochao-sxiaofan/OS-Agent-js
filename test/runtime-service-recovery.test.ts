@@ -7,12 +7,45 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { RuntimeService } from '../desktop/main/runtime-service.js';
 import { SqliteTaskStore, TaskControlBlock } from '../src/index.js';
 
 describe('RuntimeService persistence recovery', () => {
+  it('waits for the scheduler before closing persistent stores', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'os-agent-close-'));
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const runtime = new RuntimeService(undefined, {
+      storeLocation: join(directory, 'tasks.db'),
+    });
+    try {
+      await runtime.initialize();
+      const conversation = runtime.getSnapshot().conversations[0];
+      expect(conversation).toBeDefined();
+      if (!conversation) {
+        return;
+      }
+      await runtime.submitTask({
+        conversationId: conversation.id,
+        task: 'Complete a short task before shutdown.',
+      });
+
+      await runtime.close();
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+      expect(consoleError).not.toHaveBeenCalledWith(
+        'Runtime scheduler failed:',
+        expect.objectContaining({ code: 'ERR_INVALID_STATE' }),
+      );
+    } finally {
+      consoleError.mockRestore();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('allows a conversation without a workspace and grants no file capabilities', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'os-agent-unbound-'));
     const runtime = new RuntimeService();
@@ -31,7 +64,11 @@ describe('RuntimeService persistence recovery', () => {
       const root = submitted.conversations[0]?.agents.find(
         (agent) => agent.depth === 1,
       );
-      expect(root?.capabilities).toEqual([]);
+      expect(root?.capabilities).toEqual([
+        'artifact.read',
+        'artifact.write',
+      ]);
+      expect(root?.capabilities).not.toContain('file.read');
       expect(root?.characterId).toBe('coordinator');
       await expect(
         runtime.setConversationWorkspace(conversation.id, directory),
@@ -41,7 +78,7 @@ describe('RuntimeService persistence recovery', () => {
       }
       await waitForRuntimeIdle(runtime);
     } finally {
-      runtime.close();
+      await runtime.close();
       rmSync(directory, { recursive: true, force: true });
     }
   });
@@ -75,7 +112,7 @@ describe('RuntimeService persistence recovery', () => {
         realpathSync(workspacePath),
       );
     } finally {
-      firstRuntime.close();
+      await firstRuntime.close();
     }
 
     const restoredRuntime = new RuntimeService(undefined, {
@@ -91,7 +128,7 @@ describe('RuntimeService persistence recovery', () => {
         },
       ]);
     } finally {
-      restoredRuntime.close();
+      await restoredRuntime.close();
       rmSync(directory, { recursive: true, force: true });
     }
   });
@@ -144,7 +181,7 @@ describe('RuntimeService persistence recovery', () => {
         ],
       });
     } finally {
-      runtime.close();
+      await runtime.close();
       rmSync(directory, { recursive: true, force: true });
     }
   });

@@ -9,6 +9,8 @@ import type {
 import {
   buildAgentResponseJsonSchema,
   buildStructuredAgentSystemInstruction,
+  estimateModelInputTokens,
+  extractModelImages,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from './structured-agent-response.js';
@@ -76,7 +78,7 @@ export class MiniMaxModelProvider implements ModelProvider {
 
   estimate(request: ModelRequest): ModelRequestEstimate {
     return {
-      inputTokens: estimateTokens(JSON.stringify(request)),
+      inputTokens: estimateModelInputTokens(request),
       maxOutputTokens: this.#maxOutputTokens ?? 0,
       estimatedCostUsd: 0,
     };
@@ -152,6 +154,19 @@ export class MiniMaxModelProvider implements ModelProvider {
   }
 
   private buildRequestBody(request: ModelRequest): JsonObject {
+    const textPayload = JSON.stringify({
+      goal: request.goal,
+      ...(request.character === undefined
+        ? {}
+        : { character: request.character }),
+      capabilities: request.capabilities ?? [],
+      attempt: request.attempt,
+      context: request.context.map(serializeContextItemForModel),
+      tools: request.tools,
+      delegation: request.delegation,
+      ...(request.graph === undefined ? {} : { graph: request.graph }),
+    });
+    const images = extractModelImages(request.context);
     const body: JsonObject = {
       model: this.#model,
       messages: [
@@ -167,20 +182,18 @@ export class MiniMaxModelProvider implements ModelProvider {
         },
         {
           role: 'user',
-          content: JSON.stringify({
-            goal: request.goal,
-            ...(request.character === undefined
-              ? {}
-              : { character: request.character }),
-            capabilities: request.capabilities ?? [],
-            attempt: request.attempt,
-            context: request.context.map(serializeContextItemForModel),
-            tools: request.tools,
-            delegation: request.delegation,
-            ...(request.graph === undefined
-              ? {}
-              : { graph: request.graph }),
-          }),
+          content:
+            images.length === 0
+              ? textPayload
+              : [
+                  { type: 'text', text: textPayload },
+                  ...images.map((image) => ({
+                    type: 'image_url',
+                    image_url: {
+                      url: `data:${image.mimeType};base64,${image.dataBase64}`,
+                    },
+                  })),
+                ],
         },
       ],
       stream: false,
@@ -211,6 +224,9 @@ export class MiniMaxModelProvider implements ModelProvider {
     };
     if (this.#maxOutputTokens !== undefined) {
       body['max_completion_tokens'] = this.#maxOutputTokens;
+    }
+    if (request.preferences?.temperature !== undefined) {
+      body['temperature'] = request.preferences.temperature;
     }
     return body;
   }
@@ -478,10 +494,6 @@ function formatResponseDiagnostics(
     `reasoningPresent=${String(reasoningPresent)}`,
     `toolCallCount=${toolCallCount}`,
   ].join(', ');
-}
-
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 async function parseJsonResponse(response: Response): Promise<JsonValue> {

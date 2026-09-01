@@ -3,6 +3,7 @@ import {
   Bot,
   Clock3,
   Coins,
+  FileArchive,
   Hash,
   Layers3,
   Workflow,
@@ -128,6 +129,29 @@ export function AgentInspector({
                     {node.kind} · {node.assignee} · {node.status}
                   </span>
                   <p>{node.objective}</p>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
+
+        {agent.artifacts.length > 0 && (
+          <section className="inspector-section">
+            <h3>
+              <FileArchive size={14} />
+              Artifacts
+            </h3>
+            <ol className="artifact-list">
+              {agent.artifacts.map((artifact) => (
+                <li key={artifact.uri}>
+                  <strong>{artifact.title}</strong>
+                  <span>
+                    {artifact.kind} · R{artifact.revision}
+                    {artifact.graphNodeAlias
+                      ? ` · ${artifact.graphNodeAlias}`
+                      : ''}
+                  </span>
+                  <code>{artifact.uri}</code>
                 </li>
               ))}
             </ol>

@@ -19,18 +19,29 @@ import {
 import type {
   ConversationRoundView,
   ConversationView,
+  ImageAttachmentInput,
+  TaskDraft,
+  TaskModelPreferences,
 } from '../../../shared/contracts.js';
+import {
+  ComposerOptions,
+  DEFAULT_TASK_PREFERENCES,
+} from './ComposerOptions.js';
 
 type ConversationFlowProps = {
   conversation: ConversationView;
   onOpenTopology: (rootTaskId: string) => void;
-  onSubmit: (task: string) => Promise<void>;
+  onError: (message: string) => void;
+  onSubmit: (draft: TaskDraft) => Promise<void>;
+  providerId: string;
 };
 
 export function ConversationFlow({
   conversation,
   onOpenTopology,
+  onError,
   onSubmit,
+  providerId,
 }: ConversationFlowProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const hasActiveRound = conversation.status === 'active';
@@ -78,7 +89,9 @@ export function ConversationFlow({
       </div>
       <ConversationComposer
         disabled={hasActiveRound}
+        onError={onError}
         onSubmit={onSubmit}
+        providerId={providerId}
       />
     </section>
   );
@@ -86,12 +99,20 @@ export function ConversationFlow({
 
 function ConversationComposer({
   disabled,
+  onError,
   onSubmit,
+  providerId,
 }: {
   disabled: boolean;
-  onSubmit: (task: string) => Promise<void>;
+  onError: (message: string) => void;
+  onSubmit: (draft: TaskDraft) => Promise<void>;
+  providerId: string;
 }) {
   const [task, setTask] = useState('');
+  const [attachments, setAttachments] = useState<ImageAttachmentInput[]>([]);
+  const [preferences, setPreferences] = useState<TaskModelPreferences>(
+    DEFAULT_TASK_PREFERENCES,
+  );
   const [submitting, setSubmitting] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -103,8 +124,13 @@ function ConversationComposer({
     }
     setSubmitting(true);
     try {
-      await onSubmit(nextTask);
+      await onSubmit({
+        task: nextTask,
+        preferences,
+        ...(attachments.length === 0 ? {} : { attachments }),
+      });
       setTask('');
+      setAttachments([]);
     } catch {
       return;
     } finally {
@@ -126,6 +152,15 @@ function ConversationComposer({
         className="conversation-composer"
         onSubmit={submit}
       >
+        <ComposerOptions
+          attachments={attachments}
+          disabled={disabled || submitting}
+          preferences={preferences}
+          providerId={providerId}
+          onAttachmentsChange={setAttachments}
+          onError={onError}
+          onPreferencesChange={setPreferences}
+        />
         <textarea
           value={task}
           rows={1}

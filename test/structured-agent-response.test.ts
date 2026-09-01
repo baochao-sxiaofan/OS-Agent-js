@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { TURN_SUMMARY_PROTOCOL, type ModelRequest } from '../src/index.js';
+import {
+  TaskControlBlock,
+  TURN_SUMMARY_PROTOCOL,
+  type ModelRequest,
+} from '../src/index.js';
 import {
   AGENT_RESPONSE_JSON_SCHEMA,
   buildAgentResponseJsonSchema,
+  extractModelImages,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from '../src/model/structured-agent-response.js';
@@ -288,6 +293,82 @@ describe('structured agent protocol', () => {
       (update['pending'] as Array<Record<string, unknown>>)[0],
     ).not.toHaveProperty('workId');
     expect(legacyResult).not.toHaveProperty('childTaskId');
+  });
+
+  it('separates image bytes from model-visible JSON context', () => {
+    const user = {
+      type: 'user' as const,
+      content: 'Inspect the screenshot.',
+      attachments: [
+        {
+          id: 'image-1',
+          name: 'screen.png',
+          mimeType: 'image/png' as const,
+          dataBase64: 'c2VjcmV0LWltYWdl',
+        },
+      ],
+    };
+    const screenResult = {
+      type: 'tool_result' as const,
+      callId: 'capture-1',
+      toolName: 'screen.capture',
+      output: {
+        marker: 'os-agent.image.v1',
+        mimeType: 'image/png',
+        dataBase64: 'c2NyZWVuLWJ5dGVz',
+        width: 1280,
+        height: 720,
+        sourceName: 'primary-screen',
+      },
+    };
+
+    expect(JSON.stringify(serializeContextItemForModel(user))).not.toContain(
+      'c2VjcmV0LWltYWdl',
+    );
+    expect(
+      JSON.stringify(serializeContextItemForModel(screenResult)),
+    ).not.toContain('c2NyZWVuLWJ5dGVz');
+    expect(extractModelImages([user, screenResult])).toEqual([
+      {
+        mimeType: 'image/png',
+        dataBase64: 'c2VjcmV0LWltYWdl',
+        name: 'screen.png',
+      },
+      {
+        mimeType: 'image/png',
+        dataBase64: 'c2NyZWVuLWJ5dGVz',
+        name: 'primary-screen',
+      },
+    ]);
+  });
+
+  it('redacts screen bytes from the audit event', () => {
+    const task = TaskControlBlock.createAgent(
+      { id: 'screen-audit', goal: 'Inspect the screen.' },
+      { kind: 'root' },
+    );
+    const output = {
+      marker: 'os-agent.image.v1',
+      mimeType: 'image/png',
+      dataBase64: 'private-screen-bytes',
+      width: 800,
+      height: 600,
+      sourceName: 'primary-screen',
+    };
+
+    task.recordToolResult('capture-1', 'screen.capture', output);
+
+    const event = task.events.find(
+      (candidate) => candidate.type === 'tool_result_recorded',
+    );
+    expect(event).toMatchObject({
+      type: 'tool_result_recorded',
+      output: {
+        marker: 'os-agent.image.v1',
+        binaryPayloadRedacted: true,
+      },
+    });
+    expect(JSON.stringify(event)).not.toContain('private-screen-bytes');
   });
 
   it('parses capability requests without exposing an approval route', () => {

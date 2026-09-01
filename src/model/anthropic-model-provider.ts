@@ -8,6 +8,8 @@ import type {
 } from './model-provider.js';
 import {
   buildStructuredAgentSystemInstruction,
+  estimateModelInputTokens,
+  extractModelImages,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from './structured-agent-response.js';
@@ -64,10 +66,7 @@ export class AnthropicModelProvider implements ModelProvider {
 
   estimate(request: ModelRequest): ModelRequestEstimate {
     return {
-      inputTokens: Math.max(
-        1,
-        Math.ceil(JSON.stringify(request).length / 4),
-      ),
+      inputTokens: estimateModelInputTokens(request),
       maxOutputTokens: this.#maxOutputTokens,
       estimatedCostUsd: 0,
     };
@@ -77,6 +76,56 @@ export class AnthropicModelProvider implements ModelProvider {
     request: ModelRequest,
     signal: AbortSignal,
   ): Promise<ModelResponse> {
+    const textPayload = JSON.stringify({
+      goal: request.goal,
+      ...(request.character === undefined
+        ? {}
+        : { character: request.character }),
+      capabilities: request.capabilities ?? [],
+      attempt: request.attempt,
+      context: request.context.map(serializeContextItemForModel),
+      tools: request.tools,
+      delegation: request.delegation,
+      ...(request.graph === undefined ? {} : { graph: request.graph }),
+    });
+    const images = extractModelImages(request.context);
+    const requestBody: JsonObject = {
+      model: this.#model,
+      max_tokens: this.#maxOutputTokens,
+      system: buildStructuredAgentSystemInstruction(request),
+      messages: [
+        {
+          role: 'user',
+          content:
+            images.length === 0
+              ? textPayload
+              : [
+                  { type: 'text', text: textPayload },
+                  ...images.map((image) => ({
+                    type: 'image',
+                    source: {
+                      type: 'base64',
+                      media_type: image.mimeType,
+                      data: image.dataBase64,
+                    },
+                  })),
+                ],
+        },
+      ],
+    };
+    if (
+      request.preferences?.reasoningEffort !== undefined &&
+      request.preferences.reasoningEffort !== 'auto'
+    ) {
+      requestBody['thinking'] = {
+        type: 'enabled',
+        budget_tokens: reasoningBudget(
+          request.preferences.reasoningEffort,
+        ),
+      };
+    } else if (request.preferences?.temperature !== undefined) {
+      requestBody['temperature'] = request.preferences.temperature;
+    }
     const response = await this.#fetch(`${this.#baseUrl}/v1/messages`, {
       method: 'POST',
       headers: {
@@ -84,30 +133,7 @@ export class AnthropicModelProvider implements ModelProvider {
         'content-type': 'application/json',
         'x-api-key': this.#apiKey,
       },
-      body: JSON.stringify({
-        model: this.#model,
-        max_tokens: this.#maxOutputTokens,
-        system: buildStructuredAgentSystemInstruction(request),
-        messages: [
-          {
-            role: 'user',
-            content: JSON.stringify({
-              goal: request.goal,
-              ...(request.character === undefined
-                ? {}
-                : { character: request.character }),
-              capabilities: request.capabilities ?? [],
-              attempt: request.attempt,
-              context: request.context.map(serializeContextItemForModel),
-              tools: request.tools,
-              delegation: request.delegation,
-              ...(request.graph === undefined
-                ? {}
-                : { graph: request.graph }),
-            }),
-          },
-        ],
-      }),
+      body: JSON.stringify(requestBody),
       signal,
     });
     const body = await parseJsonResponse(response);
@@ -211,4 +237,15 @@ function isObject(value: JsonValue | undefined): value is JsonObject {
 
 function nonNegativeNumber(value: JsonValue | undefined): number {
   return typeof value === 'number' && value >= 0 ? value : 0;
+}
+
+function reasoningBudget(effort: 'low' | 'medium' | 'high'): number {
+  switch (effort) {
+    case 'low':
+      return 1_024;
+    case 'medium':
+      return 4_096;
+    case 'high':
+      return 12_000;
+  }
 }

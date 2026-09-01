@@ -9,14 +9,33 @@ import {
   useRef,
   useState,
 } from 'react';
+import type {
+  ImageAttachmentInput,
+  TaskDraft,
+  TaskModelPreferences,
+} from '../../../shared/contracts.js';
+import {
+  ComposerOptions,
+  DEFAULT_TASK_PREFERENCES,
+} from './ComposerOptions.js';
 
 type TaskComposerProps = {
-  onSubmit: (task: string) => Promise<void>;
+  onError: (message: string) => void;
+  onSubmit: (draft: TaskDraft) => Promise<void>;
+  providerId: string;
 };
 
-export function TaskComposer({ onSubmit }: TaskComposerProps) {
+export function TaskComposer({
+  onError,
+  onSubmit,
+  providerId,
+}: TaskComposerProps) {
   const [open, setOpen] = useState(false);
   const [task, setTask] = useState('');
+  const [attachments, setAttachments] = useState<ImageAttachmentInput[]>([]);
+  const [preferences, setPreferences] = useState<TaskModelPreferences>(
+    DEFAULT_TASK_PREFERENCES,
+  );
   const [submitting, setSubmitting] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -28,7 +47,11 @@ export function TaskComposer({ onSubmit }: TaskComposerProps) {
     }
     setSubmitting(true);
     try {
-      await onSubmit(trimmedTask);
+      await onSubmit({
+        task: trimmedTask,
+        preferences,
+        ...(attachments.length === 0 ? {} : { attachments }),
+      });
     } catch {
       setSubmitting(false);
     }
@@ -72,6 +95,15 @@ export function TaskComposer({ onSubmit }: TaskComposerProps) {
             onKeyDown={handleKeyDown}
           />
           <div className="composer-footer">
+            <ComposerOptions
+              attachments={attachments}
+              disabled={submitting}
+              preferences={preferences}
+              providerId={providerId}
+              onAttachmentsChange={setAttachments}
+              onError={onError}
+              onPreferencesChange={setPreferences}
+            />
             <span className="composer-provider">Agent Runtime</span>
             <button
               className="send-button"

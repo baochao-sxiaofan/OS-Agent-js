@@ -13,6 +13,16 @@ import type {
   AgentWorkNodeStatus,
 } from '../graph/agent-work-graph.js';
 
+/** Tool result marker recognized by Provider adapters as image input. */
+export const MODEL_IMAGE_MARKER = 'os-agent.image.v1';
+
+export type ImageAttachment = {
+  id: string;
+  name: string;
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+  dataBase64: string;
+};
+
 /**
  * 一轮模型交互的精简摘要。
  *
@@ -68,6 +78,8 @@ export type UserContextItem = {
   type: 'user';
   /** 用户输入正文。 */
   content: string;
+  /** User-selected images; the raw bytes are sent through native multimodal APIs. */
+  attachments?: ImageAttachment[];
 };
 
 /** 模型此前产生并被运行时保留的回复内容。 */

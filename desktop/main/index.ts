@@ -1,4 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { extname } from 'node:path';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,6 +20,7 @@ import {
   PROVIDER_CATALOG,
   type DiscoverModelsInput,
   type ProviderId,
+  type ResolveCapabilityApprovalInput,
   type SaveModelSettingsInput,
   type SubmitTaskInput,
 } from '../shared/contracts.js';
@@ -26,6 +30,8 @@ import {
   type ProviderCredentials,
 } from './provider-registry.js';
 import { RuntimeService } from './runtime-service.js';
+import { SafeWebAccess } from './network/safe-web-access.js';
+import { ElectronScreenCapture } from './screen/electron-screen-capture.js';
 import {
   MacOSProcessSandbox,
   probeMacOSSandbox,
@@ -76,6 +82,9 @@ function registerIpcHandlers(
           );
     },
   );
+  ipcMain.handle(IPC_CHANNELS.selectImages, async () =>
+    await selectImageAttachments(),
+  );
   ipcMain.handle(
     IPC_CHANNELS.discoverModels,
     async (_event, input: unknown) => {
@@ -119,6 +128,17 @@ function registerIpcHandlers(
       await runtime.submitTask(parseSubmitTaskInput(input)),
   );
   ipcMain.handle(
+    IPC_CHANNELS.resolveCapabilityApproval,
+    async (_event, input: unknown) => {
+      const parsed = parseCapabilityApprovalInput(input);
+      return await runtime.resolveCapabilityApproval(
+        parsed.requestId,
+        parsed.decision,
+        parsed.reason,
+      );
+    },
+  );
+  ipcMain.handle(
     IPC_CHANNELS.cancelTask,
     async (_event, taskId: unknown) => {
       if (typeof taskId !== 'string' || taskId.length === 0) {
@@ -157,6 +177,50 @@ async function selectWorkspaceDirectory(): Promise<string | undefined> {
     ? await dialog.showOpenDialog(mainWindow, options)
     : await dialog.showOpenDialog(options);
   return selection.canceled ? undefined : selection.filePaths[0];
+}
+
+async function selectImageAttachments() {
+  const options: OpenDialogOptions = {
+    title: '选择图片上下文',
+    buttonLabel: '添加图片',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      {
+        name: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'webp'],
+      },
+    ],
+  };
+  const selection = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
+  if (selection.canceled) {
+    return [];
+  }
+  if (selection.filePaths.length > 4) {
+    throw new Error('每轮最多添加 4 张图片。');
+  }
+  return await Promise.all(
+    selection.filePaths.map(async (filePath) => {
+      const bytes = await readFile(filePath);
+      if (bytes.byteLength > 8 * 1024 * 1024) {
+        throw new Error('单张图片不能超过 8 MB。');
+      }
+      const extension = extname(filePath).toLowerCase();
+      const mimeType =
+        extension === '.png'
+          ? 'image/png'
+          : extension === '.webp'
+            ? 'image/webp'
+            : 'image/jpeg';
+      return {
+        id: randomUUID(),
+        name: filePath.split(/[\\/]/u).at(-1) ?? 'image',
+        mimeType,
+        dataBase64: bytes.toString('base64'),
+      };
+    }),
+  );
 }
 
 async function createWindow(): Promise<void> {
@@ -224,10 +288,27 @@ app.whenReady().then(async () => {
   const processSandbox = resolveProcessSandbox();
   const runtime = new RuntimeService(savedConfig, {
     storeLocation: join(app.getPath('userData'), 'tasks.db'),
+    screenCapture: new ElectronScreenCapture(),
+    webAccess: new SafeWebAccess(),
     ...(processSandbox === undefined ? {} : { processSandbox }),
   });
   await runtime.initialize();
-  app.once('will-quit', () => runtime.close());
+  let shutdownStarted = false;
+  let shutdownComplete = false;
+  app.on('before-quit', (event) => {
+    if (shutdownComplete) {
+      return;
+    }
+    event.preventDefault();
+    if (shutdownStarted) {
+      return;
+    }
+    shutdownStarted = true;
+    void runtime.close().finally(() => {
+      shutdownComplete = true;
+      app.quit();
+    });
+  });
   registerIpcHandlers(runtime, settingsStore);
   runtime.subscribe((snapshot) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -254,19 +335,129 @@ app.on('window-all-closed', () => {
 
 function parseSubmitTaskInput(input: unknown): SubmitTaskInput {
   if (
-    typeof input !== 'object' ||
-    input === null ||
-    !('conversationId' in input) ||
-    !('task' in input) ||
-    typeof input.conversationId !== 'string' ||
-    typeof input.task !== 'string'
+    !isRecord(input) ||
+    typeof input['conversationId'] !== 'string' ||
+    typeof input['task'] !== 'string'
   ) {
     throw new Error('Invalid task submission.');
   }
+  const preferences = parseTaskPreferences(input['preferences']);
+  const attachments = parseImageAttachments(input['attachments']);
   return {
-    conversationId: input.conversationId,
-    task: input.task,
+    conversationId: input['conversationId'],
+    task: input['task'],
+    ...(preferences === undefined ? {} : { preferences }),
+    ...(attachments.length === 0 ? {} : { attachments }),
   };
+}
+
+function parseTaskPreferences(
+  value: unknown,
+): SubmitTaskInput['preferences'] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new Error('Invalid model preferences.');
+  }
+  const maxContextTokens = value['maxContextTokens'];
+  const temperature = value['temperature'];
+  const reasoningEffort = value['reasoningEffort'];
+  if (
+    maxContextTokens !== undefined &&
+    (!Number.isInteger(maxContextTokens) ||
+      Number(maxContextTokens) < 4_096 ||
+      Number(maxContextTokens) > 2_000_000)
+  ) {
+    throw new Error('Invalid context length.');
+  }
+  if (
+    temperature !== undefined &&
+    (typeof temperature !== 'number' ||
+      temperature < 0 ||
+      temperature > 2)
+  ) {
+    throw new Error('Invalid model temperature.');
+  }
+  if (
+    reasoningEffort !== undefined &&
+    !['auto', 'low', 'medium', 'high'].includes(
+      String(reasoningEffort),
+    )
+  ) {
+    throw new Error('Invalid reasoning effort.');
+  }
+  return {
+    ...(typeof maxContextTokens === 'number'
+      ? { maxContextTokens }
+      : {}),
+    ...(typeof temperature === 'number' ? { temperature } : {}),
+    ...(typeof reasoningEffort === 'string'
+      ? {
+          reasoningEffort: reasoningEffort as
+            | 'auto'
+            | 'low'
+            | 'medium'
+            | 'high',
+        }
+      : {}),
+  };
+}
+
+function parseCapabilityApprovalInput(
+  input: unknown,
+): ResolveCapabilityApprovalInput {
+  if (
+    !isRecord(input) ||
+    typeof input['requestId'] !== 'string' ||
+    !input['requestId'].trim() ||
+    (input['decision'] !== 'approve' &&
+      input['decision'] !== 'deny') ||
+    !isOptionalString(input['reason'])
+  ) {
+    throw new Error('Invalid capability approval.');
+  }
+  return {
+    requestId: input['requestId'],
+    decision: input['decision'],
+    ...(input['reason'] === undefined
+      ? {}
+      : { reason: input['reason'] }),
+  };
+}
+
+function parseImageAttachments(
+  value: unknown,
+): NonNullable<SubmitTaskInput['attachments']> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.length > 4) {
+    throw new Error('Invalid image attachments.');
+  }
+  return value.map((candidate) => {
+    if (
+      !isRecord(candidate) ||
+      typeof candidate['id'] !== 'string' ||
+      typeof candidate['name'] !== 'string' ||
+      !['image/jpeg', 'image/png', 'image/webp'].includes(
+        String(candidate['mimeType']),
+      ) ||
+      typeof candidate['dataBase64'] !== 'string' ||
+      candidate['dataBase64'].length > 12_000_000
+    ) {
+      throw new Error('Invalid image attachment.');
+    }
+    return {
+      id: candidate['id'],
+      name: candidate['name'],
+      mimeType: candidate['mimeType'] as
+        | 'image/jpeg'
+        | 'image/png'
+        | 'image/webp',
+      dataBase64: candidate['dataBase64'],
+    };
+  });
 }
 
 function parseDiscoverModelsInput(input: unknown): DiscoverModelsInput {

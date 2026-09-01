@@ -3,7 +3,7 @@
 OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想的 Agent Harness
 与运行时实验项目。
 
-项目不重新实现模型、RAG、Embedding、向量数据库和文档解析，而是专注于：
+项目不重新实现模型、Embedding、向量数据库和通用文档解析，而是专注于：
 
 - 全局模型请求调度；
 - Agent 任务状态管理；
@@ -12,7 +12,9 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`2.2.1`
+当前稳定版本：`2.2.1`
+
+企业能力预览分支：`feat/enterpise_preview`
 
 ## 核心状态模型
 
@@ -97,6 +99,30 @@ Completion Mailbox 和任务状态机。
 上限或费用上限；正常资源控制由并发限制和人工取消完成，不再要求复杂开发任务在少数
 几个模型回合内结束。Provider 或模型 API 自身仍可能拒绝超过真实上下文窗口或服务端
 输出限制的请求。
+
+## Enterprise Preview
+
+`feat/enterpise_preview` 在现有自治调度内核之上增加了一个可运行的微型企业工程闭环：
+
+- **Artifact Store**：设计、补丁、研究、审查和测试结果以不可变、可版本化记录写入
+  SQLite，并使用 `artifact://` URI 引用；Artifact 与任务树及 Graph 节点关联。
+- **资源锁**：所有副作用工具根据其 Capability 资源范围自动取得原子排他锁；多个
+  Agent 修改重叠文件或目录时由内核串行化，互不重叠的资源仍可并行。
+- **轻量 RAG**：`knowledge.index` 对工作区文本文件分块并写入 SQLite FTS5，
+  `knowledge.search` 返回带 `workspace://` 引用的相关片段；依赖目录、二进制和
+  超大文件默认跳过。
+- **受控 Git**：提供 `git.status`、`git.diff`、`git.log`、本地建分支和本地提交；
+  全部通过 ProcessSandbox 以 argv 执行，不提供 push、merge 或部署工具。
+- **研究与测试角色**：`researcher` 可使用受 SSRF 防护约束的
+  `web.search`/`web.fetch`；`tester` 只能读取源码、运行沙箱测试、查看 diff、
+  写测试证据 Artifact，并可申请屏幕截图。
+- **多模态与任务参数**：Chat 输入框的 `+` 菜单可选择上下文上限、温度、模型支持
+  时的思考深度，并添加 PNG/JPEG/WebP 图片。参数随 Root 快照持久化并自动由子 Agent
+  继承。
+- **人工审批**：`screen.capture` 属于 human-only、不可转授能力。请求进入桌面审批
+  面板，批准后只签发绑定当前操作的单次 Grant。
+- **安全关闭**：退出时先停止准入、取消运行中的宿主请求并等待资源释放，再关闭
+  SQLite；未完成的 RUNNING 快照仍由已有恢复流程重新入队。
 
 ## 增量异步工作任务板
 
@@ -247,15 +273,17 @@ macOS 桌面端在启动时通过 `desktop/main/sandbox` 探测 Seatbelt 后端�
 
 Character 是内核级角色策略包，而不只是 Prompt。每个角色同时约束四件事：模型可见
 的工具、允许持有的能力上限、允许运行时申请的能力，以及允许创建的子角色。首批内置
-三个可创建角色，初始根任务使用 root-only 的 `coordinator`：
+四个可创建角色，初始根任务使用 root-only 的 `coordinator`：
 
 - `coordinator`：拥有最高角色上限；小型任务可自行完成设计、开发和验证，复杂任务
   再按边界委派；
 - `developer`：在分配目录内读写代码，并在沙箱可用时运行测试；
 - `code_auditor`：源码只读，但可在沙箱中运行验证；发现问题后上报，不能修改源码；
-- `researcher`：联网检索资料并写入指定笔记目录，不改源码。
+- `researcher`：联网检索资料并写入研究 Artifact，不持有工作区写权限；
+- `tester`：源码只读，运行受限测试并记录可执行或视觉验证证据。
 
-所有内置 Character 都可以继续创建 `developer`、`code_auditor` 或 `researcher`，
+所有内置 Character 都可以继续创建 `developer`、`code_auditor`、`researcher`
+或 `tester`，
 但任何子 Agent 都不能创建 `coordinator`。达到最大委派深度、AgentPool 容量或任务树
 累计创建上限后，模型请求会隐藏子 Agent action 和 Character assignee，只允许当前
 Agent 使用 `self` 节点继续执行。
@@ -334,9 +362,18 @@ Tool 调用前和实际执行前都会校验 Grant。缺权、工具不存在或
 - Capability 请求的阻塞、审批、唤醒、快照与审计事件
 - Character 注册表、角色 Prompt、工具可见性、能力上限与子角色约束
 - `developer`、`code_auditor`、`researcher` 和根 `coordinator`
+- `tester` 测试角色、受限测试执行和人工审批屏幕检查
 - 每个 Agent 独立生成局部 DAG 的 AI Graph 协作模式
 - OS 托管的 plan 控制节点、依赖解锁、节点阻塞/恢复与 Graph revision
 - bootstrap 工作区文件工具与通用 `McpToolAdapter`
+- 不可变 SQLite Artifact Store 与 Graph 节点工件关联
+- Capability 资源范围驱动的副作用工具排他锁
+- SQLite FTS5 项目知识索引与轻量 RAG 检索
+- 受控本地 Git 分支/差异/历史/提交工具
+- SSRF 防护 Web 搜索和正文抓取
+- Chat 上下文上限、温度、思考深度与图片输入
+- Gemini、Claude 和 OpenAI-compatible 多模态请求映射
+- 桌面 human-only Capability 审批面板
 - mock HTTP Provider 到真实文件写入的完整工具调用闭环
 - 工具阻塞与事件唤醒
 - 任务快照和只追加事件历史
@@ -349,11 +386,14 @@ Tool 调用前和实际执行前都会校验 Grant。缺权、工具不存在或
 
 ```text
 src/
+├── artifacts/    # 不可变、可版本化的任务工件
 ├── capability/   # 资源范围、Grant、审批策略和逐级授权
 ├── character/    # Character 定义、注册表与内置角色
 ├── context/      # 上下文窗口策略与二次压缩 Adapter
 ├── graph/        # Agent 自主工作图、NodeKind 与结构校验
 ├── kernel/       # 状态、任务控制块、上下文和事件
+├── knowledge/    # SQLite FTS5 轻量项目知识检索
+├── locks/        # Capability 资源范围驱动的排他锁
 ├── model/        # Provider 接口与 Fake Provider
 ├── persistence/  # 任务快照和事件存储
 ├── scheduler/    # Agent 池、分层 Ready Queue、准入控制和调度器
@@ -399,6 +439,10 @@ root -> middle -> leaf -> middle -> root
 切换；根任务完成后自动进入对话流，工程视图仍保留拓扑，并可在同一 Conversation 中
 发起下一轮任务。对话流底部也可以直接提交新任务；每轮回复都带有对应的工程图入口，
 可以在历史轮次之间独立查看各自的 Agent 执行拓扑。
+
+对话框左下角的 `+` 菜单可以设置每轮任务的上下文上限、温度和模型支持时的思考
+深度，也可以添加图片。模型不支持的可选参数不会发送；图片通过各 Provider 的原生
+多模态格式发送，不会混入模型可见的文本 JSON。
 
 本地启动：
 
@@ -507,27 +551,32 @@ npm run benchmark:multi-agent
   对话，但 Root 不持有文件系统 Capability。空闲时可从侧栏设置入口更换 Workspace。
 - `workspace://current/` 到宿主目录的映射已由控制平面持久化；bootstrap 文件工具
   已接入并执行路径与符号链接检查，后续将用官方 filesystem MCP 替换其实现。
-- `test.run` 需要宿主注入 OS-level `ProcessSandbox`；当前桌面 Runtime 未配置该
-  后端，因此不会暴露命令执行工具。
-- `researcher` 的联网能力边界已经定义，但 Web/MCP 搜索工具尚未接入。
+- `test.run` 和本地 Git 工具需要宿主注入 OS-level `ProcessSandbox`。当前只实现
+  macOS Seatbelt 预览后端；Windows 尚未提供同等级进程隔离，因此不会注册这些工具。
+- `researcher` 已接入轻量公共 Web 搜索和 HTTPS 正文抓取；它不是浏览器自动化，
+  动态页面、登录态页面和企业内网仍需后续 MCP/Browser Adapter。
+- RAG 当前采用 SQLite FTS5 词法检索，没有 Embedding、语义重排和通用文档解析；
+  适合作为低依赖项目索引，不等价于完整企业知识平台。
+- 屏幕截图依赖操作系统授予 Electron 屏幕录制权限，每次 Agent 获取
+  `screen.capture` 都必须经过桌面人工审批。
+- Git 工具只允许本地查看、建分支和提交；没有 push、merge、rebase、force 或部署。
 - 真实目标模型 API 的工具调用兼容性尚未冒烟验证；当前只完成 mock HTTP Provider
   的完整写文件闭环验证。
-- Capability 人工审批已提供内核查询与决议 API，桌面审批界面尚未接入；资源锁仍仅
-  预留状态。
+- Artifact、知识索引和任务状态共享一个 SQLite 文件，但由独立表和 Adapter 管理；
+  当前尚未实现远端对象存储、跨机器同步或内容保留策略。
 - 轮次摘要和二次压缩已定义 Provider/Adapter 协议，但尚未连接真实模型服务。
-- RAG 仍将在后续通过 Adapter 接入成熟方案。
 
 ## 后续方向
 
 1. 接入官方 filesystem MCP 与通用 MCP stdio/Streamable HTTP Client。
-2. 为 `ProcessSandbox` 接入可按 Conversation 隔离的 OS-level 后端。
-3. 接入 Web 搜索，以及供 `code_auditor` 使用的本地预览、浏览器自动化和多模态
-   UI 检查能力。
-4. 增加人工审批和资源锁对应的阻塞/唤醒协议。
-5. 增加 Provider 级能力探测和更细粒度的模型兼容性矩阵。
-6. 增加真实 `ContextCompactor` Adapter。
-7. 通过独立 Adapter 接入成熟的 RAG 方案。
+2. 为 Windows/Linux 接入可按 Conversation 隔离的 OS-level ProcessSandbox。
+3. 接入浏览器自动化、应用内窗口捕获和结构化 UI 可访问性树。
+4. 增加 Provider 级多模态/推理参数能力探测与兼容性矩阵。
+5. 增加真实 `ContextCompactor` Adapter。
+6. 在轻量 FTS5 之上增加可选 Embedding 和语义重排 Adapter。
+7. 增加 Artifact 远端存储、保留策略、审计导出和跨节点同步。
 
 完整的项目约束与设计规则见 [AGENT.md](./AGENT.md)，版本变更见
-[CHANGELOG.md](./CHANGELOG.md)，本轮多 Agent 测试过程与结果见
+[CHANGELOG.md](./CHANGELOG.md)，企业预览架构见
+[Enterprise Preview Architecture](./docs/enterprise-preview.md)，本轮多 Agent 测试过程与结果见
 [OS-Agent-js 0.6.0 测试报告](./docs/test-report-0.6.0.md)。

@@ -20,8 +20,15 @@ const api: DesktopApi = {
       IPC_CHANNELS.selectWorkspace,
       conversationId,
     ),
+  selectImages: async () =>
+    await ipcRenderer.invoke(IPC_CHANNELS.selectImages),
   saveModelSettings: async (input) =>
     await ipcRenderer.invoke(IPC_CHANNELS.saveModelSettings, input),
+  resolveCapabilityApproval: async (input) =>
+    await ipcRenderer.invoke(
+      IPC_CHANNELS.resolveCapabilityApproval,
+      input,
+    ),
   submitTask: async (input) =>
     await ipcRenderer.invoke(IPC_CHANNELS.submitTask, input),
   cancelTask: async (taskId) =>

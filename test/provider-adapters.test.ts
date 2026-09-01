@@ -245,4 +245,180 @@ describe('provider adapters', () => {
       ],
     });
   });
+
+  it('maps OpenAI-compatible multimodal and reasoning preferences without leaking image bytes into text', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: structuredOutput } }],
+          usage: { prompt_tokens: 4, completion_tokens: 2 },
+        }),
+        { status: 200 },
+      ),
+    );
+    const provider = new OpenAiCompatibleModelProvider({
+      providerId: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'https://api.example.test/v1',
+      model: 'reasoning-model',
+      supportsReasoningEffort: true,
+      fetchImplementation,
+    });
+    const estimate = provider.estimate({
+      ...request,
+      context: [
+        {
+          type: 'user',
+          content: 'Inspect this image.',
+          attachments: [
+            {
+              id: 'image-1',
+              name: 'screen.png',
+              mimeType: 'image/png',
+              dataBase64: 'x'.repeat(1_000_000),
+            },
+          ],
+        },
+      ],
+    });
+    expect(estimate.inputTokens).toBeLessThan(10_000);
+
+    await provider.invoke(
+      {
+        ...request,
+        preferences: {
+          temperature: 0.4,
+          reasoningEffort: 'high',
+        },
+        context: [
+          {
+            type: 'user',
+            content: 'Inspect this image.',
+            attachments: [
+              {
+                id: 'image-1',
+                name: 'screen.png',
+                mimeType: 'image/png',
+                dataBase64: 'c2VjcmV0LWltYWdlLWJ5dGVz',
+              },
+            ],
+          },
+        ],
+      },
+      new AbortController().signal,
+    );
+
+    const body = JSON.parse(
+      String(fetchImplementation.mock.calls[0]?.[1]?.body),
+    ) as {
+      temperature?: number;
+      reasoning_effort?: string;
+      messages: Array<{
+        content:
+          | string
+          | Array<{
+              type: string;
+              text?: string;
+              image_url?: { url: string };
+            }>;
+      }>;
+    };
+    expect(body).toMatchObject({
+      temperature: 0.4,
+      reasoning_effort: 'high',
+    });
+    const content = body.messages[1]?.content;
+    expect(Array.isArray(content)).toBe(true);
+    if (!Array.isArray(content)) {
+      return;
+    }
+    const text = content.find((part) => part.type === 'text')?.text ?? '';
+    expect(text).not.toContain('c2VjcmV0LWltYWdlLWJ5dGVz');
+    expect(JSON.parse(text)).toMatchObject({
+      context: [
+        {
+          attachments: [
+            {
+              imageAttachedSeparately: true,
+            },
+          ],
+        },
+      ],
+    });
+    expect(
+      content.find((part) => part.type === 'image_url')?.image_url?.url,
+    ).toBe('data:image/png;base64,c2VjcmV0LWltYWdlLWJ5dGVz');
+  });
+
+  it('maps Anthropic images and reasoning budget while omitting incompatible temperature', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text: structuredOutput }],
+          usage: { input_tokens: 4, output_tokens: 2 },
+        }),
+        { status: 200 },
+      ),
+    );
+    const provider = new AnthropicModelProvider({
+      apiKey: 'test-key',
+      model: 'claude-test',
+      fetchImplementation,
+    });
+
+    await provider.invoke(
+      {
+        ...request,
+        preferences: {
+          temperature: 0.8,
+          reasoningEffort: 'medium',
+        },
+        context: [
+          {
+            type: 'user',
+            content: 'Inspect.',
+            attachments: [
+              {
+                id: 'image-1',
+                name: 'screen.webp',
+                mimeType: 'image/webp',
+                dataBase64: 'd2VicA==',
+              },
+            ],
+          },
+        ],
+      },
+      new AbortController().signal,
+    );
+
+    const body = JSON.parse(
+      String(fetchImplementation.mock.calls[0]?.[1]?.body),
+    ) as {
+      temperature?: number;
+      thinking?: { type: string; budget_tokens: number };
+      messages: Array<{
+        content: Array<{
+          type: string;
+          source?: { media_type: string; data: string };
+        }>;
+      }>;
+    };
+    expect(body.temperature).toBeUndefined();
+    expect(body.thinking).toEqual({
+      type: 'enabled',
+      budget_tokens: 4_096,
+    });
+    expect(body.messages[0]?.content).toEqual(
+      expect.arrayContaining([
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/webp',
+            data: 'd2VicA==',
+          },
+        },
+      ]),
+    );
+  });
 });

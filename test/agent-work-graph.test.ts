@@ -417,7 +417,12 @@ describe('Agent work graph', () => {
     expect(middlePlan?.delegation.canSpawnSubagents).toBe(true);
     expect(
       middlePlan?.delegation.availableCharacters?.map(({ id }) => id),
-    ).toEqual(['developer', 'code_auditor', 'researcher']);
+    ).toEqual([
+      'developer',
+      'code_auditor',
+      'researcher',
+      'tester',
+    ]);
 
     const leafPlan = provider.requests.find(
       (request) =>

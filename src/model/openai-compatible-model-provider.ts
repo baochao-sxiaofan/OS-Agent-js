@@ -8,6 +8,8 @@ import type {
 } from './model-provider.js';
 import {
   buildStructuredAgentSystemInstruction,
+  estimateModelInputTokens,
+  extractModelImages,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from './structured-agent-response.js';
@@ -21,6 +23,7 @@ export type OpenAiCompatibleModelProviderOptions = {
   maxOutputTokens?: number;
   apiKeyHeader?: 'api-key' | 'authorization';
   maxTokensField?: 'max_completion_tokens' | 'max_tokens';
+  supportsReasoningEffort?: boolean;
   fetchImplementation?: typeof fetch;
 };
 
@@ -44,6 +47,7 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
   readonly #maxOutputTokens: number | undefined;
   readonly #apiKeyHeader: 'api-key' | 'authorization';
   readonly #maxTokensField: 'max_completion_tokens' | 'max_tokens';
+  readonly #supportsReasoningEffort: boolean;
   readonly #fetch: typeof fetch;
 
   constructor(options: OpenAiCompatibleModelProviderOptions) {
@@ -59,6 +63,8 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
     this.#maxOutputTokens = options.maxOutputTokens;
     this.#apiKeyHeader = options.apiKeyHeader ?? 'authorization';
     this.#maxTokensField = options.maxTokensField ?? 'max_tokens';
+    this.#supportsReasoningEffort =
+      options.supportsReasoningEffort ?? false;
     this.#fetch = options.fetchImplementation ?? globalThis.fetch;
     this.contextWindowTokens = options.contextWindowTokens ?? 128_000;
     this.id = `${options.providerId}:${this.#model}`;
@@ -66,7 +72,7 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
 
   estimate(request: ModelRequest): ModelRequestEstimate {
     return {
-      inputTokens: estimateTokens(JSON.stringify(request)),
+      inputTokens: estimateModelInputTokens(request),
       maxOutputTokens: this.#maxOutputTokens ?? 0,
       estimatedCostUsd: 0,
     };
@@ -115,6 +121,19 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
   }
 
   private buildRequestBody(request: ModelRequest): JsonObject {
+    const textPayload = JSON.stringify({
+      goal: request.goal,
+      ...(request.character === undefined
+        ? {}
+        : { character: request.character }),
+      capabilities: request.capabilities ?? [],
+      attempt: request.attempt,
+      context: request.context.map(serializeContextItemForModel),
+      tools: request.tools,
+      delegation: request.delegation,
+      ...(request.graph === undefined ? {} : { graph: request.graph }),
+    });
+    const images = extractModelImages(request.context);
     const payload: JsonObject = {
       model: this.#model,
       messages: [
@@ -124,20 +143,18 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
         },
         {
           role: 'user',
-          content: JSON.stringify({
-            goal: request.goal,
-            ...(request.character === undefined
-              ? {}
-              : { character: request.character }),
-            capabilities: request.capabilities ?? [],
-            attempt: request.attempt,
-            context: request.context.map(serializeContextItemForModel),
-            tools: request.tools,
-            delegation: request.delegation,
-            ...(request.graph === undefined
-              ? {}
-              : { graph: request.graph }),
-          }),
+          content:
+            images.length === 0
+              ? textPayload
+              : [
+                  { type: 'text', text: textPayload },
+                  ...images.map((image) => ({
+                    type: 'image_url',
+                    image_url: {
+                      url: `data:${image.mimeType};base64,${image.dataBase64}`,
+                    },
+                  })),
+                ],
         },
       ],
       stream: false,
@@ -148,12 +165,18 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
     if (this.#maxOutputTokens !== undefined) {
       payload[this.#maxTokensField] = this.#maxOutputTokens;
     }
+    if (request.preferences?.temperature !== undefined) {
+      payload['temperature'] = request.preferences.temperature;
+    }
+    if (
+      this.#supportsReasoningEffort &&
+      request.preferences?.reasoningEffort !== undefined &&
+      request.preferences.reasoningEffort !== 'auto'
+    ) {
+      payload['reasoning_effort'] = request.preferences.reasoningEffort;
+    }
     return payload;
   }
-}
-
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 async function parseJsonResponse(response: Response): Promise<JsonValue> {
