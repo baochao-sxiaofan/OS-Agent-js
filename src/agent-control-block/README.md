@@ -25,7 +25,36 @@ const agent: AgentControlBlock = {
     },
   ],
   skills: ['file.read'],
-  context: {},
+  context: {
+    schemaVersion: 1,
+    level1: {
+      id: 'sales-root',
+      level: 1,
+      instructions: ['Follow current company sales policies.'],
+      currentTask: { id: 'sales-role', objective: 'Perform ongoing sales work.' },
+      taskChain: {
+        target: 2,
+        revision: 0,
+        phase: 'PLANNING',
+        currentTaskId: null,
+        tasks: [],
+      },
+      memory: {
+        summary: null,
+        lessons: [],
+        recentEntries: [],
+        historyRef: null,
+      },
+      budget: {
+        maxTokens: 8_000,
+        compactAtTokens: 6_000,
+        targetTokens: 4_000,
+        maxTasks: 12,
+      },
+    },
+    level2: null,
+    level3: null,
+  },
   createdAt: 1_789_862_400_000,
   modelConfigId: 'sales-default',
 };
@@ -42,8 +71,10 @@ const agent: AgentControlBlock = {
   are copied. This is a data shape, not an authorization implementation.
 - `skills`: callable tool IDs, independent of resource permissions. Tool
   implementations and schemas stay in their registry.
-- `context`: `AgentContext`, supplied by `src/context`. Its only current value
-  is an empty object. Task chains and multilevel context belong there later.
+- `context`: `AgentContext`, supplied by the public `agent-context` module.
+  It contains three levels, task references/chains, semantic memory and budgets.
+  See [the context contract](../agent-context/README.md). The sample limits above
+  are examples, not runtime defaults.
 - `createdAt`: Agent creation time in Unix milliseconds (the earlier
   `runningTime` concept), not elapsed execution time or model creation time.
 - `modelConfigId`: host model configuration reference, with no API key or
@@ -56,5 +87,6 @@ or deep immutability enforcement.
 Future module responsibilities include converting between managed context and
 the requester's `ModelMessage` protocol. Conversion signatures and
 implementations are deliberately deferred until those protocols are settled.
-This version does not add factories, codecs, task states, task verification,
-workflow control, persistence, scheduling or TCB adapters.
+The ACB module does not implement factories, codecs, task verification, workflow
+control, persistence, scheduling or TCB adapters. Task-state declarations belong
+to `agent-context`; the four ACB scheduling states remain separate.

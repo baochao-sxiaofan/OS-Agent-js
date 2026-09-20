@@ -1,5 +1,5 @@
 import type { ResourceScope } from '../capability/capability.js';
-import type { AgentContext } from '../context/index.js';
+import type { AgentContext } from '../agent-context/index.js';
 
 /**
  * Persistent Agent identity, independent of task and model request IDs.
@@ -51,7 +51,7 @@ export type AgentControlBlock = {
   readonly capacity: readonly AgentFilePermission[];
   /** IDs of callable registered tools; skill definitions remain external. */
   readonly skills: readonly string[];
-  /** Owned by the context module; currently an empty placeholder. */
+  /** Three-level work and memory snapshot owned by agent-context. */
   readonly context: AgentContext;
   /** Agent creation time as Unix milliseconds, a nonnegative safe integer. */
   readonly createdAt: number;

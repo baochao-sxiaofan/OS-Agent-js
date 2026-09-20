@@ -18,6 +18,10 @@
     "./agent-control-block": {
       "types": "./dist/agent-control-block/index.d.ts",
       "import": "./dist/agent-control-block/index.js"
+    },
+    "./agent-context": {
+      "types": "./dist/agent-context/index.d.ts",
+      "import": "./dist/agent-context/index.js"
     }
   },
   "files": [
