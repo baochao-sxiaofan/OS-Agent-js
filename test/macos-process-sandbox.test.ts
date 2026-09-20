@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,7 +10,7 @@ import {
 } from '../desktop/main/sandbox/index.js';
 
 const sandboxAvailable =
-  process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec');
+  process.platform === 'darwin' && probeMacOSSandbox().available;
 
 // 只有在 macOS 且存在 sandbox-exec 时才运行真实进程隔离测试；其他环境跳过。
 const describeSandbox = sandboxAvailable ? describe : describe.skip;

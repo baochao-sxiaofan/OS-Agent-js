@@ -117,8 +117,9 @@ Completion Mailbox 和任务状态机。
   `web.search`/`web.fetch`；`tester` 只能读取源码、运行沙箱测试、查看 diff、
   写测试证据 Artifact，并可申请屏幕截图。
 - **多模态与任务参数**：Chat 输入框的 `+` 菜单可选择上下文上限、温度、模型支持
-  时的思考深度，并添加 PNG/JPEG/WebP 图片。参数随 Root 快照持久化并自动由子 Agent
-  继承。
+  时的思考深度，并添加 PNG/JPEG/WebP 图片或 MP4/MOV/AVI/MKV 视频。MiniMax M3
+  支持原生图片、视频理解；`image.generate` 和 `video.generate` 调用独立生成接口，
+  结果进入 Artifact 并在对话中显示。模型参数随 Root 快照持久化并由子 Agent 继承。
 - **人工审批**：`screen.capture` 属于 human-only、不可转授能力。请求进入桌面审批
   面板，批准后只签发绑定当前操作的单次 Grant。
 - **安全关闭**：退出时先停止准入、取消运行中的宿主请求并等待资源释放，再关闭
@@ -441,8 +442,13 @@ root -> middle -> leaf -> middle -> root
 可以在历史轮次之间独立查看各自的 Agent 执行拓扑。
 
 对话框左下角的 `+` 菜单可以设置每轮任务的上下文上限、温度和模型支持时的思考
-深度，也可以添加图片。模型不支持的可选参数不会发送；图片通过各 Provider 的原生
-多模态格式发送，不会混入模型可见的文本 JSON。
+深度，也可以添加图片和视频。每轮最多 4 个附件，合计最多 36 MB，单张图片最多
+10 MB。MiniMax M3 和 Gemini 适配器接收视频；其它当前适配器会提前报告不支持。
+媒体使用原生多模态格式发送，Base64 不会混入模型可见的文本 JSON。工作区媒体可用
+`media.read` 读取；MiniMax 配置完成后可直接让 Agent 生成图片或视频。
+
+MiniMax 官方协议、套餐限制、已修复的问题和真实验证结果见
+[MiniMax 多模态接入与验证](./docs/minimax-multimodal.md)。
 
 本地启动：
 
@@ -560,8 +566,10 @@ npm run benchmark:multi-agent
 - 屏幕截图依赖操作系统授予 Electron 屏幕录制权限，每次 Agent 获取
   `screen.capture` 都必须经过桌面人工审批。
 - Git 工具只允许本地查看、建分支和提交；没有 push、merge、rebase、force 或部署。
-- 真实目标模型 API 的工具调用兼容性尚未冒烟验证；当前只完成 mock HTTP Provider
-  的完整写文件闭环验证。
+- MiniMax M3 已完成真实 API 的结构化响应、Graph 文件创建/读取闭环、图片理解、
+  图片生成及视频理解验证。视频生成 API 在本次测试中返回 `2056` 套餐额度错误，
+  提交、轮询和恢复逻辑通过模拟测试，真实成片尚未验证。其他厂商新增的视频适配
+  未使用真实密钥验证。
 - Artifact、知识索引和任务状态共享一个 SQLite 文件，但由独立表和 Adapter 管理；
   当前尚未实现远端对象存储、跨机器同步或内容保留策略。
 - 轮次摘要和二次压缩已定义 Provider/Adapter 协议，但尚未连接真实模型服务。

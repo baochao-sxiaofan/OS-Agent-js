@@ -1,4 +1,4 @@
-import type { JsonValue } from '../types/json.js';
+import type { JsonObject, JsonValue } from '../types/json.js';
 import type {
   CapabilityRequest,
   ResourceScope,
@@ -15,12 +15,29 @@ import type {
 
 /** Tool result marker recognized by Provider adapters as image input. */
 export const MODEL_IMAGE_MARKER = 'os-agent.image.v1';
+export const MODEL_VIDEO_MARKER = 'os-agent.video.v1';
 
 export type ImageAttachment = {
   id: string;
   name: string;
   mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
   dataBase64: string;
+};
+
+export type VideoAttachment = {
+  id: string;
+  name: string;
+  mimeType: 'video/mp4' | 'video/quicktime' | 'video/x-msvideo' | 'video/x-matroska';
+  dataBase64: string;
+};
+
+export type MediaAttachment = ImageAttachment | VideoAttachment;
+
+/** Opaque provider continuation, retained in snapshots and replayed only to its provider. */
+export type ProviderMessageContextItem = {
+  type: 'provider_message';
+  providerId: string;
+  message: JsonObject;
 };
 
 /**
@@ -79,7 +96,7 @@ export type UserContextItem = {
   /** 用户输入正文。 */
   content: string;
   /** User-selected images; the raw bytes are sent through native multimodal APIs. */
-  attachments?: ImageAttachment[];
+  attachments?: MediaAttachment[];
 };
 
 /** 模型此前产生并被运行时保留的回复内容。 */
@@ -230,6 +247,7 @@ export type CapabilityRequestResultContextItem = {
  */
 export type ContextItem =
   | AssistantContextItem
+  | ProviderMessageContextItem
   | AsyncWorkUpdateContextItem
   | CapabilityRequestResultContextItem
   | ContextSummaryItem

@@ -4,6 +4,8 @@ import {
   type ArtifactStore,
 } from '../../artifacts/artifact-store.js';
 import type { CapabilityInput } from '../../capability/capability.js';
+import { MODEL_IMAGE_MARKER, MODEL_VIDEO_MARKER } from '../../kernel/context.js';
+import { MEDIA_MIME_TYPES } from '../../model/media.js';
 import type { JsonObject, JsonValue } from '../../types/json.js';
 import type { Tool } from '../tool.js';
 
@@ -139,6 +141,13 @@ function createArtifactReadTool(store: ArtifactStore): Tool {
         record.rootTaskId !== (context.rootTaskId ?? context.taskId)
       ) {
         throw new Error('Artifact was not found in the current task tree.');
+      }
+      if (isObject(record.content) && typeof record.content['dataBase64'] === 'string' &&
+          MEDIA_MIME_TYPES.some((mime) => mime === record.mediaType)) {
+        const { dataBase64, ...metadata } = record.content;
+        return toJson({ ...record, content: metadata,
+          marker: record.mediaType.startsWith('video/') ? MODEL_VIDEO_MARKER : MODEL_IMAGE_MARKER,
+          mimeType: record.mediaType, sourceName: record.title, dataBase64 });
       }
       return toJson(record);
     },

@@ -1,4 +1,5 @@
 import type { JsonObject, JsonValue } from '../types/json.js';
+import { rejectUnsupportedVideo } from './media.js';
 import type {
   ModelProvider,
   ModelRequest,
@@ -82,6 +83,7 @@ export class OpenAiCompatibleModelProvider implements ModelProvider {
     request: ModelRequest,
     signal: AbortSignal,
   ): Promise<ModelResponse> {
+    rejectUnsupportedVideo(request.context, this.id);
     const headers: Record<string, string> = {
       'content-type': 'application/json',
     };

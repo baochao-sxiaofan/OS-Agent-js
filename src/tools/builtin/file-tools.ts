@@ -11,6 +11,7 @@ import { CURRENT_WORKSPACE_RESOURCE } from '../../capability/workspace-capabilit
 import type { JsonObject, JsonValue } from '../../types/json.js';
 import type { Tool, ToolExecutionContext, ToolInputValidation } from '../tool.js';
 import { WorkspaceResolver } from '../workspace-fs.js';
+import { replaceTextFileOnce } from '../file-operation.js';
 
 const MAX_READ_BYTES = 256 * 1024;
 
@@ -122,12 +123,8 @@ export const fileWriteTool: Tool = {
   async execute(input, context): Promise<JsonValue> {
     const resolver = await requireResolver(context);
     const hostPath = resolver.toHostPath(String(input['path']));
-    await resolver.assertResolvedInsideRoot(hostPath);
-    await writeFile(hostPath, String(input['content']), 'utf8');
-    return {
-      path: String(input['path']),
-      bytesWritten: String(input['content']).length,
-    };
+    const target = await resolver.assertResolvedInsideRoot(hostPath);
+    return await replaceTextFileOnce(target, input, context, () => String(input['content']));
   },
 };
 
@@ -319,14 +316,15 @@ export const directoryDeleteTool: Tool = {
     return [
       {
         capability: 'directory.delete',
-        scope: { kind: 'exact', resource: String(input['path']) },
+        scope: { kind: 'subtree', resource: String(input['path']) },
       },
     ];
   },
   async execute(input, context): Promise<JsonValue> {
     const resolver = await requireResolver(context);
     const hostPath = resolver.toHostPath(String(input['path']));
-    await resolver.assertResolvedInsideRoot(hostPath);
+    const resolved = await resolver.assertResolvedInsideRoot(hostPath);
+    if (resolved === resolver.root) throw new Error('The workspace root directory cannot be deleted.');
     await rm(hostPath, { recursive: true, force: true });
     return { path: String(input['path']), deleted: true };
   },

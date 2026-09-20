@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import { validateMediaAttachments, MAX_IMAGE_BYTES, MAX_INLINE_MEDIA_BYTES } from '../../src/model/media.js';
+import { MEDIA_EXTENSIONS } from '../../src/tools/builtin/media-tools.js';
 import { extname } from 'node:path';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -83,8 +85,9 @@ function registerIpcHandlers(
     },
   );
   ipcMain.handle(IPC_CHANNELS.selectImages, async () =>
-    await selectImageAttachments(),
+    await selectMediaAttachments(true),
   );
+  ipcMain.handle(IPC_CHANNELS.selectMedia, async () => await selectMediaAttachments());
   ipcMain.handle(
     IPC_CHANNELS.discoverModels,
     async (_event, input: unknown) => {
@@ -179,15 +182,15 @@ async function selectWorkspaceDirectory(): Promise<string | undefined> {
   return selection.canceled ? undefined : selection.filePaths[0];
 }
 
-async function selectImageAttachments() {
+async function selectMediaAttachments(imagesOnly = false) {
   const options: OpenDialogOptions = {
-    title: '选择图片上下文',
-    buttonLabel: '添加图片',
+    title: '选择图片或视频',
+    buttonLabel: '添加媒体',
     properties: ['openFile', 'multiSelections'],
     filters: [
       {
-        name: 'Images',
-        extensions: ['png', 'jpg', 'jpeg', 'webp'],
+        name: 'Images and videos',
+        extensions: imagesOnly ? ['png', 'jpg', 'jpeg', 'webp'] : ['png', 'jpg', 'jpeg', 'webp', 'mp4', 'mov', 'avi', 'mkv'],
       },
     ],
   };
@@ -198,29 +201,17 @@ async function selectImageAttachments() {
     return [];
   }
   if (selection.filePaths.length > 4) {
-    throw new Error('每轮最多添加 4 张图片。');
+    throw new Error('每轮最多添加 4 个媒体附件。');
   }
-  return await Promise.all(
-    selection.filePaths.map(async (filePath) => {
-      const bytes = await readFile(filePath);
-      if (bytes.byteLength > 8 * 1024 * 1024) {
-        throw new Error('单张图片不能超过 8 MB。');
-      }
-      const extension = extname(filePath).toLowerCase();
-      const mimeType =
-        extension === '.png'
-          ? 'image/png'
-          : extension === '.webp'
-            ? 'image/webp'
-            : 'image/jpeg';
-      return {
-        id: randomUUID(),
-        name: filePath.split(/[\\/]/u).at(-1) ?? 'image',
-        mimeType,
-        dataBase64: bytes.toString('base64'),
-      };
-    }),
-  );
+  const attachments = await Promise.all(selection.filePaths.map(async (filePath) => {
+    const mimeType = MEDIA_EXTENSIONS[extname(filePath).toLowerCase()];
+    if (!mimeType) throw new Error('不支持的媒体格式。');
+    const info = await stat(filePath);
+    if (!info.isFile() || info.size > (mimeType.startsWith('video/') ? MAX_INLINE_MEDIA_BYTES : MAX_IMAGE_BYTES)) throw new Error('媒体文件过大，请缩短或压缩后再添加。');
+    const bytes = await readFile(filePath);
+    return { id: randomUUID(), name: filePath.split(/[\\/]/u).at(-1) ?? 'media', mimeType, dataBase64: bytes.toString('base64') };
+  }));
+  return validateMediaAttachments(attachments);
 }
 
 async function createWindow(): Promise<void> {
@@ -232,7 +223,7 @@ async function createWindow(): Promise<void> {
     show: false,
     backgroundColor: '#f5f5f2',
     webPreferences: {
-      preload: join(currentDirectory, '../preload/index.mjs'),
+      preload: join(currentDirectory, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: !sandboxWorkaround,
@@ -253,6 +244,11 @@ async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow(windowOptions);
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    mainWindow?.focus();
+  });
+  mainWindow.webContents.on('preload-error', (_event, _path, error) => {
+    console.error('OS-Agent preload failed:', error.message);
+    dialog.showErrorBox('OS-Agent 界面加载失败', error.message);
   });
   mainWindow.on('closed', () => {
     mainWindow = undefined;
@@ -275,6 +271,8 @@ async function createWindow(): Promise<void> {
       join(currentDirectory, '../renderer/index.html'),
     );
   }
+  mainWindow.show();
+  mainWindow.focus();
 }
 
 app.whenReady().then(async () => {
@@ -325,6 +323,11 @@ app.whenReady().then(async () => {
       void createWindow();
     }
   });
+}).catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error('OS-Agent startup failed:', message);
+  dialog.showErrorBox('OS-Agent 启动失败', message);
+  app.exit(1);
 });
 
 app.on('window-all-closed', () => {
@@ -342,7 +345,7 @@ function parseSubmitTaskInput(input: unknown): SubmitTaskInput {
     throw new Error('Invalid task submission.');
   }
   const preferences = parseTaskPreferences(input['preferences']);
-  const attachments = parseImageAttachments(input['attachments']);
+  const attachments = validateMediaAttachments(input['attachments']);
   return {
     conversationId: input['conversationId'],
     task: input['task'],
@@ -424,40 +427,6 @@ function parseCapabilityApprovalInput(
       ? {}
       : { reason: input['reason'] }),
   };
-}
-
-function parseImageAttachments(
-  value: unknown,
-): NonNullable<SubmitTaskInput['attachments']> {
-  if (value === undefined) {
-    return [];
-  }
-  if (!Array.isArray(value) || value.length > 4) {
-    throw new Error('Invalid image attachments.');
-  }
-  return value.map((candidate) => {
-    if (
-      !isRecord(candidate) ||
-      typeof candidate['id'] !== 'string' ||
-      typeof candidate['name'] !== 'string' ||
-      !['image/jpeg', 'image/png', 'image/webp'].includes(
-        String(candidate['mimeType']),
-      ) ||
-      typeof candidate['dataBase64'] !== 'string' ||
-      candidate['dataBase64'].length > 12_000_000
-    ) {
-      throw new Error('Invalid image attachment.');
-    }
-    return {
-      id: candidate['id'],
-      name: candidate['name'],
-      mimeType: candidate['mimeType'] as
-        | 'image/jpeg'
-        | 'image/png'
-        | 'image/webp',
-      dataBase64: candidate['dataBase64'],
-    };
-  });
 }
 
 function parseDiscoverModelsInput(input: unknown): DiscoverModelsInput {

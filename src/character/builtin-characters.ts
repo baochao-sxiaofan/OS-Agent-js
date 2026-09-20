@@ -8,6 +8,9 @@ import type { CharacterDefinition } from './character.js';
  */
 export const BUILTIN_TOOL_IDS = {
   fileRead: 'file.read',
+  mediaRead: 'media.read',
+  imageGenerate: 'image.generate',
+  videoGenerate: 'video.generate',
   fileWrite: 'file.write',
   fileCreate: 'file.create',
   fileDelete: 'file.delete',
@@ -79,7 +82,10 @@ export const DEVELOPER_CHARACTER: CharacterDefinition = {
     'Never attempt to reach files or resources outside the workspace mount.',
   ].join(' '),
   visibleToolIds: [
+    BUILTIN_TOOL_IDS.imageGenerate,
+    BUILTIN_TOOL_IDS.videoGenerate,
     BUILTIN_TOOL_IDS.fileRead,
+    BUILTIN_TOOL_IDS.mediaRead,
     BUILTIN_TOOL_IDS.fileWrite,
     BUILTIN_TOOL_IDS.fileCreate,
     BUILTIN_TOOL_IDS.fileDelete,
@@ -101,6 +107,8 @@ export const DEVELOPER_CHARACTER: CharacterDefinition = {
     BUILTIN_TOOL_IDS.testRun,
   ],
   capabilityCeiling: [
+    'media.image.generate',
+    'media.video.generate',
     'file.read',
     'file.write',
     'file.create',
@@ -117,6 +125,8 @@ export const DEVELOPER_CHARACTER: CharacterDefinition = {
     'git.write',
   ],
   requestableCapabilities: [
+    'media.image.generate',
+    'media.video.generate',
     'file.read',
     'file.write',
     'file.create',
@@ -149,6 +159,7 @@ export const CODE_AUDITOR_CHARACTER: CharacterDefinition = {
   ].join(' '),
   visibleToolIds: [
     BUILTIN_TOOL_IDS.fileRead,
+    BUILTIN_TOOL_IDS.mediaRead,
     BUILTIN_TOOL_IDS.directoryList,
     BUILTIN_TOOL_IDS.workspaceSearch,
     BUILTIN_TOOL_IDS.artifactWrite,
@@ -195,6 +206,7 @@ export const RESEARCHER_CHARACTER: CharacterDefinition = {
   ].join(' '),
   visibleToolIds: [
     BUILTIN_TOOL_IDS.fileRead,
+    BUILTIN_TOOL_IDS.mediaRead,
     BUILTIN_TOOL_IDS.directoryList,
     BUILTIN_TOOL_IDS.workspaceSearch,
     BUILTIN_TOOL_IDS.artifactWrite,
@@ -239,6 +251,7 @@ export const TESTER_CHARACTER: CharacterDefinition = {
   ].join(' '),
   visibleToolIds: [
     BUILTIN_TOOL_IDS.fileRead,
+    BUILTIN_TOOL_IDS.mediaRead,
     BUILTIN_TOOL_IDS.directoryList,
     BUILTIN_TOOL_IDS.workspaceSearch,
     BUILTIN_TOOL_IDS.knowledgeSearch,

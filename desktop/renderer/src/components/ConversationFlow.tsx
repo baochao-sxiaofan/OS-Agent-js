@@ -19,7 +19,8 @@ import {
 import type {
   ConversationRoundView,
   ConversationView,
-  ImageAttachmentInput,
+  MediaAttachmentInput,
+  MediaPreviewView,
   TaskDraft,
   TaskModelPreferences,
 } from '../../../shared/contracts.js';
@@ -78,10 +79,15 @@ export function ConversationFlow({
                   content={round.goal}
                   tone="user"
                 />
+                <MediaGallery media={(round.attachments ?? []).map((attachment) => ({
+                  uri: attachment.id, title: attachment.name, mimeType: attachment.mimeType,
+                  url: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
+                }))} label="输入附件" />
                 <AssistantMessage
                   round={round}
                   onOpenTopology={onOpenTopology}
                 />
+                <MediaGallery media={round.media ?? []} label="生成结果" />
               </div>
             ))}
           </div>
@@ -97,6 +103,18 @@ export function ConversationFlow({
   );
 }
 
+function MediaGallery({ media, label }: { media: MediaPreviewView[]; label: string }) {
+  if (media.length === 0) return null;
+  return <div className="conversation-media" aria-label={label}>
+    {media.map((item) => <figure key={item.uri}>
+      {item.mimeType.startsWith('video/')
+        ? <video src={item.url} controls preload="metadata" aria-label={item.title} />
+        : <img src={item.url} alt={item.title} loading="lazy" />}
+      <figcaption>{item.title}</figcaption>
+    </figure>)}
+  </div>;
+}
+
 function ConversationComposer({
   disabled,
   onError,
@@ -109,7 +127,7 @@ function ConversationComposer({
   providerId: string;
 }) {
   const [task, setTask] = useState('');
-  const [attachments, setAttachments] = useState<ImageAttachmentInput[]>([]);
+  const [attachments, setAttachments] = useState<MediaAttachmentInput[]>([]);
   const [preferences, setPreferences] = useState<TaskModelPreferences>(
     DEFAULT_TASK_PREFERENCES,
   );

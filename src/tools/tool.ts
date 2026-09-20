@@ -1,5 +1,6 @@
 import type { JsonObject, JsonValue } from '../types/json.js';
 import type { CapabilityInput } from '../capability/capability.js';
+import type { OperationStore } from '../persistence/operation-store.js';
 
 export type ToolEffect = 'privileged' | 'read_only' | 'side_effect';
 
@@ -10,6 +11,7 @@ export type ToolExecutionContext = {
   graphNodeAlias?: string;
   signal: AbortSignal;
   idempotencyKey: string;
+  operationStore?: OperationStore;
   /**
    * 当前任务挂载的宿主工作区根目录（已消解符号链接）。
    *

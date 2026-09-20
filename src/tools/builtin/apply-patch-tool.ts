@@ -1,10 +1,9 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-
 import type { CapabilityInput } from '../../capability/capability.js';
 import { CURRENT_WORKSPACE_RESOURCE } from '../../capability/workspace-capabilities.js';
 import type { JsonValue } from '../../types/json.js';
 import type { Tool, ToolExecutionContext } from '../tool.js';
 import { WorkspaceResolver } from '../workspace-fs.js';
+import { replaceTextFileOnce } from '../file-operation.js';
 
 /**
  * 结构化补丁：以“查找-替换”方式修改工作区内已存在的文件。
@@ -61,8 +60,8 @@ export const fileApplyPatchTool: Tool = {
     }
     const resolver = await WorkspaceResolver.create(context.workspaceRoot);
     const hostPath = resolver.toHostPath(String(input['path']));
-    await resolver.assertResolvedInsideRoot(hostPath);
-    const original = await readFile(hostPath, 'utf8');
+    const target = await resolver.assertResolvedInsideRoot(hostPath);
+    return await replaceTextFileOnce(target, input, context, (original) => {
     const find = String(input['find']);
     const firstIndex = original.indexOf(find);
     if (firstIndex === -1) {
@@ -73,17 +72,10 @@ export const fileApplyPatchTool: Tool = {
         'file.apply_patch matched `find` more than once; make it unique.',
       );
     }
-    const updated =
+    return (
       original.slice(0, firstIndex) +
       String(input['replace']) +
-      original.slice(firstIndex + find.length);
-    const parent = hostPath.slice(0, hostPath.lastIndexOf('/'));
-    await mkdir(parent, { recursive: true });
-    await writeFile(hostPath, updated, 'utf8');
-    return {
-      path: String(input['path']),
-      replaced: true,
-      bytesWritten: updated.length,
-    };
+      original.slice(firstIndex + find.length));
+    });
   },
 };

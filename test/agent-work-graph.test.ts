@@ -12,6 +12,7 @@ import {
   validateAgentWorkGraphProposal,
   type AgentWorkGraphProposal,
   type Tool,
+  type Termination,
 } from '../src/index.js';
 
 const usage = {
@@ -67,6 +68,37 @@ function createGraphRuntime(taskIds: readonly string[] = []) {
 }
 
 describe('Agent work graph', () => {
+  it.each<Termination>([
+    { kind: 'cancelled', reason: 'User cancelled.' },
+    { kind: 'failed', error: 'Model failed.' },
+    { kind: 'completed', output: 'Done.' },
+  ])('clears the active graph node when the task terminates: $kind', (termination) => {
+    const task = TaskControlBlock.createAgent({ goal: 'Stop active work.' }, { kind: 'root' }, 10);
+    task.replaceWorkGraph(selfGraph, 20);
+    task.activateSelfWorkGraphNode('inspect_workspace', 30);
+    task.transition({ status: 'TERMINATED', enteredAt: 40, termination }, 'test_termination');
+
+    expect(task.workGraph?.currentNodeAlias).toBeUndefined();
+    expect(() => TaskControlBlock.restore(task.snapshot())).not.toThrow();
+  });
+
+  it('restores legacy terminated graphs without changing history or accepting invalid live tasks', () => {
+    const task = TaskControlBlock.createAgent({ goal: 'Restore cancelled work.' }, { kind: 'root' }, 10);
+    task.replaceWorkGraph(selfGraph, 20);
+    task.activateSelfWorkGraphNode('inspect_workspace', 30);
+    task.transition({ status: 'TERMINATED', enteredAt: 40, termination: { kind: 'cancelled', reason: 'User cancelled.' } }, 'test_termination');
+    const legacy = task.snapshot();
+    legacy.workGraph!.currentNodeAlias = 'inspect_workspace';
+
+    const restored = TaskControlBlock.restore(legacy);
+    expect(restored.workGraph?.currentNodeAlias).toBeUndefined();
+    expect(restored.workGraph?.nodes).toEqual(legacy.workGraph?.nodes);
+    expect(restored.events).toEqual(legacy.events);
+    expect(restored.state).toEqual(legacy.state);
+    expect(legacy.workGraph?.currentNodeAlias).toBe('inspect_workspace');
+    expect(() => TaskControlBlock.restore({ ...legacy, state: { status: 'READY', enteredAt: 40, reason: 'restored' } })).toThrow('invalid runtime status');
+  });
+
   it('rejects dependency cycles before the graph reaches the scheduler', () => {
     expect(() =>
       validateAgentWorkGraphProposal({

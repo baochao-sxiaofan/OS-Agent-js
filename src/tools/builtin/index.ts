@@ -14,6 +14,7 @@ import {
 } from './file-tools.js';
 import { fileApplyPatchTool } from './apply-patch-tool.js';
 import { workspaceSearchTool } from './search-tool.js';
+import { mediaReadTool, createMediaGenerationTools, type MediaGenerationPort } from './media-tools.js';
 import { createKnowledgeTools } from './knowledge-tools.js';
 import {
   createScreenCaptureTool,
@@ -43,6 +44,7 @@ export const BUILTIN_TOOLS = [
   directoryCreateTool,
   directoryDeleteTool,
   workspaceSearchTool,
+  mediaReadTool,
 ] as const;
 
 export type RegisterBuiltinToolsOptions = {
@@ -51,6 +53,7 @@ export type RegisterBuiltinToolsOptions = {
   processSandbox?: ProcessSandbox;
   screenCapture?: ScreenCapturePort;
   webAccess?: WebAccessPort;
+  mediaGeneration?: MediaGenerationPort;
 };
 
 /**
@@ -69,6 +72,9 @@ export function registerBuiltinTools(
   if (options.artifactStore) {
     for (const tool of createArtifactTools(options.artifactStore)) {
       registry.register(tool);
+    }
+    if (options.mediaGeneration) {
+      for (const tool of createMediaGenerationTools(options.mediaGeneration, options.artifactStore)) registry.register(tool);
     }
   }
   if (options.knowledgeStore) {

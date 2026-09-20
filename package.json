@@ -10,6 +10,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./model-requester": {
+      "types": "./dist/model-requester/index.d.ts",
+      "import": "./dist/model-requester/index.js"
+    },
+    "./agent-control-block": {
+      "types": "./dist/agent-control-block/index.d.ts",
+      "import": "./dist/agent-control-block/index.js"
     }
   },
   "files": [
@@ -26,11 +34,14 @@
     "desktop:build": "npm run build --workspace @os-agent/desktop",
     "desktop:check": "npm run check --workspace @os-agent/desktop",
     "desktop:dev": "npm run dev --workspace @os-agent/desktop",
+    "desktop:start": "npm run start --workspace @os-agent/desktop",
     "desktop:dist:win": "npm run dist:win --workspace @os-agent/desktop",
     "demo": "tsx examples/basic-runtime.ts",
     "demo:gemini": "tsx examples/gemini-network.ts",
     "demo:gemini:multi-agent": "tsx examples/gemini-multi-agent.ts",
     "demo:hierarchy": "tsx examples/hierarchical-runtime.ts",
+    "demo:minimax": "tsx examples/minimax-live-smoke.ts",
+    "demo:model-requester": "tsx examples/model-requester.ts",
     "test": "vitest run"
   },
   "engines": {

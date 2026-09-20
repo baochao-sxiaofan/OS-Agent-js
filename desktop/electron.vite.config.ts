@@ -20,6 +20,13 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: resolve('preload/index.ts'),
+        // Sandboxed Electron preloads do not support ESM, even when the app
+        // package uses type: module. Keep this bridge in one CommonJS bundle.
+        output: {
+          format: 'cjs',
+          entryFileNames: 'index.cjs',
+          inlineDynamicImports: true,
+        },
       },
     },
   },

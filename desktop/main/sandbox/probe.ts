@@ -2,6 +2,8 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
+  mkdirSync,
+  realpathSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -36,10 +38,11 @@ export function probeMacOSSandbox(): SandboxProbeResult {
     };
   }
 
-  const probeRoot = mkdtempSync(join(tmpdir(), 'os-agent-sbx-probe-'));
+  const probeRoot = realpathSync(mkdtempSync(join(tmpdir(), 'os-agent-sbx-probe-')));
   const workspace = join(probeRoot, 'workspace');
   const outside = join(probeRoot, 'sentinel.txt');
   try {
+    mkdirSync(workspace);
     writeFileSync(outside, 'protected', 'utf8');
     const profile = buildSeatbeltProfile({
       workspaceRoot: workspace,
@@ -48,6 +51,14 @@ export function probeMacOSSandbox(): SandboxProbeResult {
     });
     const profilePath = join(probeRoot, 'probe.sb');
     writeFileSync(profilePath, profile, 'utf8');
+
+    // A failed sandbox launch is not evidence of a successful security boundary.
+    const inside = spawnSync(SANDBOX_EXEC_PATH,
+      ['-f', profilePath, '/bin/sh', '-c', 'printf inside > allowed.txt'],
+      { cwd: workspace, encoding: 'utf8', timeout: 5_000 });
+    if (inside.error || inside.status !== 0 || readFileSync(join(workspace, 'allowed.txt'), 'utf8') !== 'inside') {
+      return { available: false, reason: 'Sandbox could not execute the allowed in-workspace write.' };
+    }
 
     // 负向用例：尝试覆盖工作区外的哨兵文件，必须失败。
     const escape = spawnSync(
@@ -59,7 +70,7 @@ export function probeMacOSSandbox(): SandboxProbeResult {
         '-c',
         `printf breached > ${JSON.stringify(outside)}`,
       ],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', timeout: 5_000 },
     );
     if (escape.error) {
       return {

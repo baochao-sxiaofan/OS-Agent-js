@@ -46,6 +46,7 @@ export type CreateArtifactInput = {
 export type ArtifactQuery = {
   rootTaskId: string;
   taskId?: string;
+  logicalName?: string;
   kind?: ArtifactKind;
   limit?: number;
 };
@@ -80,6 +81,7 @@ export class InMemoryArtifactStore implements ArtifactStore {
         (record) =>
           record.rootTaskId === query.rootTaskId &&
           (query.taskId === undefined || record.taskId === query.taskId) &&
+          (query.logicalName === undefined || record.logicalName === query.logicalName) &&
           (query.kind === undefined || record.kind === query.kind),
       )
       .sort((left, right) => right.createdAt - left.createdAt)
@@ -193,6 +195,10 @@ export class SqliteArtifactStore implements ArtifactStore {
     if (query.taskId !== undefined) {
       conditions.push('task_id = ?');
       values.push(query.taskId);
+    }
+    if (query.logicalName !== undefined) {
+      conditions.push('logical_name = ?');
+      values.push(query.logicalName);
     }
     if (query.kind !== undefined) {
       conditions.push('kind = ?');

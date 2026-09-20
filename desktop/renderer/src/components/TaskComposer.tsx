@@ -10,7 +10,7 @@ import {
   useState,
 } from 'react';
 import type {
-  ImageAttachmentInput,
+  MediaAttachmentInput,
   TaskDraft,
   TaskModelPreferences,
 } from '../../../shared/contracts.js';
@@ -32,7 +32,7 @@ export function TaskComposer({
 }: TaskComposerProps) {
   const [open, setOpen] = useState(false);
   const [task, setTask] = useState('');
-  const [attachments, setAttachments] = useState<ImageAttachmentInput[]>([]);
+  const [attachments, setAttachments] = useState<MediaAttachmentInput[]>([]);
   const [preferences, setPreferences] = useState<TaskModelPreferences>(
     DEFAULT_TASK_PREFERENCES,
   );

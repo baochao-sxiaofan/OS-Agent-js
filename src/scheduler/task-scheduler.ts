@@ -51,6 +51,7 @@ import type {
 } from '../model/model-provider.js';
 import { TURN_SUMMARY_PROTOCOL } from '../model/model-provider.js';
 import type { TaskStore } from '../persistence/task-store.js';
+import { InMemoryOperationStore, type OperationStore } from '../persistence/operation-store.js';
 import {
   ResourceLockManager,
   type ResourceLockRequest,
@@ -99,6 +100,7 @@ export type TaskSchedulerOptions = {
   admission: AdmissionController;
   tools: ToolRegistry;
   store: TaskStore;
+  operationStore?: OperationStore;
   agentPool?: AgentPool;
   contextCompactor?: ContextCompactor;
   contextWindowPolicy?: ContextWindowPolicy;
@@ -225,6 +227,8 @@ export class TaskScheduler {
   readonly #admission: AdmissionController;
   readonly #tools: ToolRegistry;
   readonly #store: TaskStore;
+  readonly #operationStore: OperationStore;
+  readonly #consecutiveModelFailures = new Map<string, number>();
   readonly #agentPool: AgentPool;
   readonly #capabilityManager: CapabilityManager;
   readonly #resourceLockManager: ResourceLockManager;
@@ -266,6 +270,7 @@ export class TaskScheduler {
     this.#admission = options.admission;
     this.#tools = options.tools;
     this.#store = options.store;
+    this.#operationStore = options.operationStore ?? new InMemoryOperationStore();
     this.#capabilityManager =
       options.capabilityManager ?? new CapabilityManager();
     this.#resourceLockManager =
@@ -1429,6 +1434,10 @@ export class TaskScheduler {
       }
 
       task.recordModelResponse(response.type, response.usage);
+      this.#consecutiveModelFailures.delete(task.id);
+      if (response.providerMessage) {
+        task.appendContext({ type: 'provider_message', ...response.providerMessage });
+      }
       const graphProtocolError = this.validateGraphResponse(
         task,
         response,
@@ -2406,6 +2415,7 @@ export class TaskScheduler {
           : { graphNodeAlias: task.workGraph.currentNodeAlias }),
         signal,
         idempotencyKey: `${task.id}:${call.callId}`,
+        operationStore: this.#operationStore,
         ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
       });
     } finally {
@@ -2474,7 +2484,13 @@ export class TaskScheduler {
     task: TaskControlBlock,
     error: unknown,
   ): Promise<void> {
-    if (!task.canRetryModel()) {
+    const failures = (this.#consecutiveModelFailures.get(task.id) ?? 0) + 1;
+    this.#consecutiveModelFailures.set(task.id, failures);
+    const details = typeof error === 'object' && error !== null ? error : {};
+    const permanent = ('retryable' in details && details.retryable === false) ||
+      ('status' in details && typeof details.status === 'number' &&
+        [400, 401, 403, 404, 413, 422].includes(details.status));
+    if (permanent || failures >= 3 || !task.canRetryModel()) {
       await this.terminateTask(task, {
         kind: 'failed',
         error: this.errorMessage(error),
@@ -2496,6 +2512,13 @@ export class TaskScheduler {
       return;
     }
     if (task.state.status === 'READY') {
+      // Release the provider lease before backoff; cancellation interrupts waiting.
+      try {
+        const retryAfterMs = 'retryAfterMs' in details && typeof details.retryAfterMs === 'number' && Number.isFinite(details.retryAfterMs)
+          ? Math.max(0, details.retryAfterMs) : 0;
+        await this.#wait(Math.max(retryAfterMs, Math.min(1_000 * 2 ** (failures - 1), 30_000)), this.requireAbortController(task.id).signal);
+      } catch { return; }
+      if (this.#shuttingDown || task.state.status !== 'READY') return;
       await this.prepareTaskForQueue(task);
     }
     await this.#store.persist(task);
@@ -2549,6 +2572,7 @@ export class TaskScheduler {
     // 唤醒所有等待该任务完成的调用方，避免任务终止后 waitForTermination 永久挂起。
     this.#completions.get(task.id)?.resolve(termination);
     this.#completions.delete(task.id);
+    this.#consecutiveModelFailures.delete(task.id);
     await this.notifyParentOfTermination(task, termination);
   }
 

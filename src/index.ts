@@ -1,3 +1,8 @@
+export { MiniMaxMediaProvider, type MiniMaxMediaProviderOptions } from './model/minimax-media-provider.js';
+export { extractModelMedia, validateMediaAttachments } from './model/media.js';
+export { mediaReadTool, createMediaGenerationTools, type MediaGenerationPort, type GeneratedMedia } from './tools/builtin/media-tools.js';
+export { InMemoryOperationStore, SqliteOperationStore, type OperationStore } from './persistence/operation-store.js';
+export type { MediaAttachment, VideoAttachment, ProviderMessageContextItem } from './kernel/context.js';
 export type {
   CapabilityApprovalRoute,
   CapabilityCheckResult,

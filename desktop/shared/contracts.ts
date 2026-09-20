@@ -7,6 +7,7 @@ export const IPC_CHANNELS = {
   resolveCapabilityApproval: 'runtime:resolve-capability-approval',
   saveModelSettings: 'runtime:save-model-settings',
   selectImages: 'runtime:select-images',
+  selectMedia: 'runtime:select-media',
   selectWorkspace: 'runtime:select-workspace',
   snapshotChanged: 'runtime:snapshot-changed',
   submitTask: 'runtime:submit-task',
@@ -306,6 +307,8 @@ export type AgentNodeView = {
 };
 
 export type ConversationRoundView = {
+  media?: MediaPreviewView[];
+  attachments?: MediaAttachmentInput[];
   rootTaskId: string;
   goal: string;
   status: ConversationStatus;
@@ -362,7 +365,7 @@ export type ResolveCapabilityApprovalInput = {
 export type SubmitTaskInput = {
   conversationId: string;
   task: string;
-  attachments?: ImageAttachmentInput[];
+  attachments?: MediaAttachmentInput[];
   preferences?: TaskModelPreferences;
 };
 
@@ -379,6 +382,12 @@ export type ImageAttachmentInput = {
   dataBase64: string;
 };
 
+export type MediaAttachmentInput = Omit<ImageAttachmentInput, 'mimeType'> & {
+  mimeType: ImageAttachmentInput['mimeType'] | 'video/mp4' | 'video/quicktime' | 'video/x-msvideo' | 'video/x-matroska';
+};
+
+export type MediaPreviewView = { uri: string; title: string; mimeType: string; url: string };
+
 export type TaskDraft = Omit<SubmitTaskInput, 'conversationId'>;
 
 export type DesktopApi = {
@@ -392,6 +401,7 @@ export type DesktopApi = {
     conversationId: string,
   ): Promise<RuntimeSnapshotView | undefined>;
   selectImages(): Promise<ImageAttachmentInput[]>;
+  selectMedia(): Promise<MediaAttachmentInput[]>;
   saveModelSettings(
     input: SaveModelSettingsInput,
   ): Promise<SaveModelSettingsResult>;

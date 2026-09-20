@@ -39,7 +39,7 @@ import type {
   ContextSummaryRecord,
   TurnSummary,
 } from './context.js';
-import { MODEL_IMAGE_MARKER } from './context.js';
+import { MODEL_IMAGE_MARKER, MODEL_VIDEO_MARKER } from './context.js';
 import { assertTaskTransition } from './state-machine.js';
 import type { TaskEvent } from './task-event.js';
 import type { TaskState, Termination } from './task-state.js';
@@ -393,6 +393,23 @@ export class TaskControlBlock {
 
   /** 从持久化快照恢复一个任务，不额外生成创建事件。 */
   static restore(snapshot: TaskSnapshot): TaskControlBlock {
+    const graph = snapshot.workGraph;
+    const current = graph?.nodes.find(
+      (node) => node.alias === graph.currentNodeAlias,
+    );
+    // Older versions failed the active node on task termination but left the
+    // active-node pointer behind. Normalize only that known terminal shape;
+    // live tasks and other invalid graph structures still fail validation.
+    if (
+      snapshot.state.status === 'TERMINATED' &&
+      graph?.phase === 'executing' &&
+      current?.assignee.type === 'self' &&
+      ['failed', 'completed', 'abandoned'].includes(current.status)
+    ) {
+      const restoredGraph = { ...graph };
+      delete restoredGraph.currentNodeAlias;
+      return new TaskControlBlock({ ...snapshot, workGraph: restoredGraph });
+    }
     return new TaskControlBlock(snapshot);
   }
 
@@ -1728,6 +1745,12 @@ export class TaskControlBlock {
           node.error = `Agent terminated with ${state.termination.kind}.`;
           this.transitionWorkGraphNode(node, 'failed', reason);
         }
+        delete node.blockedReason;
+        delete node.waitingFor;
+        if (this.#workGraph) {
+          delete this.#workGraph.currentNodeAlias;
+          this.#workGraph.updatedAt = state.enteredAt;
+        }
         return;
     }
   }
@@ -1796,12 +1819,12 @@ function auditSafeToolOutput(output: JsonValue): JsonValue {
     typeof output !== 'object' ||
     output === null ||
     Array.isArray(output) ||
-    output['marker'] !== MODEL_IMAGE_MARKER
+    (output['marker'] !== MODEL_IMAGE_MARKER && output['marker'] !== MODEL_VIDEO_MARKER)
   ) {
     return structuredClone(output);
   }
   return {
-    marker: MODEL_IMAGE_MARKER,
+    marker: output['marker'],
     ...(typeof output['mimeType'] === 'string'
       ? { mimeType: output['mimeType'] }
       : {}),

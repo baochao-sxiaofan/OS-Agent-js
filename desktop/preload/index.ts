@@ -20,6 +20,7 @@ const api: DesktopApi = {
       IPC_CHANNELS.selectWorkspace,
       conversationId,
     ),
+  selectMedia: async () => await ipcRenderer.invoke(IPC_CHANNELS.selectMedia),
   selectImages: async () =>
     await ipcRenderer.invoke(IPC_CHANNELS.selectImages),
   saveModelSettings: async (input) =>

@@ -3,6 +3,7 @@ import type {
   TurnSummary,
 } from '../kernel/context.js';
 import { MODEL_IMAGE_MARKER } from '../kernel/context.js';
+import { extractModelMedia, isVideo, redactMediaOutput } from './media.js';
 import type {
   CapabilityRequest,
   ResourceScope,
@@ -353,6 +354,9 @@ export function buildStructuredAgentSystemInstruction(
 export function serializeContextItemForModel(
   item: ContextItem,
 ): JsonObject {
+  if (item.type === 'provider_message') {
+    return { type: item.type, providerId: item.providerId, nativeHistoryAttachedSeparately: true };
+  }
   const serialized = structuredClone(item) as JsonObject;
   if (item.type === 'user' && item.attachments !== undefined) {
     serialized['attachments'] = item.attachments.map(
@@ -360,7 +364,8 @@ export function serializeContextItemForModel(
         id,
         name,
         mimeType,
-        imageAttachedSeparately: true,
+        imageAttachedSeparately: !mimeType.startsWith('video/'),
+        mediaAttachedSeparately: true,
       }),
     );
     return serialized;
@@ -387,11 +392,11 @@ export function serializeContextItemForModel(
     return serialized;
   }
   if (item.type !== 'async_work_update') {
-    return serialized;
+    return redactMediaOutput(serialized) as JsonObject;
   }
 
   serialized['results'] = item.results.map((result) => {
-    const visible = structuredClone(result) as JsonObject;
+    const visible = redactMediaOutput(result as JsonObject) as JsonObject;
     if (result.kind === 'subagent') {
       delete visible['workId'];
     }
@@ -417,27 +422,7 @@ export type ModelImageInput = {
 export function extractModelImages(
   context: readonly ContextItem[],
 ): ModelImageInput[] {
-  const images: ModelImageInput[] = [];
-  for (const item of context) {
-    if (item.type === 'user') {
-      for (const attachment of item.attachments ?? []) {
-        images.push({
-          mimeType: attachment.mimeType,
-          dataBase64: attachment.dataBase64,
-          name: attachment.name,
-        });
-      }
-      continue;
-    }
-    if (item.type === 'tool_result' && isModelImage(item.output)) {
-      images.push({
-        mimeType: item.output['mimeType'],
-        dataBase64: item.output['dataBase64'],
-        name: String(item.output['sourceName'] ?? 'captured-screen'),
-      });
-    }
-  }
-  return images.slice(-4);
+  return extractModelMedia(context).filter((media): media is ModelImageInput => !isVideo(media));
 }
 
 export function estimateModelInputTokens(request: ModelRequest): number {
@@ -457,7 +442,11 @@ export function estimateModelInputTokens(request: ModelRequest): number {
     1,
     Math.ceil(JSON.stringify(visibleRequest).length / 4),
   );
-  return textTokens + extractModelImages(request.context).length * 1_024;
+  const continuationTokens = request.context.reduce((total, item) => total +
+    (item.type === 'provider_message' ? Math.ceil(JSON.stringify(item.message).length / 4) : 0), 0);
+  return textTokens + continuationTokens + extractModelMedia(request.context).reduce(
+    (total, media) => total + (isVideo(media) ? 16_384 : 5_000), 0,
+  );
 }
 
 export function parseStructuredAgentResponse(

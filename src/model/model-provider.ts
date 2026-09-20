@@ -102,7 +102,12 @@ export type SubagentSpawnRequest = {
   maxCostUsd?: number;
 };
 
-export type ModelResponse =
+export type ModelResponse = ModelActionResponse & {
+  /** Native assistant history needed for interleaved reasoning and tool-result pairing. */
+  providerMessage?: { providerId: string; message: JsonObject };
+};
+
+type ModelActionResponse =
   | {
       type: 'set_graph';
       graph: AgentWorkGraphProposal;

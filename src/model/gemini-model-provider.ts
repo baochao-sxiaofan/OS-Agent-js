@@ -1,3 +1,4 @@
+import { extractModelMedia } from './media.js';
 import type { JsonObject, JsonValue } from '../types/json.js';
 import type {
   ModelProvider,
@@ -9,7 +10,6 @@ import {
   buildAgentResponseJsonSchema,
   buildStructuredAgentSystemInstruction,
   estimateModelInputTokens,
-  extractModelImages,
   parseStructuredAgentResponse,
   serializeContextItemForModel,
 } from './structured-agent-response.js';
@@ -122,13 +122,17 @@ export class GeminiModelProvider implements ModelProvider {
     request: ModelRequest,
     signal: AbortSignal,
   ): Promise<ModelResponse> {
+    const body = JSON.stringify(this.buildRequestBody(request));
+    if (Buffer.byteLength(body) > 20 * 1024 * 1024) {
+      throw Object.assign(new GeminiProviderError('Gemini inline media request exceeds 20 MB; use a shorter video or smaller images.'), { retryable: false });
+    }
     const response = await this.#fetch(this.endpoint(), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'x-goog-api-key': this.#apiKey,
       },
-      body: JSON.stringify(this.buildRequestBody(request)),
+      body,
       signal,
     });
 
@@ -160,7 +164,7 @@ export class GeminiModelProvider implements ModelProvider {
   }
 
   private buildRequestBody(request: ModelRequest): GeminiRequestBody {
-    const images = extractModelImages(request.context);
+    const images = extractModelMedia(request.context);
     const body: GeminiRequestBody = {
       systemInstruction: {
         parts: [

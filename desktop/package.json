@@ -9,6 +9,7 @@
     "build": "electron-vite build",
     "check": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "dev": "electron-vite dev",
+    "start": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win nsis --x64"
   },
   "dependencies": {

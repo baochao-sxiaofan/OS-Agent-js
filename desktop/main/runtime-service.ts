@@ -11,6 +11,9 @@ import {
   extractInheritableRootAuthority,
   FakeModelProvider,
   registerBuiltinTools,
+  MiniMaxMediaProvider,
+  SqliteOperationStore,
+  validateMediaAttachments,
   SqliteArtifactStore,
   SqliteKnowledgeStore,
   TaskScheduler,
@@ -94,6 +97,8 @@ export class RuntimeService {
   readonly #provider: SwitchableModelProvider;
   #fakeProvider: FakeModelProvider | undefined;
   readonly #store: ObservableTaskStore;
+  readonly #operationStore: SqliteOperationStore;
+  #mediaProvider: MiniMaxMediaProvider | undefined;
   readonly #artifactStore: SqliteArtifactStore;
   readonly #knowledgeStore: SqliteKnowledgeStore;
   readonly #scheduler: TaskScheduler;
@@ -122,6 +127,8 @@ export class RuntimeService {
     // 默认使用内存库，桌面端主进程会传入 userData 目录下的持久化文件路径。
     const storeLocation = options.storeLocation ?? ':memory:';
     this.#store = new ObservableTaskStore(storeLocation);
+    this.#operationStore = new SqliteOperationStore(storeLocation);
+    this.#mediaProvider = config?.providerId === 'minimax' ? new MiniMaxMediaProvider({ apiKey: config.apiKey }) : undefined;
     this.#artifactStore = new SqliteArtifactStore({
       location: storeLocation,
     });
@@ -131,6 +138,12 @@ export class RuntimeService {
     registerBuiltinTools(tools, {
       artifactStore: this.#artifactStore,
       knowledgeStore: this.#knowledgeStore,
+      mediaGeneration: {
+        generate: async (kind, input, context) => {
+          if (!this.#mediaProvider) throw new Error('请先配置 MiniMax API，才能生成图片或视频。');
+          return await this.#mediaProvider.generate(kind, input, context);
+        },
+      },
       ...(options.processSandbox === undefined
         ? {}
         : { processSandbox: options.processSandbox }),
@@ -148,6 +161,7 @@ export class RuntimeService {
       provider: this.#provider,
       tools,
       store: this.#store,
+      operationStore: this.#operationStore,
       admission: new AdmissionController({
         maxConcurrentRequests: 2,
         requestsPerMinute: 30,
@@ -243,6 +257,7 @@ export class RuntimeService {
         throw new Error(`模型协议验证返回意外动作：${response.type}`);
       }
       this.#provider.replace(createConfiguredProvider(config));
+      this.#mediaProvider = config.providerId === 'minimax' ? new MiniMaxMediaProvider({ apiKey: config.apiKey }) : undefined;
       this.#fakeProvider = undefined;
       this.#queuePublish();
       return {
@@ -356,6 +371,11 @@ export class RuntimeService {
     }
 
     const task = input.task.trim();
+    const attachments = validateMediaAttachments(input.attachments);
+    if (attachments.some((attachment) => attachment.mimeType.startsWith('video/')) &&
+        !/^(minimax:MiniMax-M3(?:$|-)|gemini:)/iu.test(this.#provider.id)) {
+      throw new Error('当前模型不支持视频输入，请选择 MiniMax-M3 或 Gemini。');
+    }
     if (task.length === 0) {
       throw new Error('任务内容不能为空。');
     }
@@ -388,7 +408,7 @@ export class RuntimeService {
           conversation,
           rootTaskId,
           task,
-          input.attachments,
+          attachments,
         ),
         ...(input.preferences === undefined
           ? {}
@@ -566,6 +586,10 @@ export class RuntimeService {
         scope: { kind: 'all' },
       });
     }
+    if (this.#mediaProvider) {
+      requests.push({ capability: 'media.image.generate', scope: { kind: 'all' } },
+        { capability: 'media.video.generate', scope: { kind: 'all' } });
+    }
     return requests;
   }
 
@@ -673,6 +697,7 @@ export class RuntimeService {
   ): CapabilityRequest[] {
     return this.mergeCapabilityRequests(
       conversation.authorityCeiling,
+      this.initialRuntimeAuthority(),
       ...(previousRoot === undefined
         ? []
         : [this.rootGrantRequests(previousRoot)]),
@@ -1043,6 +1068,7 @@ export class RuntimeService {
     await this.#runPromise;
     this.#artifactStore.close();
     this.#knowledgeStore.close();
+    this.#operationStore.close();
     this.#store.close();
   }
 
@@ -1164,6 +1190,15 @@ export class RuntimeService {
       )
       .map((task) => this.toAgentView(task));
     const base: ConversationRoundView = {
+      attachments: root.context.flatMap((item) => item.type === 'user' ? item.attachments ?? [] : []),
+      media: this.#artifactStore.list({ rootTaskId: root.id, limit: 100 }).flatMap((artifact) => {
+        const content = artifact.content;
+        if (!content || typeof content !== 'object' || Array.isArray(content) || artifact.metadata['generatedBy'] !== 'minimax') return [];
+        const url = typeof content['dataBase64'] === 'string' && ['image/png', 'image/jpeg', 'image/webp'].includes(artifact.mediaType)
+          ? `data:${artifact.mediaType};base64,${content['dataBase64']}`
+          : typeof content['url'] === 'string' && content['url'].startsWith('https://') ? content['url'] : undefined;
+        return url ? [{ uri: artifact.uri, title: artifact.title, mimeType: artifact.mediaType, url }] : [];
+      }),
       rootTaskId: root.id,
       goal: root.goal,
       status: this.conversationStatus(root),

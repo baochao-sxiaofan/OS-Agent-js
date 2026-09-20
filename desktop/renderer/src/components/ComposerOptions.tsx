@@ -8,7 +8,7 @@ import {
 import { useEffect, useRef, useState } from 'react';
 
 import type {
-  ImageAttachmentInput,
+  MediaAttachmentInput,
   TaskModelPreferences,
 } from '../../../shared/contracts.js';
 import { PROVIDER_CATALOG } from '../../../shared/contracts.js';
@@ -20,11 +20,11 @@ export const DEFAULT_TASK_PREFERENCES: TaskModelPreferences = {
 };
 
 type ComposerOptionsProps = {
-  attachments: ImageAttachmentInput[];
+  attachments: MediaAttachmentInput[];
   disabled?: boolean;
   preferences: TaskModelPreferences;
   providerId: string;
-  onAttachmentsChange: (attachments: ImageAttachmentInput[]) => void;
+  onAttachmentsChange: (attachments: MediaAttachmentInput[]) => void;
   onError: (message: string) => void;
   onPreferencesChange: (preferences: TaskModelPreferences) => void;
 };
@@ -64,7 +64,7 @@ export function ComposerOptions({
 
   const selectImages = async () => {
     try {
-      const selected = await window.osAgent.selectImages();
+      const selected = await window.osAgent.selectMedia();
       const merged = new Map(
         [...attachments, ...selected].map((attachment) => [
           attachment.id,
@@ -94,7 +94,6 @@ export function ComposerOptions({
           <label>
             <span>上下文上限</span>
             <select
-              disabled={provider?.supportsTemperature === false}
               value={preferences.maxContextTokens ?? 0}
               onChange={(event) => {
                 const maxContextTokens = Number(event.target.value);
@@ -113,6 +112,8 @@ export function ComposerOptions({
               <option value={32_000}>32K</option>
               <option value={64_000}>64K</option>
               <option value={128_000}>128K</option>
+              <option value={512_000}>512K</option>
+              <option value={1_000_000}>1M</option>
               <option value={0}>模型最大值</option>
             </select>
           </label>
@@ -122,6 +123,7 @@ export function ComposerOptions({
               温度
             </span>
             <select
+              disabled={provider?.supportsTemperature === false}
               value={preferences.temperature ?? 0.2}
               onChange={(event) =>
                 onPreferencesChange({
@@ -169,9 +171,9 @@ export function ComposerOptions({
             onClick={() => void selectImages()}
           >
             <ImagePlus size={14} />
-            添加图片
+            添加图片 / 视频
           </button>
-          <small>不支持该参数的模型会忽略对应选项。</small>
+          <small>视频输入支持 MiniMax M3 和 Gemini；单轮附件合计最多 36 MB。</small>
         </div>
       )}
       {attachments.length > 0 && (
