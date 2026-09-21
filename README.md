@@ -14,6 +14,25 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 
 当前版本：`2.2.1`
 
+## 下一代 Agent 运行时边界
+
+`main` 已加入四个面向长期 Agent 的独立模块，作为现有 TCB 运行时的渐进替代方案：
+
+- `model-requester`：新的模型 Provider 请求边界。它只处理统一消息、工具调用、
+  厂商私有续接数据和网络错误，不负责调度、Prompt 策略或工具执行。
+- `agent-context`：三级递归上下文协议。第一层保存长期职责，第二层保存工作阶段，
+  第三层保存具体执行步骤；每层拥有自己的当前任务、子任务链、记忆和预算。
+- `agent-control-block`：长期 Agent 的持久身份、角色、权限、Skills、Context、
+  模型配置引用及 `READY/RUNNING/BLOCKED/SLEEPING` 状态接口。
+- `agent-scheduler`：面向 ACB 的独立调度器。每个 Agent 分别记录在途异步操作和
+  未交付终态结果；全部完成时立即封存，部分完成时默认每 30 秒封存一次。
+
+这些模块通过 `os-agent-js/model-requester`、`os-agent-js/agent-context`、
+`os-agent-js/agent-control-block` 和 `os-agent-js/agent-scheduler` 独立导出。
+它们目前不接入旧 `TaskScheduler`、`TaskControlBlock` 或桌面 Runtime，也不会改变
+现有执行链路。后续重构会逐个迁移模型请求、上下文、Agent 状态和调度职责，
+完成替换前新旧结构保持并存。
+
 ## 核心状态模型
 
 本项目从 Agent 调度视角定义三种活动状态：
