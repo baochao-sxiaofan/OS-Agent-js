@@ -2,59 +2,75 @@ import type { ResourceScope } from '../capability/capability.js';
 import type { AgentContext } from '../agent-context/index.js';
 
 /**
- * Persistent Agent identity, independent of task and model request IDs.
- * The future host allocator must assign unique positive safe integers and
- * preserve them on restore. TypeScript's number alone does not enforce this.
+ * 持久 Agent 身份，独立于任务和模型请求 ID。
+ * 宿主负责分配唯一的正安全整数，并在恢复时保留原值。
  */
 export type AgentId = number;
 
-/** Agent scheduling states, independent of task-chain progress. */
+/** Agent 的调度状态，与内部任务链进度相互独立。 */
 export enum AgentState {
-  /** An input is ready to process; waiting for model request admission. */
+  /** 已有封存输入，等待获得模型处理机。 */
   READY = 'READY',
-  /** A model request for this Agent is in progress. */
+  /** 当前批次正在请求模型或处理本轮返回。 */
   RUNNING = 'RUNNING',
-  /** Progress depends on pending work, such as a tool call or approval. */
+  /** 当前没有可发送批次，正在等待明确的异步操作结果。 */
   BLOCKED = 'BLOCKED',
-  /** No runnable or blocking work; waiting for a new external event. */
+  /** 没有可运行工作或在途操作，等待新的外部事件。 */
   SLEEPING = 'SLEEPING',
 }
 
 /**
- * Host-managed filesystem permission belonging to the containing Agent.
- *
- * Reuses the existing capability name and resource scope representation.
- * This is not a CapabilityRequest or a task-bound CapabilityGrant; Agent
- * grant issuance, validation and revocation are deferred to a later protocol.
+ * 宿主管理的 Agent 文件权限，复用现有能力名称与资源范围表示。
+ * 此处不复用任务绑定的授权记录；签发、校验和撤销协议留待后续实现。
  */
 export type AgentFilePermission = {
-  /** Filesystem operation, e.g. file.read or directory.list. */
+  /** 文件系统操作，例如 file.read 或 directory.list。 */
   readonly capability: string;
-  /** Exact resource, directory subtree or all resources. */
+  /** 精确资源、目录子树或全部资源。 */
   readonly scope: ResourceScope;
 };
 
 /**
- * Data contract for a long-lived Agent performing an ongoing role.
- *
- * Read-only to consumers; mutation will belong to the future runtime API.
- * It contains no TCB, task lifecycle, transport objects or executable tools.
+ * 持续履行角色职责的长期 Agent 数据快照，对外只读。
+ * 不包含 TCB、传输对象或可执行工具；运行状态通过专用接口更新。
  */
 export type AgentControlBlock = {
   readonly agentId: AgentId;
-  /** Registered role identifier, e.g. sales, developer or tester. */
+  /** 已注册的角色标识，例如 sales、developer 或 tester。 */
   readonly character: string;
-  /** Display name for communication; routing uses agentId, not this name. */
+  /** 通信用的展示名称；实际寻址使用 agentId。 */
   readonly agentName: string;
   readonly state: AgentState;
-  /** Filesystem access permissions, separate from callable skills. */
+  /** 文件系统访问权限，与工具调用能力分开管理。 */
   readonly capacity: readonly AgentFilePermission[];
-  /** IDs of callable registered tools; skill definitions remain external. */
+  /** 可以调用的已注册工具 ID，工具定义保存在外部注册表。 */
   readonly skills: readonly string[];
-  /** Three-level work and memory snapshot owned by agent-context. */
+  /** 由 agent-context 管理的三级工作与记忆快照。 */
   readonly context: AgentContext;
-  /** Agent creation time as Unix milliseconds, a nonnegative safe integer. */
+  /** Agent 创建时的 Unix 毫秒时间戳，必须为非负安全整数。 */
   readonly createdAt: number;
-  /** Reference to host-owned model configuration; contains no credentials. */
+  /** 宿主管理的模型配置引用，不包含凭据。 */
   readonly modelConfigId: string;
 };
+
+/**
+ * 仅向可信调度器提供的同步状态端口，不暴露 Context 或权限字段。
+ * 实现必须同步提交或抛错，不能异步更新，也不能重入调度器。
+ */
+export interface AgentSchedulingHandle {
+  readonly agentId: AgentId;
+  getState(): AgentState;
+  transition(next: AgentState): void;
+}
+
+/** 宿主持有的 ACB 实例；快照不会向调用者泄露可变内部对象。 */
+export interface ManagedAgentControlBlock extends AgentSchedulingHandle {
+  snapshot(): AgentControlBlock;
+}
+
+export class InvalidAgentTransitionError extends Error {
+  constructor(readonly from: AgentState, readonly to: AgentState) {
+    super(`非法 Agent 状态转换：${from} -> ${to}`);
+    this.name = 'InvalidAgentTransitionError';
+  }
+}

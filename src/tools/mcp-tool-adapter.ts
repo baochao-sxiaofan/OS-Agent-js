@@ -8,10 +8,10 @@ import type {
 } from './tool.js';
 
 /**
- * Minimal client port implemented by an MCP transport adapter.
+ * 由 MCP 传输适配器实现的最小客户端接口。
  *
- * The core runtime intentionally does not depend on a specific MCP SDK or
- * transport. A stdio or Streamable HTTP client can implement this interface.
+ * 核心运行时不依赖特定 MCP SDK 或传输方式。
+ * stdio 和 Streamable HTTP 客户端均可实现此接口。
  */
 export interface McpClientPort {
   callTool(request: {
@@ -25,7 +25,7 @@ export interface McpClientPort {
 }
 
 export type McpToolBinding = {
-  /** Stable OS-Agent tool name exposed to the model. */
+  /** 暴露给模型的稳定 OS-Agent 工具名称。 */
   name: string;
   description: string;
   inputSchema: JsonObject;
@@ -33,9 +33,9 @@ export type McpToolBinding = {
   serverId: string;
   remoteToolName: string;
   /**
-   * Trusted host policy mapping an MCP call to OS-Agent capabilities.
+   * 可信宿主策略，将 MCP 调用映射到 OS-Agent 能力。
    *
-   * This mapping cannot come from the untrusted MCP server itself.
+   * 此映射不能来自不可信的 MCP 服务端本身。
    */
   requiredCapabilities(
     input: JsonObject,
@@ -44,10 +44,10 @@ export type McpToolBinding = {
 };
 
 /**
- * Wraps an existing MCP tool in the local Tool contract.
+ * 将现有 MCP 工具封装为本地 Tool 协议。
  *
- * Capability checks still happen in TaskScheduler before `execute`; MCP is an
- * implementation transport, never an authorization source.
+ * 能力检查仍由 TaskScheduler 在 `execute` 前执行；
+ * MCP 只负责调用传输，不能作为授权来源。
  */
 export function createMcpToolAdapter(
   client: McpClientPort,

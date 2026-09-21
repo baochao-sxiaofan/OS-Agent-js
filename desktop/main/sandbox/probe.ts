@@ -52,7 +52,7 @@ export function probeMacOSSandbox(): SandboxProbeResult {
     const profilePath = join(probeRoot, 'probe.sb');
     writeFileSync(profilePath, profile, 'utf8');
 
-    // A failed sandbox launch is not evidence of a successful security boundary.
+    // 沙箱启动失败不能证明隔离边界有效。
     const inside = spawnSync(SANDBOX_EXEC_PATH,
       ['-f', profilePath, '/bin/sh', '-c', 'printf inside > allowed.txt'],
       { cwd: workspace, encoding: 'utf8', timeout: 5_000 });

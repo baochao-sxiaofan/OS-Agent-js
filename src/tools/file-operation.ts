@@ -5,7 +5,7 @@ import type { ToolExecutionContext } from './tool.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 
-/** Persist intent before writing, then reconcile the resulting bytes after a crash. */
+/** 写入前持久化操作意图，崩溃恢复后根据实际文件内容对账。 */
 export async function replaceTextFileOnce(
   path: string, input: JsonObject, context: ToolExecutionContext,
   transform: (original: string) => string,

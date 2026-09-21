@@ -116,8 +116,8 @@ export type SqliteArtifactStoreOptions = {
 };
 
 /**
- * Immutable, versioned artifact storage. Artifact bodies remain JSON so every
- * result can be carried through the existing Tool/Context boundary.
+ * 不可变、带版本的产物存储。产物正文保持 JSON 格式，
+ * 使每个结果都能通过既有 Tool/Context 接口传递。
  */
 export class SqliteArtifactStore implements ArtifactStore {
   readonly #db: DatabaseSync;

@@ -9,7 +9,7 @@ import type {
   ContextSummary,
 } from '../src/agent-context/index.js';
 
-// Example limits, not library defaults.
+// 以下限制仅用于示例，不是库的默认值。
 const budget: ContextBudget = {
   maxTokens: 8_000,
   compactAtTokens: 6_000,
@@ -48,9 +48,9 @@ const profileResult: ContextSummary = {
 };
 
 /**
- * One Agent, three frames, three different chains.
- * Parent chain tasks are referenced by children; their state is not copied.
- * All IDs below stand in for future manager-assigned identities.
+ * 一个 Agent 包含三层上下文，每层维护各自的任务链。
+ * 子层引用父层任务链中的任务，不复制任务状态。
+ * 下方所有 ID 均模拟后续管理模块分配的内部身份。
  */
 export const salesContext: AgentContext = {
   schemaVersion: 1,

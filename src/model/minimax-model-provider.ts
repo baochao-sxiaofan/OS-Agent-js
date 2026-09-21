@@ -46,8 +46,8 @@ export class MiniMaxProviderError extends Error {
 }
 
 /**
- * Compatibility facade for the existing Agent runtime. It owns OS-Agent
- * prompts and action interpretation, and calls only the requester's public API.
+ * 现有 Agent 运行时的兼容入口，负责 OS-Agent 提示词和动作解释，
+ * 仅通过请求器的公共 API 发起模型调用。
  */
 export class MiniMaxModelProvider implements ModelProvider {
   readonly id: string;
@@ -210,7 +210,7 @@ function parseAgentResponse(text: string, request: ModelRequest, usage: ModelUsa
   }
 }
 
-/** Repair summary formatting only; action/graph/capability semantics stay strict. */
+/** 仅修复摘要格式；动作、工作图和能力的语义校验仍保持严格。 */
 function normalizeControlEnvelope(text: string, request: ModelRequest): string {
   let parsed: JsonValue;
   try { parsed = JSON.parse(text) as JsonValue; } catch { return text; }
@@ -239,7 +239,7 @@ function stripThinkingBlock(text: string): string {
   }
 }
 
-/** Recover a structured action from fenced JSON or surrounding prose. */
+/** 从 JSON 代码块或带有外围说明的文本中恢复结构化动作。 */
 function extractStructuredJson(text: string): string {
   const trimmed = text.trim();
   const fenced = /```(?:json)?\s*([\s\S]*?)\s*```/iu.exec(trimmed);

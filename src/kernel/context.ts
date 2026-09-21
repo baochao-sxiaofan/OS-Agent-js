@@ -13,7 +13,7 @@ import type {
   AgentWorkNodeStatus,
 } from '../graph/agent-work-graph.js';
 
-/** Tool result marker recognized by Provider adapters as image input. */
+/** 模型适配器据此将工具结果识别为图片输入。 */
 export const MODEL_IMAGE_MARKER = 'os-agent.image.v1';
 export const MODEL_VIDEO_MARKER = 'os-agent.video.v1';
 
@@ -33,7 +33,7 @@ export type VideoAttachment = {
 
 export type MediaAttachment = ImageAttachment | VideoAttachment;
 
-/** Opaque provider continuation, retained in snapshots and replayed only to its provider. */
+/** 不透明的厂商续接数据，保留在快照中，仅向原厂商重放。 */
 export type ProviderMessageContextItem = {
   type: 'provider_message';
   providerId: string;
@@ -95,7 +95,7 @@ export type UserContextItem = {
   type: 'user';
   /** 用户输入正文。 */
   content: string;
-  /** User-selected images; the raw bytes are sent through native multimodal APIs. */
+  /** 用户选择的图片，原始字节通过原生多模态 API 发送。 */
   attachments?: MediaAttachment[];
 };
 

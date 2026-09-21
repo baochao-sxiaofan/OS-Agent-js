@@ -11,7 +11,7 @@ import {
   type ModelToolCall,
 } from '../api.js';
 
-/** Wire-format details are private to this adapter. */
+/** 传输格式细节仅限此适配器内部使用。 */
 export function encodeRequest(request: ModelCompletionRequest, model: string): JsonObject {
   if (!Array.isArray(request.messages) || request.messages.length === 0) {
     throw invalidRequest('messages must contain at least one message.');
@@ -110,7 +110,7 @@ function encodeMessage(message: ModelMessage, model: string): JsonObject {
         if (!isObject(continuation.data) || !isJson(continuation.data)) {
           throw invalidRequest('Invalid assistant continuation.');
         }
-        // Never spread opaque state over role, content or tool calls.
+        // 不透明状态不能通过对象展开覆盖角色、内容或工具调用字段。
         for (const key of ['reasoning_details', 'reasoning_content'] as const) {
           if (continuation.data[key] !== undefined) body[key] = continuation.data[key];
         }

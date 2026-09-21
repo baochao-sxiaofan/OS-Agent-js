@@ -99,7 +99,7 @@ export type CreateAgentRequest = {
     /** 该任务允许消耗的最高美元金额。 */
     maxCostUsd: number;
   };
-  /** Root-selected model controls; descendants inherit them automatically. */
+  /** 根任务选定的模型参数，后代任务自动继承。 */
   modelPreferences?: ModelRuntimePreferences;
 };
 
@@ -166,7 +166,7 @@ export type TaskSnapshot = {
   budget: TaskBudget;
   /** 已经启动的模型请求尝试次数。 */
   modelAttempts: number;
-  /** Per-task model controls selected by the user at the root. */
+  /** 用户在根任务选定并传递给当前任务的模型参数。 */
   modelPreferences?: ModelRuntimePreferences;
   /** 模型请求允许尝试的次数上限。 */
   maxModelAttempts: number;
@@ -397,9 +397,9 @@ export class TaskControlBlock {
     const current = graph?.nodes.find(
       (node) => node.alias === graph.currentNodeAlias,
     );
-    // Older versions failed the active node on task termination but left the
-    // active-node pointer behind. Normalize only that known terminal shape;
-    // live tasks and other invalid graph structures still fail validation.
+    // 旧版本在任务终止时将活跃节点标记失败，却保留了活跃节点指针。
+    // 此处只修正这一已知的终态结构；
+    // 存活任务和其他非法图结构仍必须通过校验。
     if (
       snapshot.state.status === 'TERMINATED' &&
       graph?.phase === 'executing' &&

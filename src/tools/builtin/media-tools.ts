@@ -75,8 +75,8 @@ export function createMediaGenerationTools(port: MediaGenerationPort, artifacts:
         if (previous['fingerprint'] !== fingerprint) throw new Error('Media artifact key was reused with different parameters.');
         return previous['result'] ?? null;
       }
-      // Artifact persistence and the operation ledger use separate transactions.
-      // Reconcile the gap after artifact creation before considering another API call.
+      // 产物持久化和操作账本使用不同事务。
+      // 再次调用 API 前，先对账并补齐产物已创建但账本尚未更新的状态。
       const existing = artifacts.list({ rootTaskId: context.rootTaskId ?? context.taskId, taskId: context.taskId, logicalName: artifactKey, limit: 1 })[0];
       if (existing) {
         if (existing.metadata['generationFingerprint'] !== fingerprint) throw new Error('Persisted media artifact parameters do not match.');

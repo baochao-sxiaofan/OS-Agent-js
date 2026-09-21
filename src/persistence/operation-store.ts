@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { JsonObject } from '../types/json.js';
 
-/** Durable intent/result records; secrets must never be written here. */
+/** 持久化的操作意图与结果记录，严禁写入秘密或凭据。 */
 export interface OperationStore {
   get(key: string): JsonObject | undefined;
   set(key: string, value: JsonObject): void;

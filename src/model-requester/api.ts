@@ -14,9 +14,9 @@ export type ModelToolCall = {
 };
 
 /**
- * Opaque, JSON-persistable vendor state for replaying an assistant turn.
- * Callers must preserve it unchanged, and must not interpret or edit data.
- * This is continuation data, not an authorization token.
+ * 用于重放模型回复轮次的厂商私有状态，可按 JSON 持久化。
+ * 调用方必须原样保留，不能解释或修改其中的数据。
+ * 此结构用于续接模型请求，不是授权令牌。
  */
 export type ModelContinuation = {
   provider: ModelVendor;
@@ -59,7 +59,7 @@ export type ModelFinishReason =
   | 'unknown';
 
 export type ModelTokenUsage = {
-  /** Missing usage fields are normalized to zero. No cost is inferred. */
+  /** 缺失的用量字段统一记为零，不据此推算费用。 */
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -77,7 +77,7 @@ export type ModelCompletion = {
 export interface ModelRequester {
   readonly provider: ModelVendor;
   readonly model: string;
-  /** One non-streaming request. No scheduling, retries or tool execution. */
+  /** 执行一次非流式请求，不负责调度、重试或工具执行。 */
   request(
     request: ModelCompletionRequest,
     signal?: AbortSignal,

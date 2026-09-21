@@ -58,7 +58,7 @@ export class ToolRegistry {
       }));
   }
 
-  /** @deprecated Use descriptors(); capability is not a visibility filter. */
+  /** @deprecated 请使用 descriptors()；能力不用于筛选工具可见性。 */
   descriptorsFor(_capabilities: readonly string[]): ToolDescriptor[] {
     return this.descriptors();
   }

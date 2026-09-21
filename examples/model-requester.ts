@@ -1,4 +1,4 @@
-/** Standalone requester demo: no scheduler, ACB, Graph or tool runtime. */
+/** 独立请求器示例，不依赖调度器、ACB、工作图或工具运行时。 */
 import {
   createModelRequester,
   type ModelMessage,
@@ -39,7 +39,7 @@ for (const call of first.message.toolCalls) {
   if (call.name !== 'add' || typeof a !== 'number' || typeof b !== 'number') {
     throw new Error('Unexpected tool call.');
   }
-  // The caller executes tools; the requester only transports their messages.
+  // 调用方负责执行工具，请求器只传输工具消息。
   messages.push({ role: 'tool', callId: call.id, content: { sum: a + b } });
 }
 const final = await requester.request({ messages, maxOutputTokens: 4096 });

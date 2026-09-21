@@ -3,7 +3,7 @@ import type { ModelAssistantMessage, ModelMessage, ModelToolCall } from '../mode
 import type { JsonObject, JsonValue } from '../types/json.js';
 import { redactMediaOutput } from './media.js';
 
-/** Legacy native history reader, retained for existing consumers. */
+/** 保留给现有调用方使用的旧版原生历史读取器。 */
 export function miniMaxHistory(context: readonly ContextItem[], providerId: string): JsonObject[] {
   const messages: JsonObject[] = [];
   for (const [index, item] of context.entries()) {
@@ -30,7 +30,7 @@ export function miniMaxHistory(context: readonly ContextItem[], providerId: stri
   return messages;
 }
 
-/** New snapshots store only the public message contract; no transport types. */
+/** 新快照只保存公共消息协议，不包含传输层类型。 */
 export function storeModelMessage(message: ModelAssistantMessage): JsonObject {
   return {
     format: 'model-message.v1',
@@ -70,8 +70,8 @@ export function miniMaxModelHistory(
 }
 
 /**
- * Compatibility boundary for pre-module snapshots. New code never writes this
- * vendor shape. Transport encoding/decoding stays in the requester module.
+ * 兼容模块化之前的旧快照。新代码不再写入此厂商专用结构，
+ * 传输编解码统一保留在请求器模块内。
  */
 function restoreAssistant(stored: JsonObject, model: string): ModelAssistantMessage {
   const canonical = stored['format'] === 'model-message.v1';

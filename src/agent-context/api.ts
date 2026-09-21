@@ -2,29 +2,29 @@ import type { JsonPrimitive } from '../types/json.js';
 
 export type ContextLevel = 1 | 2 | 3;
 
-/** Internal identities assigned by the future manager, not by model output. */
+/** 内部身份由后续管理模块分配，不能由模型输出指定。 */
 export type ContextFrameId = string;
 export type ContextTaskId = string;
 
-/** Opaque reference to stored history, an artifact or a source record. */
+/** 指向已存储历史、产物或来源记录的不透明引用。 */
 export type ContextReference = string;
 
-/** JSON data exposed without mutable nested objects or arrays. */
+/** 对外只读的 JSON 数据，嵌套对象和数组也不可修改。 */
 export type ContextValue =
   | JsonPrimitive
   | readonly ContextValue[]
   | { readonly [key: string]: ContextValue };
 
-/** Dynamic work description; there is no fixed business NodeKind. */
+/** 动态工作描述，不预设固定的业务 NodeKind。 */
 export type ContextTaskDefinition = {
   readonly id: ContextTaskId;
   readonly objective: string;
 };
 
 /**
- * References one authoritative task in its owner's chain.
- * Replanning changes planRevision; an old reference must not target a new plan.
- * These identities stay internal when a future adapter builds ModelMessage.
+ * 引用所属层任务链中的唯一权威任务记录。
+ * 重规划会改变 planRevision，旧引用不能指向新计划。
+ * 后续适配器构建 ModelMessage 时，这些身份仍只保留在内核中。
  */
 export type ContextTaskRef = {
   readonly frameId: ContextFrameId;
@@ -33,7 +33,7 @@ export type ContextTaskRef = {
 };
 
 export type ContextObservation = {
-  /** Preserve this distinction when summarizing; repetition is not evidence. */
+  /** 摘要必须保留事实与假设的区别；重复出现不能作为证据。 */
   readonly kind: 'fact' | 'hypothesis';
   readonly statement: string;
   readonly sourceRefs: readonly ContextReference[];
@@ -41,15 +41,15 @@ export type ContextObservation = {
 
 export type ContextLesson = {
   readonly statement: string;
-  /** Conditions under which this experience is applicable. */
+  /** 这条经验适用的条件。 */
   readonly scope: string;
   readonly sourceRefs: readonly ContextReference[];
 };
 
 /**
- * A frame summarizes its own work; its parent incorporates the result.
- * The same shape supports intermediate compaction and task completion.
- * Source references support recall, not a mandatory completion verifier.
+ * 每层总结自身工作，再由父层吸收结果。
+ * 同一结构同时支持执行中的压缩和任务完成总结。
+ * 来源引用用于回溯，不要求额外的完成验收器。
  */
 export type ContextSummary = {
   readonly outcome: string;
@@ -58,15 +58,15 @@ export type ContextSummary = {
   readonly artifactRefs: readonly ContextReference[];
   readonly unresolved: readonly string[];
   readonly nextResponsibilities: readonly string[];
-  /** Learning suggestions, not automatic changes to host instructions. */
+  /** 候选经验只作为建议，不能自动修改宿主指令。 */
   readonly lessonCandidates: readonly ContextLesson[];
   readonly sourceRefs: readonly ContextReference[];
 };
 
 /**
- * Task progress is separate from the ACB's scheduling state.
- * A task can remain RUNNING while the Agent waits for a tool or sleeps.
- * Completion trusts the Agent's judgment; only protocol checks are intended.
+ * 内部任务进度与 ACB 调度状态分开管理。
+ * Agent 等待工具或休眠时，内部任务仍可保持 RUNNING。
+ * 是否完成由 Agent 判断；管理模块仅进行协议校验。
  */
 export type ContextTask = ContextTaskDefinition & (
   | { readonly state: 'WAITING' }
@@ -85,7 +85,7 @@ export type ContextTask = ContextTaskDefinition & (
 
 export type ContextTaskState = ContextTask['state'];
 
-/** Why a chain was replaced; completed work remains in the archived revision. */
+/** 记录任务链替换原因，已经完成的工作保留在归档版本中。 */
 export type ContextReplan = {
   readonly reason: string;
   readonly previousPlanRef: ContextReference;
@@ -93,16 +93,16 @@ export type ContextReplan = {
 };
 
 /**
- * An ordered, sequential chain. Only the selected task may run.
+ * 有序串行任务链，同一时间只能运行当前选中的任务。
  *
- * Revision 0 means no plan has been installed yet; installed revisions are
- * positive safe integers. Normal completion and replan both return to PLANNING.
- * The manager will archive old revisions instead of growing this array forever.
+ * revision 为 0 表示尚未安装计划，已安装版本使用正安全整数。
+ * 正常完成和重规划都会回到 PLANNING。
+ * 管理模块会归档旧版本，避免任务数组无限增长。
  */
 export type ContextTaskChain<
   Target extends 2 | 3 | 'local' = 2 | 3 | 'local',
 > = {
-  /** Levels 1/2 dispatch downward; level 3 executes its steps locally. */
+  /** 第一、二层向下派发，第三层在本层执行步骤。 */
   readonly target: Target;
   readonly revision: number;
   readonly tasks: readonly ContextTask[];
@@ -121,13 +121,13 @@ export type ContextTaskChain<
 export type ContextPhase = ContextTaskChain['phase'];
 
 /**
- * Semantic execution records, independent of vendor message formats.
- * Private reasoning and ModelContinuation must stay outside this structure.
- * Large payloads and attachments should use storage references.
+ * 语义执行记录，与模型厂商的消息格式无关。
+ * 模型私有推理和 ModelContinuation 不能进入此结构。
+ * 大体积内容和附件应使用存储引用。
  */
 export type ContextEntry = {
   readonly id: string;
-  /** Unix milliseconds. */
+  /** Unix 毫秒时间戳。 */
   readonly createdAt: number;
 } & (
   | {
@@ -159,21 +159,21 @@ export type ContextEntry = {
     }
 );
 
-/** Bounded active memory, not the full lifetime event log. */
+/** 容量受限的活跃记忆，不包含整个生命周期的完整事件日志。 */
 export type ContextMemory = {
   readonly summary: ContextSummary | null;
-  /** Experience retained by this level, separate from authoritative rules. */
+  /** 本层保留的经验，与权威规则分开管理。 */
   readonly lessons: readonly ContextLesson[];
   readonly recentEntries: readonly ContextEntry[];
-  /** Complete history lives outside active memory and survives compaction. */
+  /** 完整历史保存在活跃记忆之外，压缩时不会被删除。 */
   readonly historyRef: ContextReference | null;
 };
 
 /**
- * Per-frame limits covering instructions, task descriptions, results and memory.
- * All values must be positive safe integers, with
- * targetTokens < compactAtTokens < maxTokens. The future manager enforces them.
- * A future prompt builder must also check the total assembled request budget.
+ * 每层预算覆盖指令、任务描述、结果和记忆。
+ * 所有值必须为正安全整数，并满足
+ * targetTokens < compactAtTokens < maxTokens，由后续管理模块强制校验。
+ * 后续提示词构造器还需检查组装后的完整请求预算。
  */
 export type ContextBudget = {
   readonly maxTokens: number;
@@ -188,33 +188,33 @@ type ContextFrameData = {
   readonly budget: ContextBudget;
 };
 
-/** Persistent root; the host supplies its ongoing role and instructions. */
+/** 永久保留的根层，由宿主提供长期职责和指令。 */
 export type LevelOneContext = ContextFrameData & {
   readonly level: 1;
-  /** Must not be rewritten by task planning or memory summarization. */
+  /** 任务规划和记忆总结不得改写这些指令。 */
   readonly instructions: readonly string[];
   readonly currentTask: ContextTaskDefinition;
   readonly taskChain: ContextTaskChain<2>;
 };
 
 /**
- * A working stage. Retain it across requests, sleep and process restoration
- * until its current task finishes; then summarize upward and archive it.
+ * 工作阶段层，跨模型请求、休眠和进程恢复保留。
+ * 当前任务完成后，向父层提交总结并归档。
  */
 export type LevelTwoContext = ContextFrameData & {
   readonly level: 2;
-  /** The selected task in level 1's chain, not another copy of that task. */
+  /** 引用第一层任务链中选中的任务，不复制其状态。 */
   readonly currentTask: ContextTaskRef;
   readonly taskChain: ContextTaskChain<3>;
 };
 
 /**
- * Short-lived execution frame. Its chain contains locally executed steps,
- * which may involve multiple tool calls; it never creates a fourth level.
+ * 短期执行层，任务链中的步骤在本层执行，可以涉及多次工具调用。
+ * 此层不能继续创建第四层上下文。
  */
 export type LevelThreeContext = ContextFrameData & {
   readonly level: 3;
-  /** The selected task in level 2's chain. */
+  /** 引用第二层任务链中选中的任务。 */
   readonly currentTask: ContextTaskRef;
   readonly taskChain: ContextTaskChain<'local'>;
 };
@@ -225,14 +225,14 @@ export type ContextFrame =
   | LevelThreeContext;
 
 /**
- * Read-only, JSON-persistable public snapshot of one Agent's active frames.
- * The root always exists; lower frames are absent until work is dispatched.
- * Level 3 cannot exist without level 2. Completed frames belong in an external
- * archive, with only bounded summaries retained in their parents.
+ * 单个 Agent 活跃上下文的只读公共快照，可按 JSON 持久化。
+ * 根层始终存在，只有工作向下派发后才创建下层。
+ * 第三层不能脱离第二层存在。已完成的层应存入外部归档，
+ * 父层只保留容量受限的摘要。
  *
- * This is a data contract, not a ModelMessage or a model-authored replacement
- * for runtime state. Reference integrity, budgets and state transitions require
- * the future manager; TypeScript declarations alone do not enforce them.
+ * 这里定义数据协议，不是 ModelMessage，也不允许模型直接替换运行时状态。
+ * 引用完整性、预算和状态转换仍需后续管理模块校验，
+ * 单靠 TypeScript 类型声明不能强制保证这些约束。
  */
 export type AgentContext = {
   readonly schemaVersion: 1;

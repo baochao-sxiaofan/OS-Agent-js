@@ -23,11 +23,11 @@ export type SandboxedProcessRequest = {
 };
 
 /**
- * OS-level process isolation boundary.
+ * 操作系统级进程隔离边界。
  *
- * Implementations must constrain the complete child process tree, filesystem
- * access, network access, environment variables, and execution time. A plain
- * `child_process.spawn` implementation does not satisfy this contract.
+ * 实现必须约束整棵子进程树、文件系统访问、网络访问、
+ * 环境变量和执行时间。仅调用
+ * `child_process.spawn` 无法满足此协议。
  */
 export interface ProcessSandbox {
   run(request: SandboxedProcessRequest): Promise<JsonValue>;
@@ -51,11 +51,11 @@ function toStringArgs(value: JsonValue | undefined): string[] | undefined {
 }
 
 /**
- * Creates `test.run` around an injected OS-level sandbox.
+ * 基于宿主注入的操作系统级沙箱创建 `test.run`。
  *
- * The runtime must not register this tool until a real ProcessSandbox is
- * configured. This prevents silently falling back to unrestricted host
- * execution.
+ * 运行时只有在配置真实 ProcessSandbox 后才能注册此工具，
+ * 防止静默退化为不受限制的
+ * 宿主进程执行。
  */
 export function createTestRunTool(sandbox: ProcessSandbox): Tool {
   return {

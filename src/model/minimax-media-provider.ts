@@ -11,7 +11,7 @@ export type MiniMaxMediaProviderOptions = {
   timeoutMs?: number;
 };
 
-/** Image/video generation is independent of the M3 text/vision endpoint. */
+/** 图片和视频生成独立于 M3 文本与视觉接口。 */
 export class MiniMaxMediaProvider implements MediaGenerationPort {
   readonly #key: string;
   readonly #baseUrl: string;
@@ -49,7 +49,7 @@ export class MiniMaxMediaProvider implements MediaGenerationPort {
             ? { model: 'image-01', prompt: input['prompt'] ?? '', aspect_ratio: input['aspectRatio'] ?? '1:1', response_format: 'base64', n: 1 }
             : { model: 'MiniMax-Hailuo-2.3', prompt: input['prompt'] ?? '', duration: 6, resolution: '768P' });
       } catch (error) {
-        // A network interruption cannot prove that a billed submission was rejected.
+        // 网络中断不能证明已提交的计费请求被服务端拒绝。
         if (error instanceof MiniMaxMediaApiError) context.operationStore.set(key, { ...state, state: 'failed', error: error.message });
         throw error;
       }

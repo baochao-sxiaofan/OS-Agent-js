@@ -1161,11 +1161,11 @@ export class TaskScheduler {
   }
 
   /**
-   * Stop admitting new work, abort in-flight host/model operations, and wait
-   * until every tracked operation has released its resources.
+   * 停止接收新工作，中止在途的宿主操作和模型请求，
+   * 并等待所有受跟踪操作释放资源。
    *
-   * RUNNING snapshots intentionally remain recoverable; a later process
-   * restores them as READY through the existing recovery path.
+   * 保留可恢复的 RUNNING 快照，后续进程通过既有恢复路径
+   * 将其重新转为 READY。
    */
   async shutdown(): Promise<void> {
     if (!this.#shuttingDown) {
@@ -2512,7 +2512,7 @@ export class TaskScheduler {
       return;
     }
     if (task.state.status === 'READY') {
-      // Release the provider lease before backoff; cancellation interrupts waiting.
+      // 退避等待前先释放模型服务商额度；取消信号可中断等待。
       try {
         const retryAfterMs = 'retryAfterMs' in details && typeof details.retryAfterMs === 'number' && Number.isFinite(details.retryAfterMs)
           ? Math.max(0, details.retryAfterMs) : 0;

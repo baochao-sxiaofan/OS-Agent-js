@@ -1,4 +1,4 @@
-// Public data contract only. Context management and prompt assembly are deferred.
+// 仅导出公共数据协议，上下文管理和提示词组装留待后续实现。
 export type {
   AgentContext,
   ContextBudget,

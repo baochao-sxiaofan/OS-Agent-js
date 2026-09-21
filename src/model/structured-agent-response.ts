@@ -231,11 +231,11 @@ export const AGENT_RESPONSE_JSON_SCHEMA = {
 } as const;
 
 /**
- * Exposes only the control actions that are valid for this exact turn.
+ * 只暴露当前轮次允许执行的控制动作。
  *
- * In particular, a leaf Agent does not see child creation fields or Character
- * assignees after the scheduler has closed delegation because of depth or pool
- * limits.
+ * 当调度器因深度或池容量限制而关闭委派后，
+ * 叶子 Agent 不再看到子任务创建字段，
+ * 也不能选择 Character 作为任务执行者。
  */
 export function buildAgentResponseJsonSchema(
   request: ModelRequest,
@@ -324,7 +324,7 @@ export const STRUCTURED_AGENT_INSTRUCTION = [
   'For final include output.',
 ].join(' ');
 
-/** Builds the complete system instruction for one concrete Agent. */
+/** 为一个具体 Agent 构建完整的系统指令。 */
 export function buildStructuredAgentSystemInstruction(
   request: ModelRequest,
 ): string {
@@ -418,7 +418,7 @@ export type ModelImageInput = {
   name: string;
 };
 
-/** Extracts image bytes from user attachments and trusted screen tool results. */
+/** 从用户附件和可信屏幕工具结果中提取图片字节。 */
 export function extractModelImages(
   context: readonly ContextItem[],
 ): ModelImageInput[] {

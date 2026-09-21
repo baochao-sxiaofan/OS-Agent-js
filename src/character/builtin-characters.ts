@@ -36,9 +36,9 @@ export const BUILTIN_TOOL_IDS = {
 } as const;
 
 /**
- * Coordinator is reserved for root tasks. Every Character may delegate to
- * bounded specialist roles, while capability attenuation still limits what
- * each descendant can actually receive.
+ * Coordinator 仅供根任务使用。每个 Character 都可向受限的专业角色委派，
+ * 但各级后代实际能获得的能力
+ * 仍受权限衰减规则约束。
  */
 const DELEGATABLE_CHARACTER_IDS = [
   'developer',

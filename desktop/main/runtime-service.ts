@@ -67,7 +67,7 @@ export type RuntimeServiceOptions = {
    * 桌面端主进程应传入 userData 目录下的持久化文件路径。
    */
   storeLocation?: string;
-  /** Enables `test.run`; must isolate the complete child process tree. */
+  /** 启用 `test.run` 的沙箱，必须隔离完整的子进程树。 */
   processSandbox?: ProcessSandbox;
   screenCapture?: ScreenCapturePort;
   webAccess?: WebAccessPort;

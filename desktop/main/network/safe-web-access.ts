@@ -12,11 +12,11 @@ const MAX_REDIRECTS = 4;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 /**
- * Network adapter for research tools.
+ * 研究工具使用的网络适配器。
  *
- * Every destination is revalidated before each redirect. This blocks obvious
- * localhost/private-address SSRF paths while keeping network policy outside
- * the Agent and Tool schema.
+ * 每次重定向前重新校验目标地址，阻断指向本机和私有地址的
+ * 常见 SSRF 路径，并将网络策略保留在
+ * Agent 与 Tool 参数定义之外。
  */
 export class SafeWebAccess implements WebAccessPort {
   async search(
@@ -248,7 +248,7 @@ function collectRelatedTopics(
         snippet,
       });
     } catch {
-      // Ignore non-HTTPS results from the upstream search service.
+      // 忽略上游搜索服务返回的非 HTTPS 结果。
     }
   }
 }

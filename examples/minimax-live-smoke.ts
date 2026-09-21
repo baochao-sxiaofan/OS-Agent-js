@@ -1,4 +1,4 @@
-/** Opt-in live validation. Receives credentials only through the process environment. */
+/** 显式启用的真实服务验证，仅通过进程环境变量接收凭据。 */
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, extname, join } from 'node:path';
@@ -44,7 +44,7 @@ try {
   log({ check: 'M3 graph and file tools', passed: task.state.status === 'TERMINATED' && task.state.termination.kind === 'completed' && file.trim() === 'hello-m3', attempts: task.modelAttempts, fileContent: file.slice(0, 100) });
   }
 
-  // A tiny fixed PNG is sufficient for transport validation; real generated media is checked below.
+  // 传输验证使用固定的小型 PNG 即可；真实生成的媒体会在下方检查。
   const chunk = (type: string, data: Buffer) => {
     const name = Buffer.from(type); const size = Buffer.alloc(4); size.writeUInt32BE(data.length);
     const crc = Buffer.alloc(4); crc.writeUInt32BE(pngCrc32(Buffer.concat([name, data])));
@@ -86,7 +86,7 @@ try {
           await describe('M3 generated image understanding', { id: 'generated', name: 'image', mimeType: generated.mimeType as 'image/png', dataBase64: generated.dataBase64 });
         }
         if (generated.url) {
-          // Fetch only the service-produced test fixture, without an Authorization header.
+          // 只获取服务生成的测试样本，不携带 Authorization 请求头。
           const response = await fetch(generated.url, { signal: controller.signal, redirect: 'error' });
           if (!response.ok) throw new Error(`Video fixture retrieval returned HTTP ${response.status}.`);
           const bytes = Buffer.from(await response.arrayBuffer());
@@ -109,7 +109,7 @@ try {
   if (report.some((result) => result['passed'] === false)) process.exitCode = 1;
 }
 
-// Keep the opt-in smoke compatible with every supported Node 22 release.
+// 确保此可选冒烟验证兼容所有受支持的 Node 22 版本。
 function pngCrc32(bytes: Uint8Array): number {
   let value = 0xffffffff;
   for (const byte of bytes) {

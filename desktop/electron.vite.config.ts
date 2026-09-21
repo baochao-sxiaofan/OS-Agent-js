@@ -20,8 +20,8 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: resolve('preload/index.ts'),
-        // Sandboxed Electron preloads do not support ESM, even when the app
-        // package uses type: module. Keep this bridge in one CommonJS bundle.
+        // Electron 沙箱预加载脚本不支持 ESM，即使应用声明了 type: module。
+        // 因此将这层桥接代码打包为单个 CommonJS 文件。
         output: {
           format: 'cjs',
           entryFileNames: 'index.cjs',

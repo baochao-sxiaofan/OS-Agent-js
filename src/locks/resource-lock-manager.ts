@@ -42,11 +42,11 @@ type PendingLock = {
 };
 
 /**
- * Fair, atomic resource lock manager.
+ * 保证公平性和原子获取的资源锁管理器。
  *
- * A request acquires all scopes together or waits without holding any of them,
- * avoiding lock-order deadlocks. Locks are process-local leases: after a crash
- * no stale lease survives, while durable task state is recovered normally.
+ * 每个请求一次获取全部资源范围，无法全部获取时不持有任何锁并进入等待，
+ * 避免因锁顺序产生死锁。锁采用进程内租约，崩溃后不会残留旧租约，
+ * 持久化的任务状态仍按正常流程恢复。
  */
 export class ResourceLockManager {
   readonly #active = new Map<string, ResourceLockSnapshot>();

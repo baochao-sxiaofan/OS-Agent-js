@@ -12,7 +12,7 @@ export const MEDIA_MIME_TYPES = [
 ] as const;
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
-// Keep inline requests below the documented transport limit after base64 expansion.
+// 计入 base64 编码膨胀后，内联请求仍须低于文档规定的传输上限。
 export const MAX_INLINE_MEDIA_BYTES = 36 * 1024 * 1024;
 
 export type ModelMediaInput = Pick<MediaAttachment, 'name' | 'mimeType' | 'dataBase64'>;
@@ -34,8 +34,8 @@ export function validateMediaAttachments(value: unknown): MediaAttachment[] {
     const encoded = candidate['dataBase64'];
     const mimeType = candidate['mimeType'] as MediaAttachment['mimeType'];
     const maxBytes = isVideo({ mimeType }) ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
-    // A repeated capture group over multi-megabyte base64 can overflow V8's
-    // regexp stack. Scan the alphabet without backtracking and check padding.
+    // 对数兆字节的 base64 使用重复捕获组可能使 V8 正则栈溢出。
+    // 因此无回溯地扫描字符集，再单独检查填充。
     const padding = encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0;
     if (!encoded || encoded.length > Math.ceil(maxBytes / 3) * 4 || encoded.length % 4 !== 0 ||
         /[^A-Za-z0-9+/]/u.test(encoded.slice(0, encoded.length - padding))) {
@@ -62,7 +62,7 @@ export function mediaFromOutput(value: JsonValue | undefined): ModelMediaInput |
   };
 }
 
-/** Include Completion Mailbox results: current tools complete through async_work_update. */
+/** 同时检查完成邮箱中的结果：当前工具通过 async_work_update 返回完成信息。 */
 export function extractModelMedia(context: readonly ContextItem[]): ModelMediaInput[] {
   const media: ModelMediaInput[] = [];
   for (const item of context) {

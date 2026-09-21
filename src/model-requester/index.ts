@@ -1,4 +1,4 @@
-// The sole public entry point. Vendor classes/codecs are not exported.
+// 唯一公共入口，不导出厂商实现类和编解码器。
 export { createModelRequester } from './internal/factory.js';
 export { ModelRequesterError } from './api.js';
 export type {

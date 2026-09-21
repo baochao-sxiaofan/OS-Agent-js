@@ -82,7 +82,7 @@ export class MiniMaxRequester implements ModelRequester {
       if (signal?.aborted) throw aborted('cancelled');
       if (timeout.aborted) throw aborted('timeout');
       if (error instanceof ModelRequesterError) throw error;
-      // Native fetch errors can contain request headers, URLs or credentials.
+      // 原生 fetch 错误可能包含请求头、URL 或凭据。
       throw new ModelRequesterError('MiniMax network request failed.', {
         provider: 'minimax', code: 'network_error', retryable: true,
       });

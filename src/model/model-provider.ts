@@ -59,7 +59,7 @@ export const TURN_SUMMARY_PROTOCOL: TurnSummaryProtocol = {
 export type ToolDescriptor = {
   name: string;
   description: string;
-  /** JSON Schema describing the tool input. */
+  /** 描述工具输入的 JSON Schema。 */
   inputSchema?: JsonObject;
 };
 
@@ -82,11 +82,11 @@ export type ModelReasoningEffort =
   | 'high';
 
 export type ModelRuntimePreferences = {
-  /** Per-task context ceiling. The scheduler clamps to the provider limit. */
+  /** 每个任务的上下文上限，调度器会将其限制在服务商允许范围内。 */
   maxContextTokens?: number;
-  /** Sampling temperature when the selected provider/model supports it. */
+  /** 所选服务商或模型支持时使用的采样温度。 */
   temperature?: number;
-  /** Provider-neutral reasoning depth hint. Unsupported providers ignore it. */
+  /** 与厂商无关的推理深度提示，不支持的服务商会忽略它。 */
   reasoningEffort?: ModelReasoningEffort;
 };
 
@@ -94,7 +94,7 @@ export type SubagentSpawnRequest = {
   goal: string;
   /** 子 Agent 扮演的 Character 标识；由内核校验是否允许创建。 */
   character?: string;
-  /** Compatibility shorthand for capabilities applying to all resources. */
+  /** 作用于全部资源的能力简写，用于兼容旧调用方。 */
   capabilities?: CapabilityInput[];
   requestedCapabilities?: CapabilityRequest[];
   context?: ContextItem[];
@@ -103,7 +103,7 @@ export type SubagentSpawnRequest = {
 };
 
 export type ModelResponse = ModelActionResponse & {
-  /** Native assistant history needed for interleaved reasoning and tool-result pairing. */
+  /** 交错推理和工具结果配对所需的原生模型回复历史。 */
   providerMessage?: { providerId: string; message: JsonObject };
 };
 
@@ -184,7 +184,7 @@ export type ModelRequest = {
   goal: string;
   context: readonly ContextItem[];
   tools: readonly ToolDescriptor[];
-  /** Current executable capabilities, projected without internal Grant IDs. */
+  /** 当前可执行能力的对外投影，不包含内部 Grant ID。 */
   capabilities?: readonly CapabilityRequest[];
   character?: {
     id: string;

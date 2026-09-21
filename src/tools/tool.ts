@@ -6,7 +6,7 @@ export type ToolEffect = 'privileged' | 'read_only' | 'side_effect';
 
 export type ToolExecutionContext = {
   taskId: string;
-  /** Root task identity supplied by the scheduler; defaults to taskId for legacy hosts. */
+  /** 调度器提供的根任务身份；兼容旧宿主时默认使用 taskId。 */
   rootTaskId?: string;
   graphNodeAlias?: string;
   signal: AbortSignal;
@@ -33,9 +33,9 @@ export type ToolInputValidation =
 export interface Tool {
   readonly name: string;
   readonly description: string;
-  /** Provider-facing JSON Schema for this tool's input. */
+  /** 提供给模型服务商的工具输入 JSON Schema。 */
   readonly inputSchema?: JsonObject;
-  /** Compatibility shorthand for a capability applying to all resources. */
+  /** 作用于全部资源的能力简写，用于兼容旧调用方。 */
   readonly requiredCapability?: string;
   readonly effect: ToolEffect;
 
