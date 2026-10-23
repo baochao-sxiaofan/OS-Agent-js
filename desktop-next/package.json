@@ -1,0 +1,46 @@
+{
+  "name": "@os-agent/desktop-next",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "pack": "npm run build && electron-builder --dir",
+    "dist:win": "npm run build && electron-builder --win nsis --x64",
+    "check": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "38.8.6",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.1",
+    "vite": "^7.1.7"
+  },
+  "build": {
+    "appId": "com.osagent.desktop.next",
+    "productName": "OS Agent Next",
+    "directories": { "output": "release" },
+    "files": ["out/**/*", "package.json"],
+    "mac": { "identity": null, "category": "public.app-category.productivity" },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "artifactName": "OS-Agent-Next-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

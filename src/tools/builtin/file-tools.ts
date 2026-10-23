@@ -10,6 +10,7 @@ import type { CapabilityInput } from '../../capability/capability.js';
 import { CURRENT_WORKSPACE_RESOURCE } from '../../capability/workspace-capabilities.js';
 import type { JsonObject, JsonValue } from '../../types/json.js';
 import type { Tool, ToolExecutionContext, ToolInputValidation } from '../tool.js';
+import { ToolPreconditionError } from '../tool.js';
 import { WorkspaceResolver } from '../workspace-fs.js';
 
 const MAX_READ_BYTES = 256 * 1024;
@@ -49,7 +50,7 @@ async function requireResolver(
 export const fileReadTool: Tool = {
   name: 'file.read',
   description:
-    'Read a UTF-8 text file inside the workspace. Input: { path: "workspace://current/..." }.',
+    'Read a UTF-8 text file inside the workspace. Result includes full-file UTF-16 character and Han character counts; truncated content is only a preview. Input: { path: "workspace://current/..." }.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -80,9 +81,12 @@ export const fileReadTool: Tool = {
         path: String(input['path']),
         truncated: true,
         content: content.slice(0, MAX_READ_BYTES),
+        characters: content.length,
+        chineseCharacters: (content.match(/\p{Script=Han}/gu) ?? []).length,
       };
     }
-    return { path: String(input['path']), truncated: false, content };
+    return { path: String(input['path']), truncated: false, content,
+      characters: content.length, chineseCharacters: (content.match(/\p{Script=Han}/gu) ?? []).length };
   },
 };
 
@@ -122,11 +126,20 @@ export const fileWriteTool: Tool = {
   async execute(input, context): Promise<JsonValue> {
     const resolver = await requireResolver(context);
     const hostPath = resolver.toHostPath(String(input['path']));
-    await resolver.assertResolvedInsideRoot(hostPath);
+    try {
+      await resolver.assertResolvedInsideRoot(hostPath);
+    } catch (error) {
+      if (error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+        throw new ToolPreconditionError('file_not_found', '目标文件不存在，未执行写入。新文件请使用 file.create。');
+      }
+      throw error;
+    }
     await writeFile(hostPath, String(input['content']), 'utf8');
     return {
       path: String(input['path']),
-      bytesWritten: String(input['content']).length,
+      bytesWritten: Buffer.byteLength(String(input['content']), 'utf8'),
+      charactersWritten: String(input['content']).length,
+      chineseCharactersWritten: (String(input['content']).match(/\p{Script=Han}/gu) ?? []).length,
     };
   },
 };
@@ -175,7 +188,9 @@ export const fileCreateTool: Tool = {
     });
     return {
       path: String(input['path']),
-      bytesWritten: String(input['content']).length,
+      bytesWritten: Buffer.byteLength(String(input['content']), 'utf8'),
+      charactersWritten: String(input['content']).length,
+      chineseCharactersWritten: (String(input['content']).match(/\p{Script=Han}/gu) ?? []).length,
     };
   },
 };

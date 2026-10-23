@@ -7,35 +7,148 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 
 - 全局模型请求调度；
 - Agent 任务状态管理；
-- 子 Agent 委派边界；
+- 长期 Agent 的生命周期与协作边界；
 - API 配额、成本和并发控制；
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`2.2.1`
+当前版本：`3.0.0`（2026-10-23）。
+
+3.0.0 交付长期 Agent Runtime、独立会话与记忆、原生工具协议和 OS Agent Next 桌面。
+版本变化、兼容说明及验证结果见[发布说明](docs/release-3.0.0.md)。
+
+Mac 桌面应用为 **OS Agent Next**，安装后可直接双击打开，无需单独启动服务器。
+首次使用、配置模型及文件权限见[桌面使用说明](docs/desktop-next.md#在-mac-上直接使用)。
+模型连接支持 DeepSeek 和 MiniMax：选择供应商、填写 Key，再从列表选择具体型号；
+DeepSeek 型号从官方接口读取，两家分别保存凭据与上次选择。
+从源码打包运行 `npm run desktop:next:pack`，将生成的 `.app` 拷贝到「应用程序」。
 
 ## 下一代 Agent 运行时边界
 
-`main` 已加入四个面向长期 Agent 的独立模块，作为现有 TCB 运行时的渐进替代方案：
+3.0.0 提供面向长期 Agent 的独立模块及服务器 Runtime，旧 TCB 链路继续保留：
 
 - `model-requester`：新的模型 Provider 请求边界。它只处理统一消息、工具调用、
   厂商私有续接数据和网络错误，不负责调度、Prompt 策略或工具执行。
-- `agent-context`：三级递归上下文协议。第一层保存长期职责，第二层保存工作阶段，
-  第三层保存具体执行步骤；每层拥有自己的当前任务、子任务链、记忆和预算。
+- `agent-context`：三级递归上下文管理。第一层保存长期职责，第二层保存工作阶段，
+  第三层保存具体执行步骤；管理任务链、记忆、预算、待总结状态及原子持久化。
 - `agent-control-block`：长期 Agent 的持久身份、角色、权限、Skills、Context、
   模型配置引用及 `READY/RUNNING/BLOCKED/SLEEPING` 状态接口。
 - `agent-scheduler`：面向 ACB 的独立调度器。每个 Agent 分别记录在途异步操作和
   未交付终态结果；全部完成时立即封存，部分完成时默认每 30 秒封存一次。
+- `agent-round`：按 Context 阶段执行普通轮或独立总结轮。完成目标后先
+  `finishRun(continue)`，下一张运行凭据完成总结、归档和父层回传，再决定是否休眠。
+- `agent-runtime`：常驻执行、模型协议、工具权限、审批、消息、异常与 SQLite 恢复。
+- `server`：认证 HTTP API、profile 配置与优雅停机；`integrations` 提供 MCP 和 Docker 后端。
+
+新链路的所有 Agent 都由用户创建，身份长期保留。
+模型只能向同一用户、同一工作区内已有的 Agent 发送消息；不能创建 Agent、
+转授权限或取消其他 Agent。每个 Agent 使用用户单独授予的权限执行。
+完成工作后进入 SLEEPING，收到新消息后以原身份继续工作。
+L1/L2/L3 是一个 Agent 内部的上下文层级，层级推进不会创建其他 Agent。
 
 这些模块通过 `os-agent-js/model-requester`、`os-agent-js/agent-context`、
-`os-agent-js/agent-control-block` 和 `os-agent-js/agent-scheduler` 独立导出。
-它们目前不接入旧 `TaskScheduler`、`TaskControlBlock` 或桌面 Runtime，也不会改变
-现有执行链路。后续重构会逐个迁移模型请求、上下文、Agent 状态和调度职责，
-完成替换前新旧结构保持并存。
+`os-agent-js/agent-control-block`、`os-agent-js/agent-scheduler` 和
+`os-agent-js/agent-round`、`os-agent-js/agent-runtime`、`os-agent-js/server` 和
+`os-agent-js/integrations` 独立导出。
+它们不接入旧 `TaskScheduler`、`TaskControlBlock` 或旧桌面 Runtime。
+新旧执行入口、调度状态和数据目录保持隔离；新桌面与服务器共用新 Runtime 的公共 API，
+核心组件不依赖 Electron 或 React。
 
-## 核心状态模型
+运行 `npm run demo:agent-context` 可观察三级工作通过不同 `runId` 逐层总结，最终进入
+`SLEEPING`。示例使用本地模拟 HTTP，无需 Key。详见
+[上下文管理](src/agent-context/README.md)和[轮次编排](src/agent-round/README.md)。
 
-本项目从 Agent 调度视角定义三种活动状态：
+服务器启动与接口见[使用说明](docs/server-runtime.md)，剩余验证状态见
+[交付清单](docs/server-runtime-checklist.md)。本地真实模型冒烟通过环境注入 Key，
+执行 `npx tsx examples/server-live-smoke.ts`；默认测试不请求付费 API。
+
+真实协作回归使用作者小白和只读编辑小黑，读取小说目录已有校对稿与审读清单，
+逐章写作、审稿、修改前十章：
+
+```bash
+npm run test:novel:live -- "/你的小说工作区"
+```
+
+运行前从环境提供 `MINIMAX_API_KEY`，默认模型为 `MiniMax-M3`。每次创建新的两名
+Agent、独立数据库和小说输出目录；普通 `npm test` 不请求付费 API。
+第二个参数可指定运行目录；再次使用同一目录会恢复两名原 Agent 和消息现场。
+运行目录中 `control.json` 给出本机监控地址，`status.json` 包含状态、字数、
+文件哈希、最近消息、暂停原因及未知副作用，`messages.json` 保留真实群消息。
+两名 Agent 的私聊通过只读管理入口单独保存在 `private-messages.json` 和
+`审稿记录_私聊.md`，不混入用户群聊或推进其处理游标。
+完整任务书与审稿记录保存在小说输出目录。出现未知写入必须核对现场后显式对账；
+脚本不会自动审批、捏造验收或替代作者写正文。用 Ctrl+C 保留现场并优雅停机。
+本机控制入口支持 `/message`、`/pause`、`/resume`、`/reconcile` 与 `/feedback`；
+现场反馈使用 Runtime 的可信宿主接口，投递到当前层但不改变普通会话的处理游标。
+新文件使用 `file.create`，修订既有文件使用 `file.write`。覆盖目标不存在时明确反馈
+未执行写入，并保留可分页读取的原调用参数；执行结果未知时仍须宿主对账。
+文件读取返回实际汉字数和字符数；创建、覆盖与补丁分别返回 UTF-8 字节数、
+UTF-16 字符数及汉字数，避免把工具回执长度当成正文篇幅。
+Runtime 可通过 `toolResultInlineCharacters` 调整单个工具结果的完整投递额度，默认
+4000字符，超出后保留分页。本次小说联调设为16000字符，使几千字章节完整进入
+模型当前上下文；长资料仍按 `artifactRef` 与 `nextOffset` 继续读取。
+联调通过 Runtime 的可选 `messageGuard` 检查编辑读稿证据：未读取当前哈希或未读完
+分页时拒绝发出审稿消息并有限纠正。终审要求十章齐备且在第十章落盘后实际重读，
+验收另核对每章至少2000汉字。联调协作群发送前要求明确点名对方，避免正文
+写了@姓名却漏掉 `mentions` 导致双方等待；私聊沿用自己的投递规则。
+存在 `运行校对口径.md` 时，审新稿前必须重新读取其当前版本，避免沿用错误的历史摘要。
+普通写审请求同时实时附加该口径；独立总结只使用其封存来源，维持原有来源校验。
+检查过程不生成正文或验收结论。
+普通MiniMax限流或过载缺少重试期限时至少等待30秒；业务码2056表示Token Plan或
+账户额度耗尽，即使HTTP状态为429也直接暂停，补充额度后再从保留现场继续。
+可通过 `MINIMAX_TIMEOUT_MS` 调整真实联调的请求超时，默认360秒。
+M3联调可设置 `MINIMAX_THINKING=disabled` 直接生成，或 `adaptive` 保持思考；
+省略时沿用供应商默认值。`MINIMAX_AUTHOR_THINKING` 可单独覆盖作者普通工作轮，
+编辑和独立总结仍用基础配置。这些开关不改变桌面默认模型配置。
+
+仅验证持续运行与交付、不评判文学质量时，可用
+[`test:novel:soak`](docs/novel-collaboration-soak.md)。真实 DeepSeek 测试已从一次派发完成
+176次请求、37条 Agent 消息及十章交付；额外逐章独立修改流程覆盖8/10，严格流程报告
+保留未通过结果，不能据此宣称所有测试步骤均已覆盖。
+
+## 新桌面：长期 Agent 联系人
+
+`desktop-next/` 提供类似飞书/微信的联系人与聊天界面。左上角 **＋** 创建 Agent，
+填写名称、长期职责、角色及可选工作区权限；创建后休眠，收到消息才运行。
+对话历史、长期身份和上下文随本地数据库恢复，完成工作后可以继续与原 Agent 聊天。
+
+“我的对话”只展示你参加的私聊与群聊；“Agent 视角”可以只读查看 Agent 之间的
+独立会话和旧版历史归档。群聊从对话列表顶部创建，支持选择成员、点名和参与策略。
+连续消息先聚合，Agent 可合并发言或保持沉默；内部完成与总结不会自动变成聊天气泡。
+宿主为每次用户推动的交流设置共享自动发言上限，防止相互回复无限循环。
+协议与恢复设计见[会话运行时](docs/conversation-runtime.md)。
+
+同一个 Agent 处理新消息时，会在预算内看到自己其他近期会话的摘要、增量和个人备注，
+需要更多信息时可按关键词检索原文。会话右上角“会话记忆”提供摘要及来源，
+搜索按钮支持当前或全部可访问会话；详情里的“编辑我的长备注”支持简介、长正文、
+标签和待跟进。Agent 自己写的备注在“Agent 视角”中只读查看，与用户备注分开保存。
+预算、压缩和接口见[跨会话记忆说明](docs/conversation-memory.md)。
+
+```bash
+npm install
+npm run desktop:next:dev
+```
+
+默认使用明确标记的本地演示模式。左下角模型设置可以切换到真实 DeepSeek 或 MiniMax；
+API Key 只在本地主进程使用，系统安全存储可用时加密保存。无安全存储时仅在当前会话保留。
+也支持从 `MINIMAX_API_KEY` 环境变量读取凭据，再由用户在设置中选择真实模型模式。
+
+模型设置支持500K/1M请求容量预设和自定义输出、压缩阈值及累计额度，默认单次最大
+输出32768。保存后应用到已有 Agent；失败总结可在调整容量后点击“继续”恢复原现场。
+宿主预算与模型供应商的实际窗口分开，所选模型仍须支持对应的容量。
+
+`npm run desktop:next:check` 检查类型，`npm run desktop:next:build` 构建，
+`npm run desktop:next:pack` 生成当前平台的本地应用目录。
+新应用名为 **OS Agent Next**，应用标识为 `com.osagent.desktop.next`。
+
+旧桌面继续使用 `npm run desktop:dev`，两者不会读写对方的数据。
+新桌面默认使用系统应用数据目录下的 `OS Agent Next`，可用 `OS_AGENT_NEXT_DATA_DIR`
+单独指定。详情与验收记录见[新桌面说明](docs/desktop-next.md)。
+
+## 旧 TCB 链路：核心状态模型
+
+以下 TCB、Agent 池、委派树和 Graph 说明对应现有旧桌面实现，不适用于上面的新链路。
+旧链路从 Agent 调度视角定义三种活动状态：
 
 - `READY`：任务可以调用模型，但正在等待网络、RPM、TPM、并发额度或预算。
 - `RUNNING`：远程 LLM 服务正在处理该任务。
@@ -49,7 +162,7 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 READY -> RUNNING -> BLOCKED -> READY -> RUNNING -> TERMINATED
 ```
 
-## Agent 池与委派树
+## 旧 TCB 链路：Agent 池与委派树
 
 每个任务都带有：
 
@@ -435,9 +548,10 @@ npm run desktop:check
 npm run desktop:build
 ```
 
-推送到 `main` 后，`.github/workflows/windows-desktop.yml` 会在 Windows Runner 上
-执行检查和测试，并生成 `OS-Agent-Setup-2.2.1-x64.exe`。也可以在 GitHub Actions
-页面手动触发该工作流。
+推送到 `main` 后，`.github/workflows/windows-desktop.yml` 在 Windows Runner 上
+执行检查和测试，分别生成旧桌面的 `OS-Agent-Setup-2.2.1-x64.exe` 和新桌面的
+`OS-Agent-Next-Setup-3.0.0-x64.exe`。也可以在 GitHub Actions 页面手动触发。
+macOS 本地安装与新链路验证见[桌面说明](docs/desktop-next.md)。
 
 ### 最小 Gemini 网络验证
 

@@ -27,6 +27,8 @@ export type AsyncOperationResult = {
 export type AsyncOperationOptions = {
   /** 等待期限由执行模块提供；省略时使用调度器默认值。 */
   readonly timeoutMs?: number;
+  /** 执行层的稳定操作键，重复登记返回原操作而不创建第二次副作用。 */
+  readonly operationId?: string;
 };
 
 /** 先登记整组操作，再发起副作用；超时信号交给执行模块尝试取消。 */
@@ -73,7 +75,27 @@ export type AgentScheduleSnapshot = {
   readonly queuedBatch: AgentDispatchBatch | null;
   readonly running: AgentRun | null;
   readonly batchDueAt: number | null;
+  readonly suspension: AgentSuspension | null;
 };
+
+/** 暂停保留未完成批次，恢复事件由宿主或期限提供。 */
+export type AgentSuspension = {
+  readonly reason: string;
+  readonly resumeAt: number | null;
+};
+
+export type AgentSchedulerCheckpoint = AgentScheduleSnapshot & {
+  readonly schemaVersion: 1;
+  readonly continuation: boolean;
+  readonly recentEventIds: readonly string[];
+};
+
+/** 存储失败后调度器停止交付，宿主必须重建并恢复。 */
+export interface AgentSchedulerPersistence {
+  load(agentId: AgentId): AgentSchedulerCheckpoint | undefined;
+  save(checkpoint: AgentSchedulerCheckpoint): void;
+  onError?(error: Error): void;
+}
 
 export type AgentSchedulerOptions = {
   /** 从首个未交付结果到达起计算，默认 30 秒；后续结果不重置计时。 */
@@ -112,6 +134,13 @@ export interface AgentScheduler {
    * 不自动调用模型、不决定是否重试；再次领取会获得新的 runId。
    */
   returnRun(run: AgentRun): void;
+  /** 运行期间先安装暂停；凭据完成或归还后进入 BLOCKED，宿主负责取消请求。 */
+  suspend(agentId: AgentId, suspension: AgentSuspension): void;
+  resume(agentId: AgentId): void;
+  operationHandle(operation: AsyncOperation): AsyncOperationHandle | undefined;
+  cancelOperations(agentId: AgentId, reason: string): void;
+  /** 停止本地定时器，不删除持久现场；运行中调用方仍应取消请求。 */
+  close(): void;
   inspect(agentId: AgentId): AgentScheduleSnapshot;
 }
 

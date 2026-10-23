@@ -34,6 +34,9 @@ export class CharacterRegistry {
     if (this.#characters.has(definition.id)) {
       throw new Error(`Character is already registered: ${definition.id}`);
     }
+    if (definition.allowPlanning !== undefined && typeof definition.allowPlanning !== 'boolean') {
+      throw new Error('Character allowPlanning must be a boolean.');
+    }
     for (const capability of definition.requestableCapabilities) {
       if (
         !characterAllowsCapability(

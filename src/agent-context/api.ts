@@ -2,7 +2,7 @@ import type { JsonPrimitive } from '../types/json.js';
 
 export type ContextLevel = 1 | 2 | 3;
 
-/** 内部身份由后续管理模块分配，不能由模型输出指定。 */
+/** 内部身份由管理模块分配，不能由模型输出指定。 */
 export type ContextFrameId = string;
 export type ContextTaskId = string;
 
@@ -24,7 +24,7 @@ export type ContextTaskDefinition = {
 /**
  * 引用所属层任务链中的唯一权威任务记录。
  * 重规划会改变 planRevision，旧引用不能指向新计划。
- * 后续适配器构建 ModelMessage 时，这些身份仍只保留在内核中。
+ * 构建模型视图时，这些身份仍只保留在内核中。
  */
 export type ContextTaskRef = {
   readonly frameId: ContextFrameId;
@@ -97,7 +97,7 @@ export type ContextReplan = {
  *
  * revision 为 0 表示尚未安装计划，已安装版本使用正安全整数。
  * 正常完成和重规划都会回到 PLANNING。
- * 管理模块会归档旧版本，避免任务数组无限增长。
+ * 管理模块在重规划或压缩时归档旧版本，避免任务数组无限增长。
  */
 export type ContextTaskChain<
   Target extends 2 | 3 | 'local' = 2 | 3 | 'local',
@@ -172,8 +172,8 @@ export type ContextMemory = {
 /**
  * 每层预算覆盖指令、任务描述、结果和记忆。
  * 所有值必须为正安全整数，并满足
- * targetTokens < compactAtTokens < maxTokens，由后续管理模块强制校验。
- * 后续提示词构造器还需检查组装后的完整请求预算。
+ * targetTokens < compactAtTokens < maxTokens，由管理模块强制校验。
+ * 轮次编排器还需检查组装后的完整请求预算。
  */
 export type ContextBudget = {
   readonly maxTokens: number;
@@ -231,7 +231,7 @@ export type ContextFrame =
  * 父层只保留容量受限的摘要。
  *
  * 这里定义数据协议，不是 ModelMessage，也不允许模型直接替换运行时状态。
- * 引用完整性、预算和状态转换仍需后续管理模块校验，
+ * 引用完整性、预算和状态转换由管理模块校验，
  * 单靠 TypeScript 类型声明不能强制保证这些约束。
  */
 export type AgentContext = {

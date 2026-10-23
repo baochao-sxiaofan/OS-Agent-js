@@ -68,6 +68,11 @@ export interface ManagedAgentControlBlock extends AgentSchedulingHandle {
   snapshot(): AgentControlBlock;
 }
 
+/** 可选的权威上下文读取端口，不授予身份、权限或调度状态写权限。 */
+export interface AgentContextReader {
+  snapshot(): AgentContext;
+}
+
 export class InvalidAgentTransitionError extends Error {
   constructor(readonly from: AgentState, readonly to: AgentState) {
     super(`非法 Agent 状态转换：${from} -> ${to}`);

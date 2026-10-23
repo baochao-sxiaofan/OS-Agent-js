@@ -8,7 +8,11 @@ on:
     paths:
       - ".github/workflows/windows-desktop.yml"
       - "desktop/**"
+      - "desktop-next/**"
       - "src/**"
+      - "test/**"
+      - "examples/**"
+      - "scripts/**"
       - "package.json"
       - "package-lock.json"
 
@@ -33,16 +37,29 @@ jobs:
       - name: Verify runtime and desktop
         run: |
           npm run check
+          npm run check:architecture
           npm run desktop:check
+          npm run desktop:next:check
           npm test
 
       - name: Package Windows installer
         run: npm run desktop:dist:win
+
+      - name: Package OS Agent Next Windows installer
+        run: npm run desktop:next:dist:win
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: os-agent-windows-x64
           path: desktop/release/OS-Agent-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload OS Agent Next installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: os-agent-next-windows-x64
+          path: desktop-next/release/OS-Agent-Next-Setup-*.exe
           if-no-files-found: error
           retention-days: 14

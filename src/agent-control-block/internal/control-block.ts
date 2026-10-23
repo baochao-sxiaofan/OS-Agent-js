@@ -1,13 +1,14 @@
 import {
   AgentState,
   InvalidAgentTransitionError,
+  type AgentContextReader,
   type AgentControlBlock,
   type ManagedAgentControlBlock,
 } from '../api.js';
 
 const transitions: Readonly<Record<AgentState, readonly AgentState[]>> = {
   [AgentState.SLEEPING]: [AgentState.READY],
-  [AgentState.READY]: [AgentState.RUNNING],
+  [AgentState.READY]: [AgentState.RUNNING, AgentState.BLOCKED],
   [AgentState.RUNNING]: [AgentState.READY, AgentState.BLOCKED, AgentState.SLEEPING],
   [AgentState.BLOCKED]: [AgentState.READY],
 };
@@ -17,7 +18,7 @@ export function canAgentTransition(from: AgentState, to: AgentState): boolean {
   return transitions[from]?.includes(to) ?? false;
 }
 
-export function createAgentControlBlock(initial: AgentControlBlock): ManagedAgentControlBlock {
+export function createAgentControlBlock(initial: AgentControlBlock, context?: AgentContextReader): ManagedAgentControlBlock {
   if (!Number.isSafeInteger(initial.agentId) || initial.agentId <= 0) {
     throw new RangeError('agentId 必须为正安全整数。');
   }
@@ -27,15 +28,17 @@ export function createAgentControlBlock(initial: AgentControlBlock): ManagedAgen
   if (!Object.values(AgentState).includes(initial.state)) {
     throw new TypeError('未知的 Agent 状态。');
   }
-  return new ControlBlock(initial);
+  return new ControlBlock(initial, context);
 }
 
 class ControlBlock implements ManagedAgentControlBlock {
   readonly agentId: number;
   #data: AgentControlBlock;
+  readonly #context: AgentContextReader | undefined;
 
-  constructor(initial: AgentControlBlock) {
+  constructor(initial: AgentControlBlock, context?: AgentContextReader) {
     this.#data = structuredClone(initial);
+    this.#context = context;
     this.agentId = initial.agentId;
     // 固定公开身份，私有状态仍只能通过 transition 更新。
     Object.freeze(this);
@@ -53,6 +56,6 @@ class ControlBlock implements ManagedAgentControlBlock {
   }
 
   snapshot(): AgentControlBlock {
-    return structuredClone(this.#data);
+    return structuredClone({ ...this.#data, context: this.#context?.snapshot() ?? this.#data.context });
   }
 }

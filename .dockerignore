@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.env
+.env.*
+.tmp
+.server-runtime
+.desktop-runtime
+server.config.json
+*.log

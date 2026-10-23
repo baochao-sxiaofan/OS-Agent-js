@@ -58,6 +58,7 @@ export function encodeRequest(request: ModelCompletionRequest, model: string): J
       function: { name: tool.name, description: tool.description, parameters: tool.parameters },
     }));
   }
+  if (request.parallelToolCalls !== undefined) body['parallel_tool_calls'] = request.parallelToolCalls;
   if (choice !== undefined) {
     body['tool_choice'] = typeof choice === 'string' ? choice
       : { type: 'function', function: { name: choice.name } };

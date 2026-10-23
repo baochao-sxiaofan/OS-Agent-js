@@ -1,0 +1,8 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "electron"],
+    "declaration": false
+  },
+  "include": ["main/**/*.ts", "preload/**/*.ts", "shared/**/*.ts", "electron.vite.config.ts"]
+}

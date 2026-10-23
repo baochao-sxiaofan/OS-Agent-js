@@ -8,6 +8,8 @@ import {
   type AgentScheduleSnapshot,
   type AgentScheduler,
   type AgentSchedulerOptions,
+  type AgentSchedulerPersistence,
+  type AgentSuspension,
   type AgentWakeEvent,
   type AsyncOperation,
   type AsyncOperationHandle,
@@ -32,6 +34,7 @@ type AgentRecord = {
   continuation: boolean;
   batchDueAt: number | null;
   timer: ReturnType<typeof setTimeout> | null;
+  suspension: AgentSuspension | null;
 };
 
 const defaults: Required<AgentSchedulerOptions> = {
@@ -43,12 +46,13 @@ const defaults: Required<AgentSchedulerOptions> = {
   recentEventLimit: 1024,
 };
 
-export function createAgentScheduler(options: AgentSchedulerOptions = {}): AgentScheduler {
+export function createAgentScheduler(options: AgentSchedulerOptions = {},
+  persistence?: AgentSchedulerPersistence): AgentScheduler {
   const configuration = { ...defaults, ...options };
   for (const [name, value] of Object.entries(configuration)) {
     positiveInteger(value, name);
   }
-  return new Scheduler(configuration);
+  return new Scheduler(configuration, persistence);
 }
 
 /**
@@ -61,8 +65,10 @@ class Scheduler implements AgentScheduler {
   readonly #queue: AgentId[] = [];
   readonly #readyWaiters = new Set<() => void>();
   #running = 0;
+  #failure: Error | undefined;
+  #closed = false;
 
-  constructor(options: Required<AgentSchedulerOptions>) {
+  constructor(options: Required<AgentSchedulerOptions>, readonly persistence?: AgentSchedulerPersistence) {
     this.#options = options;
   }
 
@@ -78,8 +84,30 @@ class Scheduler implements AgentScheduler {
     const record: AgentRecord = {
       agent, pending: new Map(), completed: new Map(), events: new Map(),
       recentEvents: new Set(), batch: null, run: null,
-      continuation: state === AgentState.READY, batchDueAt: null, timer: null,
+      continuation: state === AgentState.READY, batchDueAt: null, timer: null, suspension: null,
     };
+    const saved = this.persistence?.load(agent.agentId);
+    if (saved) {
+      if (saved.schemaVersion !== 1 || saved.agentId !== agent.agentId) {
+        throw new AgentSchedulerError('invalid_input', '不支持的调度恢复数据。');
+      }
+      record.pending = new Map(saved.pendingOperations.map((operation) =>
+        [operation.operationId, { operation: freezeJson(operation), controller: new AbortController() }]));
+      record.completed = new Map(saved.completedResults.map((result) => [result.operation.operationId, freezeJson(result)]));
+      record.events = new Map(saved.pendingEvents.map((event) => [event.eventId, freezeJson(event)]));
+      record.recentEvents = new Set(saved.recentEventIds);
+      record.batch = saved.running?.batch ?? saved.queuedBatch;
+      if (record.batch) record.batch = freezeJson(record.batch);
+      record.continuation = saved.continuation;
+      // 宿主可能已持久接收新工作，但尚未来得及通知旧休眠调度器。
+      if (state === AgentState.READY && saved.state === AgentState.SLEEPING &&
+          !record.batch && !record.pending.size && !record.completed.size && !record.events.size) {
+        record.continuation = true;
+      }
+      record.batchDueAt = saved.batchDueAt;
+      record.suspension = saved.suspension;
+      if (record.batch && !record.suspension) this.#queue.push(agent.agentId);
+    }
     this.#agents.set(agent.agentId, record);
     this.#reconcile(record);
   }
@@ -114,6 +142,7 @@ class Scheduler implements AgentScheduler {
   }
 
   takeNextRun(): AgentRun | null {
+    this.#available();
     if (!this.#hasCapacity()) return null;
     const agentId = this.#queue[0];
     if (agentId === undefined) return null;
@@ -128,10 +157,12 @@ class Scheduler implements AgentScheduler {
     this.#queue.shift();
     record.run = run;
     this.#running += 1;
+    this.#persist(record);
     return run;
   }
 
   waitForReady(signal?: AbortSignal): Promise<void> {
+    this.#available();
     if (signal?.aborted) return Promise.reject(signal.reason);
     if (this.#queue.length && this.#hasCapacity()) return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
@@ -152,25 +183,41 @@ class Scheduler implements AgentScheduler {
   registerOperations(run: AgentRun, operations: readonly AsyncOperationOptions[]): readonly AsyncOperationHandle[] {
     const record = this.#activeRecord(run);
     const buffered = record.pending.size + record.completed.size + (record.batch?.results.length ?? 0);
-    if (buffered + operations.length > this.#options.maxBufferedOperations) {
-      throw new AgentSchedulerError('capacity_exceeded', '未消费异步操作已达上限，请先处理已有结果。');
-    }
+    const terminal = new Map([...record.completed.values(), ...record.batch!.results]
+      .map((result) => [result.operation.operationId, result.operation]));
+    const staged = new Map<string, PendingOperation>();
     const now = Date.now();
     // 整组参数先验证，再统一登记，避免某个操作回调早于同组其他操作的登记。
     const pending = operations.map((options): PendingOperation => {
+      if (options.operationId !== undefined) nonempty(options.operationId, 'operationId');
+      const previous = options.operationId &&
+        (record.pending.get(options.operationId) ?? staged.get(options.operationId));
+      if (previous) return previous;
+      const finished = options.operationId && terminal.get(options.operationId);
+      if (finished) {
+        const controller = new AbortController();
+        controller.abort(new Error('操作已经完成，不能再次执行。'));
+        return { operation: finished, controller };
+      }
       const timeoutMs = options.timeoutMs ?? this.#options.operationTimeoutMs;
       positiveInteger(timeoutMs, 'timeoutMs');
       const deadline = now + timeoutMs;
       positiveInteger(deadline, 'deadline');
-      return {
+      const item: PendingOperation = {
         operation: Object.freeze({
-          agentId: run.agentId, operationId: randomUUID(), originRunId: run.runId,
+          agentId: run.agentId, operationId: options.operationId ?? randomUUID(), originRunId: run.runId,
           startedAt: now, deadline, state: 'RUNNING',
         }),
         controller: new AbortController(),
       };
+      staged.set(item.operation.operationId, item);
+      return item;
     });
-    for (const item of pending) record.pending.set(item.operation.operationId, item);
+    if (buffered + staged.size > this.#options.maxBufferedOperations) {
+      throw new AgentSchedulerError('capacity_exceeded', '未消费异步操作已达上限，请先处理已有结果。');
+    }
+    for (const [key, item] of staged) record.pending.set(key, item);
+    this.#persist(record);
     this.#armTimer(record);
     return Object.freeze(pending.map((item) => Object.freeze({
       operation: item.operation, signal: item.controller.signal,
@@ -210,9 +257,55 @@ class Scheduler implements AgentScheduler {
     record.agent.transition(AgentState.READY);
     record.run = null;
     this.#running -= 1;
-    this.#queue.push(run.agentId);
-    this.#armTimer(record);
+    if (!record.suspension) this.#queue.push(run.agentId);
+    this.#persist(record);
+    this.#reconcile(record);
     this.#signalReady();
+  }
+
+  suspend(agentId: AgentId, suspension: AgentSuspension): void {
+    const record = this.#record(agentId);
+    nonempty(suspension.reason, 'reason');
+    if (suspension.resumeAt !== null) positiveInteger(suspension.resumeAt, 'resumeAt');
+    record.suspension = Object.freeze({ ...suspension });
+    const index = this.#queue.indexOf(agentId);
+    if (index >= 0) this.#queue.splice(index, 1);
+    if (!record.run) {
+      if (record.agent.getState() === AgentState.SLEEPING) record.agent.transition(AgentState.READY);
+      if (record.agent.getState() !== AgentState.BLOCKED) record.agent.transition(AgentState.BLOCKED);
+    }
+    this.#persist(record);
+    this.#armTimer(record);
+  }
+
+  resume(agentId: AgentId): void {
+    const record = this.#record(agentId);
+    if (!record.suspension) return;
+    record.suspension = null;
+    if (record.agent.getState() === AgentState.BLOCKED) record.agent.transition(AgentState.READY);
+    if (record.batch && !record.run) this.#queue.push(agentId);
+    else if (!record.batch) record.continuation = true;
+    this.#reconcile(record);
+  }
+
+  operationHandle(operation: AsyncOperation): AsyncOperationHandle | undefined {
+    const item = this.#record(operation.agentId).pending.get(operation.operationId);
+    return item?.operation.originRunId === operation.originRunId
+      ? { operation: item.operation, signal: item.controller.signal } : undefined;
+  }
+
+  cancelOperations(agentId: AgentId, reason: string): void {
+    const record = this.#record(agentId);
+    const pending = [...record.pending.values()];
+    for (const item of pending) this.#recordResult(record, item, { type: 'cancelled', reason }, Date.now());
+    this.#reconcile(record);
+    for (const item of pending) item.controller.abort(new Error(reason));
+  }
+
+  close(): void {
+    this.#closed = true;
+    for (const record of this.#agents.values()) if (record.timer) clearTimeout(record.timer);
+    for (const waiter of this.#readyWaiters) waiter();
   }
 
   inspect(agentId: AgentId): AgentScheduleSnapshot {
@@ -223,11 +316,12 @@ class Scheduler implements AgentScheduler {
       completedResults: Object.freeze([...record.completed.values()]),
       pendingEvents: Object.freeze([...record.events.values()]),
       queuedBatch: record.run ? null : record.batch,
-      running: record.run, batchDueAt: record.batchDueAt,
+      running: record.run, batchDueAt: record.batchDueAt, suspension: record.suspension,
     });
   }
 
   #record(agentId: AgentId): AgentRecord {
+    this.#available();
     const record = this.#agents.get(agentId);
     if (!record) throw new AgentSchedulerError('unknown_agent', 'Agent 尚未注册。');
     return record;
@@ -253,6 +347,22 @@ class Scheduler implements AgentScheduler {
   }
 
   #reconcile(record: AgentRecord): void {
+    if (record.suspension) {
+      if (record.suspension.resumeAt !== null && record.suspension.resumeAt <= Date.now()) {
+        this.resume(record.agent.agentId);
+        return;
+      }
+      if (!record.run) {
+        if (record.agent.getState() === AgentState.SLEEPING) record.agent.transition(AgentState.READY);
+        if (record.agent.getState() !== AgentState.BLOCKED) record.agent.transition(AgentState.BLOCKED);
+      }
+      this.#persist(record);
+      this.#armTimer(record);
+      return;
+    }
+    if (record.batch && !record.run && record.agent.getState() !== AgentState.READY) {
+      record.agent.transition(AgentState.READY);
+    }
     // READY 和 RUNNING 都占有同一封存批次；期间只允许往新收集容器追加。
     if (!record.batch) {
       const hasResults = record.completed.size > 0;
@@ -265,6 +375,7 @@ class Scheduler implements AgentScheduler {
         if (record.agent.getState() !== next) record.agent.transition(next);
       }
     }
+    this.#persist(record);
     this.#armTimer(record);
     this.#signalReady();
   }
@@ -294,14 +405,23 @@ class Scheduler implements AgentScheduler {
     record.timer = null;
     let at = Number.POSITIVE_INFINITY;
     for (const pending of record.pending.values()) at = Math.min(at, pending.operation.deadline);
+    if (record.suspension?.resumeAt !== null && record.suspension?.resumeAt !== undefined) {
+      at = Math.min(at, record.suspension.resumeAt);
+    }
     // 已占用的批次不能再次入队。过期批处理时间保留到当前轮结束，避免零延时空转。
-    if (!record.batch && record.batchDueAt !== null) at = Math.min(at, record.batchDueAt);
+    if (!record.suspension && !record.batch && record.batchDueAt !== null) at = Math.min(at, record.batchDueAt);
     if (!Number.isFinite(at)) return;
-    record.timer = setTimeout(() => this.#onTimer(record), Math.min(2_147_483_647, Math.max(0, at - Date.now())));
-    record.timer.unref();
+    record.timer = setTimeout(() => {
+      try { this.#onTimer(record); }
+      catch (error) {
+        this.#failure ??= error instanceof Error ? error : new Error('调度定时恢复失败。');
+        for (const waiter of [...this.#readyWaiters]) waiter();
+      }
+    }, Math.min(2_147_483_647, Math.max(0, at - Date.now())));
   }
 
   #onTimer(record: AgentRecord): void {
+    if (this.#closed || this.#failure) return;
     record.timer = null;
     const now = Date.now();
     const expired: PendingOperation[] = [];
@@ -324,6 +444,39 @@ class Scheduler implements AgentScheduler {
       for (const ready of [...this.#readyWaiters]) ready();
     }
   }
+
+  #available(): void {
+    if (this.#closed) throw new AgentSchedulerError('invalid_state', '调度器已经关闭。');
+    if (this.#failure) throw this.#failure;
+  }
+
+  #persist(record: AgentRecord): void {
+    if (!this.persistence) return;
+    try {
+      this.persistence.save({
+        ...this.inspect(record.agent.agentId), schemaVersion: 1,
+        continuation: record.continuation, recentEventIds: [...record.recentEvents],
+      });
+    } catch (error) {
+      this.#failure = error instanceof Error ? error : new Error('调度存储失败。');
+      for (const item of this.#agents.values()) if (item.timer) clearTimeout(item.timer);
+      for (const waiter of [...this.#readyWaiters]) waiter();
+      this.persistence.onError?.(this.#failure);
+      throw this.#failure;
+    }
+  }
+}
+
+function freezeJson<T>(input: T): T {
+  const copy = structuredClone(input);
+  const freeze = (value: unknown): void => {
+    if (value !== null && typeof value === 'object') {
+      Object.values(value).forEach(freeze);
+      Object.freeze(value);
+    }
+  };
+  freeze(copy);
+  return copy;
 }
 
 function positiveInteger(value: number, field: string): void {

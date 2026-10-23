@@ -89,6 +89,27 @@ describe('model requester public contract', () => {
     expect(requestBody(fetchImplementation)['tools']).toEqual([{ type: 'function', function: tool }]);
   });
 
+  it('按宿主声明禁用供应商并行工具生成，原有请求默认不添加此字段', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(response({ content: 'ok' }));
+    const requester = makeRequester(fetchImplementation);
+    await requester.request({ ...prompt, tools: [tool], toolChoice: 'required', parallelToolCalls: false });
+    expect(requestBody(fetchImplementation)['parallel_tool_calls']).toBe(false);
+  });
+
+  it('MiniMax显式思考配置映射到厂商请求，省略时不覆盖默认值', async () => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockImplementation(async () => response({ content: 'ok' }));
+    for (const thinking of ['disabled', 'adaptive', undefined] as const) {
+      const requester = createModelRequester({
+        provider: 'minimax', model: 'MiniMax-M3', apiKey: 'secret-test-key', fetchImplementation,
+        ...(thinking ? { thinking } : {}),
+      });
+      await requester.request(prompt);
+    }
+    expect(requestBody(fetchImplementation, 0)['thinking']).toEqual({ type: 'disabled' });
+    expect(requestBody(fetchImplementation, 1)['thinking']).toEqual({ type: 'adaptive' });
+    expect(requestBody(fetchImplementation, 2)).not.toHaveProperty('thinking');
+  });
+
   it('leaves all tool semantics, including OS-Agent control names, to the caller', async () => {
     const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(response({
       tool_calls: [{ ...nativeCall, function: { name: 'submit_agent_response', arguments: '{"arbitrary":true}' } }],
@@ -211,6 +232,27 @@ describe('model requester transport failures', () => {
     await expect(makeRequester(fetchImplementation).request(prompt)).rejects.toMatchObject({
       code: 'http_error', status, retryable, retryAfterMs: 4000,
       message: expect.not.stringContaining('secret-test-key'),
+    });
+    expect(fetchImplementation).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([429, 529])('HTTP %i 未给重试期限时至少等待30秒，不在数秒内耗尽重试', async (status) => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(json(
+      { error: { message: 'rate limited' } }, status,
+    ));
+    await expect(makeRequester(fetchImplementation).request(prompt)).rejects.toMatchObject({
+      code: 'http_error', status, retryable: true, retryAfterMs: 30_000,
+    });
+    expect(fetchImplementation).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { error: { code: '2056', message: 'Token Plan quota exhausted' } },
+    { error: { message: '已达到 Token Plan 用量上限：请升级或补充积分。 (2056)' } },
+  ])('HTTP429额度耗尽保留业务码，不能误判为可自动恢复的限流：%j', async (body) => {
+    const fetchImplementation = vi.fn<typeof fetch>().mockResolvedValue(json(body, 429, { 'retry-after': '4' }));
+    await expect(makeRequester(fetchImplementation).request(prompt)).rejects.toMatchObject({
+      code: 'http_error', status: 429, apiCode: 2056, retryable: false,
     });
     expect(fetchImplementation).toHaveBeenCalledTimes(1);
   });

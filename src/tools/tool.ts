@@ -3,6 +3,22 @@ import type { CapabilityInput } from '../capability/capability.js';
 
 export type ToolEffect = 'privileged' | 'read_only' | 'side_effect';
 
+/** 工具确认尚未开始副作用时抛出；普通执行异常仍须对账。 */
+export class ToolPreconditionError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'ToolPreconditionError';
+  }
+}
+
+/** 工具明确报告执行失败；此错误不证明副作用尚未开始。 */
+export class ToolExecutionError extends Error {
+  constructor(readonly code: string, message: string, readonly result: JsonValue) {
+    super(message);
+    this.name = 'ToolExecutionError';
+  }
+}
+
 export type ToolExecutionContext = {
   taskId: string;
   signal: AbortSignal;

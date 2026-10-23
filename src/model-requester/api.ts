@@ -1,6 +1,6 @@
 import type { JsonObject, JsonValue } from '../types/json.js';
 
-export type ModelVendor = 'minimax' | 'anthropic' | 'openai' | 'gemini';
+export type ModelVendor = 'minimax' | 'deepseek' | 'anthropic' | 'openai' | 'gemini';
 
 export type ModelContentPart =
   | { type: 'text'; text: string }
@@ -47,6 +47,8 @@ export type ModelCompletionRequest = {
   messages: readonly ModelMessage[];
   tools?: readonly ModelToolDefinition[];
   toolChoice?: 'auto' | 'none' | 'required' | { name: string };
+  /** 供应商支持时禁止同轮生成多个工具调用；实际执行仍需协议校验。 */
+  parallelToolCalls?: boolean;
   maxOutputTokens?: number;
   temperature?: number;
 };
@@ -92,9 +94,23 @@ type RequesterConnectionOptions = {
 };
 
 export type ModelRequesterOptions = RequesterConnectionOptions & (
-  | { provider: 'minimax'; apiKey: string }
-  | { provider: Exclude<ModelVendor, 'minimax'>; apiKey?: string }
+  | { provider: 'minimax'; apiKey: string; thinking?: 'adaptive' | 'disabled' }
+  | { provider: 'deepseek'; apiKey: string; thinking?: 'enabled' | 'disabled'; reasoningEffort?: 'high' | 'max' }
+  | { provider: Exclude<ModelVendor, 'minimax' | 'deepseek'>; apiKey?: string }
 );
+
+export type ConnectedModelVendor = 'minimax' | 'deepseek';
+export type ModelCatalog = {
+  provider: ConnectedModelVendor;
+  source: 'api' | 'builtin';
+  models: readonly { id: string; label: string }[];
+};
+export type ModelCatalogOptions = {
+  provider: ConnectedModelVendor;
+  apiKey?: string;
+  timeoutMs?: number;
+  fetchImplementation?: typeof fetch;
+};
 
 export type ModelRequesterErrorCode =
   | 'invalid_request'
@@ -106,6 +122,11 @@ export type ModelRequesterErrorCode =
   | 'timeout'
   | 'not_implemented';
 
+export type ModelProtocolReason = 'missing_tool_calls' | 'unexpected_tool' | 'duplicate_call_id' |
+  'invalid_arguments' | 'invalid_envelope';
+
+export type ModelRequestReason = 'invalid_tool_schema' | 'invalid_tool_history' | 'context_length_exceeded';
+
 export class ModelRequesterError extends Error {
   readonly code: ModelRequesterErrorCode;
   readonly provider: ModelVendor;
@@ -113,6 +134,8 @@ export class ModelRequesterError extends Error {
   readonly status: number | undefined;
   readonly retryAfterMs: number | undefined;
   readonly apiCode: number | undefined;
+  readonly protocolReason: ModelProtocolReason | undefined;
+  readonly requestReason: ModelRequestReason | undefined;
 
   constructor(
     message: string,
@@ -123,6 +146,8 @@ export class ModelRequesterError extends Error {
       status?: number;
       retryAfterMs?: number;
       apiCode?: number;
+      protocolReason?: ModelProtocolReason;
+      requestReason?: ModelRequestReason;
     },
   ) {
     super(message);
@@ -133,5 +158,7 @@ export class ModelRequesterError extends Error {
     this.status = options.status;
     this.retryAfterMs = options.retryAfterMs;
     this.apiCode = options.apiCode;
+    this.protocolReason = options.protocolReason;
+    this.requestReason = options.requestReason;
   }
 }

@@ -246,6 +246,7 @@ export {
   ToolNotFoundError,
   ToolRegistry,
 } from './tools/tool-registry.js';
+export { ToolPreconditionError, ToolExecutionError } from './tools/tool.js';
 export type {
   Tool,
   ToolEffect,

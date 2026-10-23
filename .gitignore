@@ -3,7 +3,12 @@ dist/
 out/
 release/
 .desktop-runtime/
+.desktop-next-runtime/
+.server-runtime/
+server.config.json
 .tmp/
+.dbg/
+debug-*.md
 coverage/
 .DS_Store
 .env

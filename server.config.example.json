@@ -1,0 +1,40 @@
+{
+  "database": ".server-runtime/runtime.sqlite",
+  "host": "127.0.0.1",
+  "port": 8787,
+  "tokenSettings": {
+    "maxRequestTokens": 500000,
+    "maxOutputTokens": 32768,
+    "tokensPerMinute": 2000000,
+    "maxTotalTokens": 10000000,
+    "contextMaxTokens": 140000,
+    "contextCompactAtTokens": 100000,
+    "contextTargetTokens": 50000
+  },
+  "workspaces": {
+    "demo": "./workspace"
+  },
+  "profiles": {
+    "reporter": {
+      "workspaceId": "demo",
+      "character": "developer",
+      "instructions": [
+        "读取已有资料，生成可追溯的报告；完成后逐层总结并等待新任务。"
+      ],
+      "capabilities": [
+        {
+          "capability": "file.read",
+          "scope": { "kind": "subtree", "resource": "workspace://current/" }
+        },
+        {
+          "capability": "directory.read",
+          "scope": { "kind": "subtree", "resource": "workspace://current/" }
+        },
+        {
+          "capability": "file.create",
+          "scope": { "kind": "subtree", "resource": "workspace://current/" }
+        }
+      ]
+    }
+  }
+}

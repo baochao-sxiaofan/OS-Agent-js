@@ -1,113 +1,134 @@
-# Agent context
+# 三级上下文管理
 
-Public entry: `os-agent-js/agent-context` after `npm run build`.
-Repository consumers import `src/agent-context/index.ts`.
+公共入口：`os-agent-js/agent-context`。本模块保存任务、语义记忆、待总结阶段和
+收件箱，提供运行时校验与原子持久化；不依赖 scheduler、模型厂商或旧 TCB。
+模型请求由 [`agent-round`](../agent-round/README.md) 编排。
 
-This module defines data only. `api.ts` declares read-only, JSON-persistable
-snapshots; `index.ts` exports only those public types. There is no manager,
-factory, state transition function, prompt builder, summarization request,
-storage implementation or TCB adapter yet.
-
-## Three frames
-
-| Field | Current task | Its own task chain | Lifetime |
+| 层级 | 当前任务 | 自身任务链 | 生命周期 |
 | --- | --- | --- | --- |
-| `level1` | Host-defined ongoing role | Dispatches tasks to level 2 | Persistent root |
-| `level2` | Reference to the selected level 1 task | Dispatches tasks to level 3 | Retained until the stage ends |
-| `level3` | Reference to the selected level 2 task | Executes steps locally | Retained until the execution ends |
+| L1 | 宿主提供的长期职责 | 向 L2 派发阶段 | 永久保留 |
+| L2 | 引用 L1 当前任务及计划版本 | 向 L3 派发工作 | 完成总结后归档释放 |
+| L3 | 引用 L2 当前任务及计划版本 | 在本层执行步骤 | 完成总结后归档释放 |
 
-Each frame contains `currentTask`, `taskChain`, `memory` and `budget`.
-`level1` also has host-controlled `instructions`. Planning and summarization
-must not rewrite those instructions, the root role, or ACB identity/permissions.
-The root task is an ongoing responsibility, so it has no completion state.
+三层属于同一个 Agent。当前只支持一条活跃层级链，不包含并行阶段、挂起栈或第四层。
+父任务状态只保存在父层任务链中，子层通过版本引用访问，避免双份状态漂移。
 
-The lower frames can be `null` before work is dispatched or after results have
-been returned. The `AgentContext` union prevents level 3 from existing without
-level 2. A waiting or sleeping Agent can still retain unfinished frames;
-sleeping never means deleting its work context.
+## 创建与恢复
 
-These frames belong to one Agent. They do not create child Agents.
+```ts
+import {
+  createAgentContextManager,
+  restoreAgentContextManager,
+  SqliteContextStore,
+} from 'os-agent-js/agent-context';
 
-## Task ownership and planning
+const store = new SqliteContextStore('./agent-context.sqlite');
+const budget = {
+  maxTokens: 20_000, compactAtTokens: 15_000, targetTokens: 8_000, maxTasks: 12,
+};
+const context = createAgentContextManager({
+  key: 'agent-1', store,
+  instructions: ['遵守宿主工作规则。'],
+  objective: '持续处理用户委托',
+  policy: {
+    budgets: { 1: budget, 2: budget, 3: budget },
+    maxSummaryAttempts: 3, maxInbox: 32, maxDeliveryBytes: 10_000,
+  },
+});
 
-A chain stores the task definition and its authoritative state exactly once.
-Its `currentTaskId` selects an entry in `tasks`. The child frame's `currentTask`
-is a `ContextTaskRef` containing the parent's frame ID, plan revision and task
-ID. The future manager resolves that reference to construct model input; a
-child does not own a second copy of the parent task's state.
+// 重启时使用同一 key 和存储，不再次 create。
+const restored = restoreAgentContextManager({ key: 'agent-1', store });
+```
 
-Chains are sequential. Array order determines execution order, with no fixed
-business node types and no parallel DAG scheduling in this protocol.
+这些数值是示例，创建时必须由宿主明确提供。内部身份由管理器生成；测试可注入
+`createId`。每个 Agent 只应有一个活跃管理器和一个轮次执行器。存储比较检查点版本，
+拒绝陈旧实例覆盖新状态；恢复出来的实例用于替换旧实例。
 
-- `WAITING -> RUNNING -> COMPLETED` describes ordinary task progress.
-- `COMPLETED` carries a `ContextSummary`. The Agent's completion judgment is
-  trusted; there is no extra semantic verification stage.
-- A replan records a reason and optional partial result, interrupts the current
-  task and supersedes unexecuted tasks. Completed results remain in the archived
-  revision. `ContextReplan.previousPlanRef` identifies that revision.
-- Both normal chain completion and replan return the chain to `PLANNING`.
-  `currentTaskId` is then `null`; `EXECUTING` requires a selected task ID.
-- Revision `0` means no plan has been installed. Installed plans use increasing
-  positive revisions. Old references must not bind to a replacement plan.
-- Levels 1 and 2 target the next level. Level 3 targets `'local'`: its steps may
-  involve multiple tool calls, but never allocate a fourth context frame.
+`snapshot()` 返回 `AgentContext` 独立副本；`checkpoint()` 还包含策略、待总结信息、
+收件箱和版本。恢复前校验 JSON 结构、跨层引用、预算与阶段。
+ACB 使用 `createAgentControlBlock(initial, context)` 绑定只读快照端口，
+避免 ACB 独立保存一份过期 Context。
 
-Task state and ACB scheduling state have different lifetimes. For example, a
-task stays `RUNNING` while the Agent is `BLOCKED` waiting for a tool.
+## 任务动作
 
-If a frame's decomposition is wrong, it replans its own chain. If its assigned
-task is itself infeasible, it returns the reason and partial result to its
-parent; it cannot replan the parent's chain directly. Command signatures and
-the transition implementation are deferred.
+`apply(roundKey, cursor, decision, entries?)` 原子提交普通轮语义结果。
+`cursor()` 由宿主保存，不能进入模型提示词。`roundKey` 使用调度批次的稳定 ID，
+重试成功轮次时读取回执，不重复提交。
 
-## Memory and summaries
+| 动作 | 行为 |
+| --- | --- |
+| `plan` | 安装非空有序计划，生成任务身份；拒绝覆盖未完成任务 |
+| `replan` | 归档旧计划，运行项转为 INTERRUPTED，等待项转为 SUPERSEDED，提升版本 |
+| `advance` | 选取下一个 WAITING 任务；L1/L2 创建子层，L3 留在本层 |
+| `step_completed` | 完成 L3 的一个 RUNNING 步骤并保存结果，不释放本层 |
+| `complete` | L2/L3 当前目标完成，进入待总结；任务链必须无未完成项 |
+| `interrupt` | 携带原因进入总结，向父层返回 INTERRUPTED 与部分结果 |
+| `compact` | 未完成目标的同层压缩，不改变未完成任务及身份 |
+| `idle` | L1 工作结束，进入空闲总结；长期职责和宿主指令始终保留 |
+| `continue` / `wait` | 继续普通处理或等待；轮次执行器要求 wait 有在途操作 |
 
-`ContextMemory` separates a compact `summary`, retained `lessons`, recent
-semantic records and a reference to full stored history. `ContextEntry` covers
-user/assistant messages, external events, tool calls/results and explicitly
-labeled observations. Large tool output and attachments should be referenced.
+动作只能作用于最深活跃层。子层不能修改父层计划、根层指令、预算或 ACB 权限。
+`createContextView()` 去除任务、帧与计划版本身份，只保留模型需要的语义数据。
+普通轮可以包含多次工具工作的语义记录，实际工具执行和幂等键由宿主执行模块管理。
 
-`ContextSummary` contains the outcome, facts or hypotheses, decisions, artifact
-references, unresolved issues, next responsibilities and lesson candidates.
-Sources are references for recall and provenance, not a completion gate.
-Summarizing a hypothesis repeatedly does not turn it into a confirmed fact;
-retained experience does not become an authoritative system instruction.
+## 独立总结轮
 
-When a frame completes its current task, it summarizes itself and returns the
-result to its parent. The parent incorporates the relevant result into its own
-memory and progresses its chain. Completing one local step need not discard
-the entire frame. Capacity-triggered compaction uses the same summary shape
-without marking a task complete.
+```text
+普通 AgentRun：业务结果 → complete / idle → 持久化待总结 → finishRun(continue)
+下一 AgentRun：只请求总结 → 校验 → 原子归档并回传 → finishRun(continue / idle)
+```
 
-Level 1 retains bounded long-term memory. Level 2 persists across model requests,
-sleep and process restarts until its stage ends. Level 3 persists while work
-is unfinished, then returns a summary and leaves active context. Finished
-frames and original history can be archived without reinserting every record
-into future model input. Business records owned by a communication system
-remain there; context can keep references and temporary relevant excerpts.
+`PendingContextSummary` 保存目的、来源快照引用、允许引用集合、计划版本及尝试次数。
+源场景封存后，新的输入只进入收件箱。请求前调用 `beginSummaryAttempt()` 持久化次数；
+失败记录错误并保留现场。重试上限到达后抛出 `retry_exhausted`，由宿主处理，不能
+吞错无限重试或错误地标记休眠。
 
-Vendor-private reasoning and `ModelContinuation` are not semantic context.
-They remain outside this protocol, managed by the model transport/replay
-boundary. This module does not import `ModelMessage`, the old `ContextItem`,
-`TaskControlBlock`, scheduler, or model providers.
+可信宿主可用 `configureBudget()` 修改各层容量，任务与原文保持不变；待总结场景会
+另行封存新的预算版本，旧引用不可覆盖。宿主显式恢复可调用 `retrySummary()` 重开有限
+尝试，自动重试不得重置计数。Runtime 的 resume 会同时归档旧失败响应并重建请求，
+不跳回业务轮；在线设置与服务器配置见[使用说明](../../docs/server-runtime.md)。
 
-## Bounds and compatibility
+`commitSummary()` 校验结构、来源、版本和预算，不增加额外的语义验收模型。
+成功时在同一事务中写入摘要、更新父层任务结果、释放子层和保存轮次回执。
+父层下一普通轮读取子层结果，决定继续派发、规划还是结束自己的目标。
+根层空闲总结成功且收件箱为空时，Context 才返回无继续工作。
 
-Each frame supplies `maxTokens`, `compactAtTokens`, `targetTokens` and `maxTasks`.
-They cover the frame's tasks, results, instructions and active memory. A future
-manager must compact before the hard limit, archive old chains, and enforce
-`targetTokens < compactAtTokens < maxTokens`. A future prompt builder must
-separately enforce the total model budget including inherited context, tools
-and output allowance.
+总结包含结果、事实或假设、决定、产物、未决项、后续责任和可选经验。
+事实要求来源；所有引用必须来自封存集合，不能虚构引用。
+管理器不判断事实在业务上是否正确，也不自动提升假设或将候选经验写入宿主指令。
+总结输出不得带额外字段；`ModelContinuation` 和厂商私有推理不写入语义上下文。
 
-These are declarations, not runtime guarantees. Reference integrity, sequential
-execution, revision monotonicity, numeric bounds and read-only enforcement
-at runtime will require the future manager. No default numeric limits or LLM
-call policy are imposed here.
+## 输入与完整历史
 
-ACB imports this public contract directly. Existing task-oriented context
-management remains independent and unchanged; no compatibility adapter connects
-the two structures yet.
+来源系统先持久保存消息，再调用 scheduler.notify。编排层解析封存事件和工具结果，
+转换为 `ContextDelivery` 并调用 `receive()`。每项提供稳定键与语义记录；
+针对任务的结果必须携带操作发起时的 `ContextCursor`，默认目标为根层。
 
-See [the checked three-level example](../../examples/agent-context.ts) for an
-ACB whose frames reference each other's tasks. `npm run check` type-checks it.
+投递记录、去重键和收件箱同事务保存。重复键不重复加入，重复键绑定不同正文会报错。
+`prepare()` 只把属于当前执行层的输入加入近期记忆，祖先输入等待该层重新获得执行权。
+旧版本或已释放帧的结果作为 `stale_context_input` 引用交给根层，不直接写入新计划。
+大内容应先存为外部产物，用附件或观察来源引用传入；超限时来源系统保留并重投。
+
+`historyRef` 链接历史快照和摘要来源。计划替换、压缩、释放子层均保留原始历史；
+完整记录与有界活跃记忆分离。外部存储随历史增长，当前没有自动删除或保留期策略。
+
+## 容量、持久化与边界
+
+各层强制满足 `targetTokens < compactAtTokens < maxTokens` 及任务数量上限。
+当前用 JSON 的 UTF-8 字节数做保守 Token 估算，不是模型 tokenizer 的精确计数。
+`prepare()` 达到阈值后安排压缩；压缩后整层必须回到目标容量，否则拒绝提交并保留场景。
+不能压缩的超大指令、任务或单条内容需要宿主缩小输入；不会静默截断。
+父层吸收总结也必须满足硬上限，过长总结会被拒绝。完整请求还由编排层检查输入、
+工具定义和输出预留容量。
+
+`InMemoryContextStore` 适合演示；`SqliteContextStore` 使用 SQLite 事务、WAL、
+FULL 同步与检查点版本比较。它们原子保存检查点、追加记录和轮次回执。
+内存状态只在存储成功后发布。自定义 `ContextStore` 必须遵守同步原子提交约定。
+
+恢复后保留待总结、来源和次数；宿主应将有继续工作的 Agent 重新登记为 READY。
+本模块不恢复 scheduler 的在途操作、定时器、供应商准入配额，也不提供业务副作用的
+跨进程恰好一次执行。工具执行模块仍需稳定幂等键及自己的恢复协议。
+旧 `TaskControlBlock` 与桌面运行链路保持独立。
+
+运行完整演示：`npm run demo:agent-context`。实现按任务、总结、收件箱、校验、存储拆分，
+入口管理器只负责协调和事务发布。

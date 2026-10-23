@@ -26,6 +26,12 @@ export type CharacterDefinition = {
    */
   visibleToolIds: readonly string[];
   /**
+   * 长期 Runtime 是否允许模型安装或重建计划，默认允许。
+   *
+   * 简单文件或消息角色可禁用规划并直接工作；恢复时仍可完成已存在的任务链。
+   */
+  allowPlanning?: boolean;
+  /**
    * 该角色允许持有的能力名称上限。
    *
    * 父 Agent 转授或角色运行时申请的能力必须落在此集合内；资源范围仍由委派

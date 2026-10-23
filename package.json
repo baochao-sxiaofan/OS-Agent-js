@@ -1,6 +1,6 @@
 {
   "name": "os-agent-js",
-  "version": "2.2.1",
+  "version": "3.0.0",
   "private": true,
   "description": "An operating-system-inspired runtime and scheduler for LLM agent tasks.",
   "type": "module",
@@ -23,9 +23,25 @@
       "types": "./dist/agent-context/index.d.ts",
       "import": "./dist/agent-context/index.js"
     },
+    "./agent-round": {
+      "types": "./dist/agent-round/index.d.ts",
+      "import": "./dist/agent-round/index.js"
+    },
     "./agent-scheduler": {
       "types": "./dist/agent-scheduler/index.d.ts",
       "import": "./dist/agent-scheduler/index.js"
+    },
+    "./agent-runtime": {
+      "types": "./dist/agent-runtime/index.d.ts",
+      "import": "./dist/agent-runtime/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./integrations": {
+      "types": "./dist/integrations/index.d.ts",
+      "import": "./dist/integrations/index.js"
     }
   },
   "files": [
@@ -33,21 +49,33 @@
     "README.md"
   ],
   "workspaces": [
-    "desktop"
+    "desktop",
+    "desktop-next"
   ],
   "scripts": {
     "benchmark:multi-agent": "tsx bench/multi-agent-runtime.ts",
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
+    "check:architecture": "node scripts/check-architecture.mjs",
+    "server": "node dist/server/main.js",
+    "server:dev": "tsx src/server/main.ts",
     "desktop:build": "npm run build --workspace @os-agent/desktop",
     "desktop:check": "npm run check --workspace @os-agent/desktop",
     "desktop:dev": "npm run dev --workspace @os-agent/desktop",
+    "desktop:next:dev": "npm run dev --workspace @os-agent/desktop-next",
+    "desktop:next:build": "npm run build --workspace @os-agent/desktop-next",
+    "desktop:next:pack": "npm run pack --workspace @os-agent/desktop-next",
+    "desktop:next:check": "npm run check --workspace @os-agent/desktop-next",
+    "desktop:next:dist:win": "npm run dist:win --workspace @os-agent/desktop-next",
     "desktop:dist:win": "npm run dist:win --workspace @os-agent/desktop",
     "demo": "tsx examples/basic-runtime.ts",
     "demo:gemini": "tsx examples/gemini-network.ts",
     "demo:gemini:multi-agent": "tsx examples/gemini-multi-agent.ts",
     "demo:hierarchy": "tsx examples/hierarchical-runtime.ts",
     "demo:agent-scheduler": "tsx examples/agent-scheduler.ts",
+    "demo:agent-context": "tsx examples/agent-context-rounds.ts",
+    "test:novel:live": "tsx examples/novel-live-validation.ts",
+    "test:novel:soak": "tsx examples/novel-collaboration-soak.ts",
     "demo:model-requester": "tsx examples/model-requester.ts",
     "test": "vitest run"
   },
@@ -59,5 +87,10 @@
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   }
 }

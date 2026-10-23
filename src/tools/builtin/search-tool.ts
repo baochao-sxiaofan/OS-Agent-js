@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { CapabilityInput } from '../../capability/capability.js';
@@ -13,14 +13,14 @@ const SKIP_DIRECTORIES = new Set(['node_modules', '.git', 'dist', 'out']);
 /**
  * 在工作区内做纯文本子串搜索，返回命中文件、行号和该行内容。
  *
- * 只读能力，作用范围锁定在传入的目录别名子树内；跳过依赖和构建产物目录以控制
+ * 只读能力，作用范围锁定在传入的文件或目录别名内；跳过依赖和构建产物目录以控制
  * 结果规模。
  */
 export const workspaceSearchTool: Tool = {
   name: 'workspace.search',
   description: [
     'Search workspace files for a literal substring.',
-    'Input: { query, path? }. Returns matching file/line/text entries.',
+    'Input: { query, path? }; path may identify a file or directory. Returns matching file/line/text entries.',
   ].join(' '),
   inputSchema: {
     type: 'object',
@@ -81,6 +81,23 @@ export const workspaceSearchTool: Tool = {
     const query = String(input['query']);
     const matches: Array<{ path: string; line: number; text: string }> = [];
 
+    const searchFile = async (hostPath: string): Promise<void> => {
+      await resolver.assertResolvedInsideRoot(hostPath);
+      let content: string;
+      try {
+        content = await readFile(hostPath, 'utf8');
+      } catch {
+        return;
+      }
+      const lines = content.split(/\r?\n/u);
+      for (let index = 0; index < lines.length; index += 1) {
+        const text = lines[index];
+        if (text !== undefined && text.includes(query)) {
+          matches.push({ path: resolver.toAliasPath(hostPath), line: index + 1, text: text.slice(0, 400) });
+          if (matches.length >= MAX_MATCHES) break;
+        }
+      }
+    };
     const walk = async (directory: string): Promise<void> => {
       if (matches.length >= MAX_MATCHES) {
         return;
@@ -100,31 +117,14 @@ export const workspaceSearchTool: Tool = {
         if (!entry.isFile()) {
           continue;
         }
-        const hostPath = join(directory, entry.name);
-        let content: string;
-        try {
-          content = await readFile(hostPath, 'utf8');
-        } catch {
-          continue;
-        }
-        const lines = content.split(/\r?\n/u);
-        for (let index = 0; index < lines.length; index += 1) {
-          const text = lines[index];
-          if (text !== undefined && text.includes(query)) {
-            matches.push({
-              path: resolver.toAliasPath(hostPath),
-              line: index + 1,
-              text: text.slice(0, 400),
-            });
-            if (matches.length >= MAX_MATCHES) {
-              break;
-            }
-          }
-        }
+        await searchFile(join(directory, entry.name));
       }
     };
 
-    await walk(hostRoot);
+    const target = await stat(hostRoot);
+    if (target.isFile()) await searchFile(hostRoot);
+    else if (target.isDirectory()) await walk(hostRoot);
+    else throw new Error('workspace.search path must identify a file or directory.');
     return {
       query,
       truncated: matches.length >= MAX_MATCHES,

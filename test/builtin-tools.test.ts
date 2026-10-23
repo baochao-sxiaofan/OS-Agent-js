@@ -98,6 +98,22 @@ describe('builtin workspace tools', () => {
     expect(read.content).toBe('first line');
   });
 
+  it('区分UTF-8字节、UTF-16字符和汉字数量，覆盖中文与表情', async () => {
+    const path = `${CURRENT_WORKSPACE_RESOURCE}counts.txt`;
+    const created = await run(fileCreateTool, { path, content: '小白A🐰\n' }, workspace);
+    expect(created).toMatchObject({ bytesWritten: 12, charactersWritten: 6, chineseCharactersWritten: 2 });
+    expect(readFileSync(join(workspace, 'counts.txt')).byteLength).toBe(12);
+    const overwritten = await run(fileWriteTool, { path, content: '编辑小黑\n' }, workspace);
+    expect(overwritten).toMatchObject({ bytesWritten: 13, charactersWritten: 5, chineseCharactersWritten: 4 });
+    const read = await run(fileReadTool, { path }, workspace);
+    expect(read).toMatchObject({ content: '编辑小黑\n', truncated: false, characters: 5, chineseCharacters: 4 });
+    expect(readFileSync(join(workspace, 'counts.txt')).byteLength).toBe(13);
+    const patched = await run(fileApplyPatchTool, { path, find: '小黑', replace: '小白🐰' }, workspace);
+    expect(patched).toMatchObject({ bytesWritten: 17, charactersWritten: 7, chineseCharactersWritten: 4 });
+    expect(readFileSync(join(workspace, 'counts.txt'), 'utf8')).toBe('编辑小白🐰\n');
+    expect(readFileSync(join(workspace, 'counts.txt')).byteLength).toBe(17);
+  });
+
   it('separates create from overwrite capabilities', async () => {
     writeFileSync(join(workspace, 'existing.txt'), 'old', 'utf8');
     await run(
@@ -194,6 +210,24 @@ describe('builtin workspace tools', () => {
     expect(search.matches[0]?.path).toBe(
       `${CURRENT_WORKSPACE_RESOURCE}a.txt`,
     );
+  });
+
+  it('搜索可指定单文件，只返回该文件的命中并保持工作区边界', async () => {
+    const path = `${CURRENT_WORKSPACE_RESOURCE}方案.md`;
+    writeFileSync(join(workspace, '方案.md'), '第一行\n赛程需要校对\n其他内容\n赛程修订完成', 'utf8');
+    writeFileSync(join(workspace, '其他.md'), '赛程不应被读取', 'utf8');
+    const result = await run(workspaceSearchTool, { query: '赛程', path }, workspace);
+    expect(result).toEqual({ query: '赛程', truncated: false, matches: [
+      { path, line: 2, text: '赛程需要校对' },
+      { path, line: 4, text: '赛程修订完成' },
+    ] });
+    const outside = `${workspace}-outside.md`;
+    writeFileSync(outside, '赛程机密', 'utf8');
+    symlinkSync(outside, join(workspace, '越界.md'));
+    try {
+      await expect(run(workspaceSearchTool, { query: '赛程', path: `${CURRENT_WORKSPACE_RESOURCE}越界.md` }, workspace))
+        .rejects.toThrow('escapes the workspace');
+    } finally { rmSync(outside, { force: true }); }
   });
 
   it('creates and deletes directories through explicit tools', async () => {

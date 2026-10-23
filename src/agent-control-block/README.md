@@ -81,10 +81,13 @@ const snapshot = agent.snapshot();
 
 `createAgentControlBlock(initial)` 复制初始数据并返回 `ManagedAgentControlBlock`。
 公开身份在运行时冻结；`snapshot()` 返回独立副本，修改副本不会改变内部数据。
+接入上下文管理时使用 `createAgentControlBlock(initial, contextManager)`；
+可选的 `AgentContextReader` 只提供 `snapshot()`，ACB 每次从该端口读取最新 Context，
+避免两份独立快照成为相互冲突的权威状态。身份、权限和调度状态写入能力不交给 Context。
 `getState()` 读取状态，`transition(next)` 按以下规则同步转换：
 
 - SLEEPING → READY。
-- READY → RUNNING。
+- READY → RUNNING、BLOCKED（暂停）。
 - RUNNING → READY、BLOCKED 或 SLEEPING。
 - BLOCKED → READY。
 
@@ -95,5 +98,5 @@ ACB 校验状态边，调度器依据队列、双 Map 和在途批次决定转�
 状态接口只能交给可信宿主组件，同一实例不得由多个调度器同时管理。
 
 `api.ts` 定义公共协议，`index.ts` 统一导出，内部实现不作为独立包路径暴露。
-这里尚未实现 Context 修改、请求消息转换、工作流执行、权限裁决、持久化或 TCB 适配。
-Context 仍是数据协议，其引用完整性、预算和内部任务状态由后续管理模块负责。
+Context 修改、引用完整性、预算、内部任务状态及持久化由独立的 Context Manager 负责，
+请求编排由 agent-round 负责。ACB 不实现权限裁决或 TCB 适配。

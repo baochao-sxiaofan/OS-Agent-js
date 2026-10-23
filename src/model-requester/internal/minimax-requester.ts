@@ -19,6 +19,7 @@ export class MiniMaxRequester implements ModelRequester {
   readonly #endpoint: string;
   readonly #timeoutMs: number;
   readonly #fetch: typeof fetch;
+  readonly #thinking: 'adaptive' | 'disabled' | undefined;
 
   constructor(options: Extract<ModelRequesterOptions, { provider: 'minimax' }>) {
     if (!options.apiKey?.trim() || !options.model?.trim()) {
@@ -31,6 +32,12 @@ export class MiniMaxRequester implements ModelRequester {
     this.#endpoint = `${(options.baseUrl ?? 'https://api.minimaxi.com/v1').replace(/\/+$/u, '')}/chat/completions`;
     this.#timeoutMs = options.timeoutMs ?? 180_000;
     this.#fetch = options.fetchImplementation ?? globalThis.fetch;
+    this.#thinking = options.thinking;
+    if (this.#thinking !== undefined && !['adaptive', 'disabled'].includes(this.#thinking)) {
+      throw new ModelRequesterError('thinking must be adaptive or disabled.', {
+        provider: 'minimax', code: 'invalid_request',
+      });
+    }
     if (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs <= 0) {
       throw new ModelRequesterError('timeoutMs must be a positive integer.', {
         provider: 'minimax', code: 'invalid_request',
@@ -42,7 +49,9 @@ export class MiniMaxRequester implements ModelRequester {
     if (signal?.aborted) throw aborted('cancelled');
     let body: string;
     try {
-      body = JSON.stringify(encodeRequest(request, this.model));
+      // 厂商专属配置留在请求边界；省略时沿用供应商默认行为。
+      body = JSON.stringify({ ...encodeRequest(request, this.model),
+        ...(this.#thinking ? { thinking: { type: this.#thinking } } : {}) });
     } catch (error) {
       if (error instanceof ModelRequesterError) throw error;
       throw new ModelRequesterError('Request must contain valid, JSON-serializable model messages.', {
@@ -90,13 +99,18 @@ export class MiniMaxRequester implements ModelRequester {
   }
 
   private httpError(response: Response, body?: unknown): ModelRequesterError {
-    const retryAfterMs = retryAfterMilliseconds(response.headers.get('retry-after'));
+    // 限流或过载时避免在数秒内耗尽所有重试；服务端明确给出的期限优先。
+    const apiCode = errorApiCode(body);
+    const retryable = apiCode !== 2056 &&
+      ([408, 409, 425, 429].includes(response.status) || response.status >= 500);
+    const retryAfterMs = apiCode === 2056 ? undefined : retryAfterMilliseconds(response.headers.get('retry-after'))
+      ?? ([429, 529].includes(response.status) ? 30_000 : undefined);
     const message = errorMessage(body);
     return new ModelRequesterError(
       `MiniMax request failed with HTTP status ${response.status}.${message ? ` ${this.redact(message)}` : ''}`,
       {
         provider: 'minimax', code: 'http_error', status: response.status,
-        retryable: [408, 409, 425, 429].includes(response.status) || response.status >= 500,
+        retryable, ...(apiCode === undefined ? {} : { apiCode }),
         ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       },
     );
@@ -135,6 +149,20 @@ function errorMessage(value: unknown): string | undefined {
   if (isObject(error) && typeof error['message'] === 'string') return error['message'];
   const base = value['base_resp'];
   return isObject(base) && typeof base['status_msg'] === 'string' ? base['status_msg'] : undefined;
+}
+
+function errorApiCode(value: unknown): number | undefined {
+  if (!isObject(value)) return undefined;
+  const base = value['base_resp'];
+  const error = value['error'];
+  for (const code of [isObject(base) ? base['status_code'] : undefined, isObject(error) ? error['code'] : undefined]) {
+    if (typeof code === 'number' && Number.isSafeInteger(code) && code > 0) return code;
+    if (typeof code === 'string' && /^\d+$/u.test(code) && Number.isSafeInteger(Number(code)) && Number(code) > 0) {
+      return Number(code);
+    }
+  }
+  // Token Plan 有时仅在 HTTP 429 文案末尾附业务码，2056 表示额度耗尽而非临时限流。
+  return /\(2056\)\s*$/u.test(errorMessage(value) ?? '') ? 2056 : undefined;
 }
 
 function retryAfterMilliseconds(value: string | null): number | undefined {

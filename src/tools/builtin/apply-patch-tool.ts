@@ -4,6 +4,7 @@ import type { CapabilityInput } from '../../capability/capability.js';
 import { CURRENT_WORKSPACE_RESOURCE } from '../../capability/workspace-capabilities.js';
 import type { JsonValue } from '../../types/json.js';
 import type { Tool, ToolExecutionContext } from '../tool.js';
+import { ToolPreconditionError } from '../tool.js';
 import { WorkspaceResolver } from '../workspace-fs.js';
 
 /**
@@ -66,11 +67,12 @@ export const fileApplyPatchTool: Tool = {
     const find = String(input['find']);
     const firstIndex = original.indexOf(find);
     if (firstIndex === -1) {
-      throw new Error('file.apply_patch found no match for `find`.');
+      throw new ToolPreconditionError('patch_no_match',
+        'file.apply_patch found no match for `find`，未执行写入。请读取最新文件，精确复制要替换的原文。');
     }
     if (original.indexOf(find, firstIndex + find.length) !== -1) {
-      throw new Error(
-        'file.apply_patch matched `find` more than once; make it unique.',
+      throw new ToolPreconditionError('patch_ambiguous',
+        'file.apply_patch matched `find` more than once，未执行写入。请增加上下文使匹配唯一。',
       );
     }
     const updated =
@@ -83,7 +85,9 @@ export const fileApplyPatchTool: Tool = {
     return {
       path: String(input['path']),
       replaced: true,
-      bytesWritten: updated.length,
+      bytesWritten: Buffer.byteLength(updated, 'utf8'),
+      charactersWritten: updated.length,
+      chineseCharactersWritten: (updated.match(/\p{Script=Han}/gu) ?? []).length,
     };
   },
 };

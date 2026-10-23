@@ -2,6 +2,7 @@
 export { AgentState, InvalidAgentTransitionError } from './api.js';
 export { canAgentTransition, createAgentControlBlock } from './internal/control-block.js';
 export type {
+  AgentContextReader,
   AgentControlBlock,
   AgentFilePermission,
   AgentId,
