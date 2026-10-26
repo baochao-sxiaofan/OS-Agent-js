@@ -4,7 +4,6 @@ import {
   type ContextCheckpoint, type ContextSummary,
 } from '../agent-context/index.js';
 import type { ModelCompletion, ModelCompletionRequest } from '../model-requester/index.js';
-import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
 const summaryShape: ContextSummary = {
@@ -23,12 +22,6 @@ export function summaryRequest(checkpoint: ContextCheckpoint, maxOutputTokens: n
   const aliases = pending.allowedRefs.map((_, index) => `s${index}`);
   if (!aliases.length) throw new AgentContextError('invalid_state', '总结缺少授权来源。');
   const encodeRefs = new Map(pending.allowedRefs.map((ref, index) => [ref, aliases[index]!]));
-  const refs = z.array(z.enum(aliases as [string, ...string[]]));
-  const wireSchema = contextSummarySchema.extend({
-    sourceRefs: refs, artifactRefs: refs,
-    observations: z.array(contextSummarySchema.shape.observations.element.extend({ sourceRefs: refs })),
-    lessonCandidates: z.array(contextSummarySchema.shape.lessonCandidates.element.extend({ sourceRefs: refs })),
-  });
   return {
     messages: [
       { role: 'system', content: [
@@ -59,7 +52,7 @@ export function summaryRequest(checkpoint: ContextCheckpoint, maxOutputTokens: n
       }, (_key, value: unknown) => typeof value === 'string' ? encodeRefs.get(value) ?? value : value) },
     ],
     tools: [{ name: 'submit_summary', description: '提交本层总结，不执行任何业务副作用。',
-      parameters: zodToJsonSchema(wireSchema) as import('../types/json.js').JsonObject }],
+      parameters: zodToJsonSchema(contextSummarySchema, { $refStrategy: 'none' }) as import('../types/json.js').JsonObject }],
     toolChoice: { name: 'submit_summary' }, parallelToolCalls: false, maxOutputTokens,
   };
 }

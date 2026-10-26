@@ -19,6 +19,20 @@ function createManager() {
 }
 
 describe('CapabilityManager', () => {
+  it('normalizes the workspace root slash without widening a restricted directory grant', () => {
+    const manager = createManager();
+    const root = manager.issueRootGrants('reader', [{ capability: 'directory.read',
+      scope: { kind: 'subtree', resource: 'workspace://current/' } }], 10);
+    const restricted = manager.issueRootGrants('reader', [{ capability: 'directory.read',
+      scope: { kind: 'subtree', resource: 'workspace://current/drafts' } }], 10);
+    for (const resource of ['workspace://current', 'workspace://current/']) {
+      const request = [{ capability: 'directory.read', scope: { kind: 'exact' as const, resource } }];
+      expect(manager.check(root, request, 20).allowed).toBe(true);
+      expect(manager.check(restricted, request, 20).allowed).toBe(false);
+    }
+    expect(manager.check(root, [{ capability: 'directory.read',
+      scope: { kind: 'exact', resource: 'workspace://other' } }], 20).allowed).toBe(false);
+  });
   it('creates a workspace-scoped root ceiling and only inherits root grants', () => {
     const manager = createManager();
     const workspaceRequests = createWorkspaceCapabilityRequests();

@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -86,7 +87,7 @@ it('总结耗尽后提高容量、重启、显式继续可完成原总结，不�
     conversationPolicy: { quietMs: 1, maxWaitMs: 2 },
     requester: { provider: 'minimax', model: 'fake', async request(request) {
       const summary = request.tools?.some((tool) => tool.name === 'submit_summary');
-      const view = JSON.parse(String(request.messages[1]?.content)) as {
+      const view = readRuntimeRequest(request) as {
         sourceRef?: string; context?: { frames: object[] };
       };
       if (summary) {

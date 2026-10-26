@@ -59,7 +59,7 @@ Raw network/provider error bodies are not exposed to the caller.
 
 The live thinking API rejects `tool_choice: 'required'` and named choices.
 For `required`, the adapter sends `auto` while preserving thinking. Named choices
-(such as a summary submission) expose only that tool and use non-thinking mode
+(such as a summary submission) retain the declared tool catalog and use non-thinking mode
 with the native forced choice, preserving the fixed output contract.
 The adapter verifies the original required/named contract before returning the
 completion. Missing or wrong tool calls raise retryable `invalid_response`; the

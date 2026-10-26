@@ -42,6 +42,8 @@ const responseSchema = z.object({
     prompt_tokens: z.number().int().nonnegative().safe().optional(),
     completion_tokens: z.number().int().nonnegative().safe().optional(),
     total_tokens: z.number().int().nonnegative().safe().optional(),
+    prompt_cache_hit_tokens: z.number().int().nonnegative().safe().optional(),
+    prompt_cache_miss_tokens: z.number().int().nonnegative().safe().optional(),
   }).nullish(),
 });
 
@@ -101,8 +103,8 @@ export function encodeDeepSeek(request: ModelCompletionRequest, model: string, t
     return result;
   });
   const body: JsonObject = { model, messages, stream: false };
-  // 指定工具时只暴露唯一候选，返回结果仍由 requester 校验原契约。
-  const tools = typeof choice === 'object' ? input.tools.filter((tool) => tool.name === choice.name) : input.tools;
+  // 工具接口不随本轮选择变化，返回结果仍由 requester 校验原契约。
+  const tools = input.tools;
   if (tools.length) body['tools'] = tools.map((tool) => ({
     type: 'function', function: { ...tool, name: alias(tool.name) },
   }));
@@ -144,7 +146,10 @@ export function decodeDeepSeek(value: unknown, model: string, originals: Readonl
         continuation: { provider: 'deepseek', model, data: { reasoning_content: native.reasoning_content } },
       }),
     },
-    usage: { inputTokens, outputTokens, totalTokens: response.usage?.total_tokens ?? inputTokens + outputTokens },
+    usage: { inputTokens, outputTokens, totalTokens: response.usage?.total_tokens ?? inputTokens + outputTokens,
+      ...(response.usage?.prompt_cache_hit_tokens === undefined ? {} : { cacheHitTokens: response.usage.prompt_cache_hit_tokens }),
+      ...(response.usage?.prompt_cache_miss_tokens === undefined ? {} : { cacheMissTokens: response.usage.prompt_cache_miss_tokens }),
+    },
   };
 }
 

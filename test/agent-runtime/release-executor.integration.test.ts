@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,7 +37,7 @@ function options(directory: string, effect: 'read_only' | 'side_effect',
       requestableCapabilities: [], allowedChildCharacters: [] }]),
     limits: { toolTimeoutMs: 300, requestsPerMinute: 100, tokensPerMinute: 5_000_000 },
     requester: { provider: 'deepseek', model: 'fixture', async request(request) {
-      const payload = JSON.parse(String(request.messages[1]?.content)) as { self?: { id: number }; sourceRef?: string };
+      const payload = readRuntimeRequest(request) as { self?: { id: number }; sourceRef?: string };
       const id = payload.self?.id ?? 1;
       const count = (calls.get(id) ?? 0) + 1;
       if (!payload.sourceRef) calls.set(id, count);

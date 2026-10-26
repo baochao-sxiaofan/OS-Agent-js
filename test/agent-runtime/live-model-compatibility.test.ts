@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,7 @@ function completion(value: object): ModelCompletion {
     usage: { inputTokens: 10, outputTokens: 10, totalTokens: 20 } };
 }
 
-it('直接工作角色隐藏规划函数并拒绝强行调用，仍可完成工作并休眠', async () => {
+it('直接工作角色保留固定接口但拒绝规划调用，仍可完成工作并休眠', async () => {
   const path = await mkdtemp(join(tmpdir(), 'direct-character-'));
   let requests = 0;
   const runtime = createAgentRuntime({
@@ -28,9 +29,9 @@ it('直接工作角色隐藏规划函数并拒绝强行调用，仍可完成工�
       requestableCapabilities: [], allowedChildCharacters: [],
     }]),
     requester: { provider: 'minimax', model: 'test', async request(request) {
-      expect(request.tools?.map((tool) => tool.name)).not.toContain('context_plan');
-      expect(request.tools?.map((tool) => tool.name)).not.toContain('context_replan');
-      const payload = JSON.parse(String(request.messages[1]?.content)) as { previousError: string | null };
+      expect(request.tools?.map((tool) => tool.name)).toContain('context_plan');
+      expect(request.tools?.map((tool) => tool.name)).toContain('context_replan');
+      const payload = readRuntimeRequest(request) as { previousError: string | null };
       if (requests++ === 0) return completion({ kind: 'context', decision: { type: 'plan', objectives: ['不必要的计划'] } });
       expect(payload.previousError).toContain('本角色禁止安装或重建计划');
       return completion({ kind: 'context', decision: { type: 'finish_turn' } });
@@ -94,7 +95,7 @@ it('总结短编号贯穿请求和各类来源字段，入库只保存本次封�
   apply(context, { type: 'idle' });
   const pending = context.beginSummaryAttempt();
   const request = summaryRequest(context.checkpoint(), 32768);
-  const payload = JSON.parse(String(request.messages[1]?.content)) as {
+  const payload = readRuntimeRequest(request) as {
     sourceRef: string; allowedRefs: string[]; frame: { allowedSourceRefs: string[] };
   };
   expect(payload.sourceRef).toBe('s0');
@@ -160,7 +161,7 @@ it('真实模型形态的总结省略空 artifactRefs 与 lessonCandidates，仍
       if (!request.tools?.some((tool) => tool.name === 'submit_summary')) {
         return completion({ kind: 'output', content: '真实回复形态' });
       }
-      const payload = JSON.parse(String(request.messages[1]?.content)) as { sourceRef: string };
+      const payload = readRuntimeRequest(request) as { sourceRef: string };
       return { ...completion({}), finishReason: 'tool_calls',
         message: { role: 'assistant', content: '', toolCalls: [{ id: 'summary', name: 'submit_summary',
           arguments: { outcome: '已完成对话', observations: [], decisions: [], unresolved: [],

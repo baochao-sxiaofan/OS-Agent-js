@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +34,7 @@ function response(name?: string, args = '{}') {
 }
 function validSummary(request: WireRequest) {
   const data = z.object({ conversationId: z.string(), messages: z.array(z.object({ id: z.string() })).min(1) })
-    .parse(JSON.parse(String(request.messages[1]?.content)));
+    .parse(readRuntimeRequest(request));
   return response('submit_conversation_summary', JSON.stringify({
     overview: '已记录当前约定', unresolved: [], quotations: [],
     sourceRefs: [{ conversationId: data.conversationId, messageId: data.messages[0]!.id }],

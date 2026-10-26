@@ -18,3 +18,5 @@ export type {
   ContactNote, ConversationDigest, ConversationMemoryPolicy, ConversationRead, ConversationReadResult,
   ConversationSearch, ConversationSearchResult, ConversationSummary, HistoryExcerpt, MemorySource, SetContactNote,
 } from './memory.js';
+
+export { readRuntimeRequest } from './request-view.js';

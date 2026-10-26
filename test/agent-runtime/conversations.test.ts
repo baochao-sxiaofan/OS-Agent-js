@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ const silent = { kind: 'context', decision: { type: 'finish_turn' } };
 type Input = { self: { id: number }; conversation: RuntimeConversation; context: object };
 
 function parse(request: ModelCompletionRequest): Input {
-  return JSON.parse(String(request.messages[1]?.content)) as Input;
+  return readRuntimeRequest(request) as unknown as Input;
 }
 async function setup(work: (request: ModelCompletionRequest) => object | Promise<object>) {
   const directory = await mkdtemp(join(tmpdir(), 'conversation-runtime-'));

@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,7 +22,7 @@ it('协作群缺少点名时先纠正，修正后的消息仅发送一次并唤�
       return mentions.includes(2) ? null : '请设置mentions:[2]，正文中写@姓名不能唤醒对方。';
     },
     requester: { provider: 'minimax', model: 'test', async request(request) {
-      const payload = JSON.parse(String(request.messages[1]?.content)) as {
+      const payload = readRuntimeRequest(request) as {
         self: { id: number }; previousError: string | null;
       };
       let action: object;
@@ -60,6 +61,7 @@ it('协作群缺少点名时先纠正，修正后的消息仅发送一次并唤�
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     expect(authorCalls).toBe(2);
+    expect(runtime.inspect(1, 'owner').lastError).toBeNull();
     expect(checkedMentions).toEqual([[], [2]]);
     expect(runtime.conversationMessages(groupId, 'owner').filter((message) => message.sender.kind === 'agent'))
       .toHaveLength(1);

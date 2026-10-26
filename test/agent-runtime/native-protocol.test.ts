@@ -55,7 +55,7 @@ it('升级前已持久化的文本回复可恢复，新请求的文本回复不�
   } finally { store.close(); }
 });
 
-it('L3 步骤 schema 只暴露本层来源，父层引用被原子拒绝，实际读取后可引用', async () => {
+it('L3 步骤 schema 固定且宿主校验本层来源，父层引用被原子拒绝，实际读取后可引用', async () => {
   const { context } = setupContext();
   descend(context, 3);
   apply(context, { type: 'plan', objectives: ['检查资料'] });
@@ -79,7 +79,7 @@ it('L3 步骤 schema 只暴露本层来源，父层引用被原子拒绝，实�
     name: 'artifact_page', data: { ref: parentRef, content: '父层资料' } }] }]);
   context.prepare();
   const action = await invoke();
-  expect(JSON.stringify(request!.tools!.find((tool) => tool.name === 'context_step_completed'))).toContain(alias);
+  expect(JSON.stringify(request!.tools!.find((tool) => tool.name === 'context_step_completed'))).not.toContain(alias);
   for (const tool of request!.tools!) assertLocalReferences(tool.parameters, tool.parameters);
   expect(action).toMatchObject({ kind: 'context', decision: { result: { sourceRefs: [parentRef] } } });
   if (action.kind !== 'context') throw new Error('预期上下文动作。');
@@ -89,7 +89,9 @@ it('L3 步骤 schema 只暴露本层来源，父层引用被原子拒绝，实�
 
 it('续接只重放完整已提交回执，保持原生 ID 和私有状态，按作用域隔离并整组裁剪', () => {
   const store = new RuntimeStore(':memory:');
-  const input: ModelCompletionRequest = { messages: [{ role: 'system', content: '规则' }, { role: 'user', content: '现场' }] };
+  const input: ModelCompletionRequest = { messages: [{ role: 'system', content: '规则' },
+    { role: 'user', content: JSON.stringify({ kind: 'runtime_context', view: { objective: '现场' } }) },
+    { role: 'user', content: JSON.stringify({ kind: 'runtime_update', changes: [] }) }] };
   let committed = false;
   let secondResult = false;
   const completion = reply({ kind: 'tools', calls: [
@@ -102,14 +104,14 @@ it('续接只重放完整已提交回执，保持原生 ID 和私有状态，按
     receipt: () => committed, result: (_key, index) => index === 0 || secondResult ? { result: index } : undefined,
   });
   try {
-    next('one'); store.putCompletion('one', completion);
+    store.putRequest('one', next('one')); store.putCompletion('one', completion);
     expect(next('two').messages).toEqual(input.messages);
     committed = true;
     expect(next('three').messages).toEqual(input.messages);
     secondResult = true;
     const paired = next('four').messages;
-    expect(paired[2]).toEqual(completion.message);
-    expect(paired.slice(3, 5)).toEqual(completion.message.toolCalls.map((call, index) => ({
+    expect(paired[3]).toEqual(completion.message);
+    expect(paired.slice(4, 6)).toEqual(completion.message.toolCalls.map((call, index) => ({
       role: 'tool', callId: call.id, content: { result: index },
     })));
     for (const scope of ['agent2:conversation1:L3:deepseek:fixture', 'agent1:conversation2:L3:deepseek:fixture',

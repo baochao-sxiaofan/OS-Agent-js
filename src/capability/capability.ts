@@ -240,6 +240,8 @@ function normalizeResource(resource: string): string {
       'Capability resources cannot contain credentials, queries, or fragments.',
     );
   }
+  // WorkspaceResolver accepts both root spellings; permissions must use the same resource.
+  if (parsed.protocol === 'workspace:' && parsed.pathname === '') parsed.pathname = '/';
   return parsed.pathname === '/'
     ? parsed.href
     : parsed.href.replace(/\/+$/u, '');

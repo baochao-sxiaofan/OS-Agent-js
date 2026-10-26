@@ -62,15 +62,15 @@ export function verifyNovelReview(
       }
       const hash = digest(manuscript);
       const path = `workspace://current/${basename(directory)}/${name}`;
-      // 审新稿时重读权威口径，避免错误的历史摘要反复污染下一章。
-      const threshold = name === canon ? statSync(join(directory, files.at(-1)!)).mtimeMs : readAfter;
+      // Unchanged reference material stays valid; changed files still require a matching full read.
+      const threshold = name === canon ? 0 : readAfter;
       const operation = operations.find((item) => {
         if (item.toolName !== 'file.read' || item.state !== 'succeeded' || item.arguments.path !== path ||
             (item.schedulerOperation?.startedAt ?? 0) < threshold) return false;
         const result = item.result as { content?: string; truncated?: boolean } | null;
         return result?.truncated === false && typeof result.content === 'string' && digest(result.content) === hash;
       });
-      if (!operation) return `审稿发送前必须先file.read最新 ${path}；当前文件与此前读稿版本不同，不能只凭历史摘要声称已实读。`;
+      if (!operation) return `本次message_send未发送：缺少最新稿件的完整读稿证据。下一步先实际调用file.read({"path":"${path}"})，读完后再发送审稿消息；作者可能在你上次读取后改稿，旧工具回执和摘要不代表当前版本。`;
       if (inline.has(operation.id)) continue;
       const text = JSON.stringify(operation.result);
       const version = digest(JSON.stringify([operation.state, operation.result]));

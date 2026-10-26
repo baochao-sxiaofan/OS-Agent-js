@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.ts';
 let index = 0;
 let submissions = 0;
 const actions = [
@@ -14,8 +15,7 @@ const actions = [
 globalThis.fetch = async (_url, input) => {
   const body = JSON.parse(String(input?.body));
   const tools = body.tools?.map((tool) => tool.function.name) ?? [];
-  const originalContent = body.messages.find((message) => message.role === 'user').content;
-  const payload = JSON.parse(originalContent);
+  const payload = readRuntimeRequest(body);
   let name;
   let parameters;
   if (tools.includes('submit_summary')) {

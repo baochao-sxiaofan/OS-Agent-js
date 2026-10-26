@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ it('HTTP 会话按成员读取，管理查看只读，用户与模型不能伪�
     database: join(path, 'runtime.sqlite'), workspaces: { work: path },
     conversationPolicy: { quietMs: 5, maxWaitMs: 15 },
     requester: { provider: 'minimax', model: 'test', async request(request) {
-      const input = JSON.parse(String(request.messages[1]?.content)) as {
+      const input = readRuntimeRequest(request) as {
         self: { id: number }; conversation: { members: { kind: string }[] };
       };
       const action = input.self.id === 1 && input.conversation.members.some((member) => member.kind === 'user')

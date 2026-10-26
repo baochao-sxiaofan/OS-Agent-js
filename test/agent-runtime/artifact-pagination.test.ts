@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +9,7 @@ import type { JsonObject } from '../../src/model-requester/index.js';
 import { verifyNovelReview } from '../../examples/novel-review-guard.js';
 import { nativeMessage } from '../fixtures/native-message.js';
 
-it('只读 Agent 根据工具预览游标读到长文件尾部，不重复读取或漏页', async () => {
+it.each([undefined, 16_000])('只读 Agent 根据工具预览游标读到长文件尾部，不重复读取或漏页（内联字符限额%s）', async (inlineCharacters) => {
   const directory = await mkdtemp(join(tmpdir(), 'artifact-pages-'));
   const path = 'workspace://current/long.md';
   const content = '山路与潮声🌊。'.repeat(1400) + '末页的关键证据。';
@@ -21,8 +22,9 @@ it('只读 Agent 根据工具预览游标读到长文件尾部，不重复读取
   let rejectedUnknown = false;
   const runtime = createAgentRuntime({
     database: join(directory, 'runtime.sqlite'), workspaces: { docs: directory },
+    ...(inlineCharacters === undefined ? {} : { toolResultInlineCharacters: inlineCharacters }),
     requester: { provider: 'minimax', model: 'test', async request(request) {
-      const payload = JSON.parse(String(request.messages[1]?.content)) as {
+      const payload = readRuntimeRequest(request) as {
         context: { frames: { memory: { recentEntries: ContextEntry[] } }[] };
         previousError: string | null;
       };
@@ -101,7 +103,7 @@ it('已投递聊天来源误用产物工具时有限纠正，不误判为越权�
   const runtime = createAgentRuntime({
     database: join(directory, 'runtime.sqlite'), workspaces: { docs: directory },
     requester: { provider: 'minimax', model: 'test', async request(request) {
-      const payload = JSON.parse(String(request.messages[1]?.content)) as {
+      const payload = readRuntimeRequest(request) as {
         conversation: { id: string }; currentBatch: { messageIds: string[] };
         previousError: string | null; context: { frames: { memory: { recentEntries: ContextEntry[] } }[] };
       };
@@ -162,7 +164,7 @@ it('完整投递配合审稿护栏，拒绝未读和旧稿验收，真实读取�
       join(directory, 'runtime.sqlite'), outputDirectory, agentId, content, 16_000),
     limits: { retryBaseMs: 1 },
     requester: { provider: 'minimax', model: 'test', async request(request) {
-      const payload = JSON.parse(String(request.messages[1]?.content)) as {
+      const payload = readRuntimeRequest(request) as {
         conversation: { id: string };
         previousError: string | null;
         context: { frames: { memory: { recentEntries: ContextEntry[] } }[] };
@@ -173,7 +175,7 @@ it('完整投递配合审稿护栏，拒绝未读和旧稿验收，真实读取�
         action = { kind: 'send_message', conversationId: payload.conversation.id,
           content: '未读稿就声称验收通过', finish: true };
       } else if (!requestedRead) {
-        expect(payload.previousError).toContain('必须先file.read最新');
+        expect(payload.previousError).toContain('下一步先实际调用file.read');
         requestedRead = true;
         action = { kind: 'tools', calls: [{ name: 'file.read', arguments: { path } }] };
       } else if (!reviewedBeforeCanon) {
@@ -182,6 +184,9 @@ it('完整投递配合审稿护栏，拒绝未读和旧稿验收，真实读取�
           content: '只读章节尚未核对权威口径', finish: true };
       } else if (!requestedCanon) {
         expect(payload.previousError).toContain(canonPath);
+        // Feedback must remain last even when a preceding successful file read is replayed.
+        expect(request.messages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining(canonPath) });
+        expect(request.messages.at(-1)!.content).toContain('宿主纠正反馈');
         requestedCanon = true;
         action = { kind: 'tools', calls: [{ name: 'file.read', arguments: { path: canonPath } }] };
       } else {
@@ -222,12 +227,15 @@ it('完整投递配合审稿护栏，拒绝未读和旧稿验收，真实读取�
     expect(runtime.messages(1, 'reader').some((item) => item.content === '只读章节尚未核对权威口径')).toBe(false);
     expect(runtime.interrupts(1, 'reader').map(({ kind, action }) => ({ kind, action })))
       .toEqual([{ kind: 'protocol', action: 'retry' }, { kind: 'protocol', action: 'retry' }]);
+    // A manuscript timestamp change does not invalidate a full read of unchanged reference material.
+    await writeFile(join(outputDirectory, '第03章.md'), content, 'utf8');
+    expect(verifyNovelReview(join(directory, 'runtime.sqlite'), outputDirectory, 1, '验收通过', 16_000)).toBeNull();
     await writeFile(join(outputDirectory, '运行校对口径.md'), '第一日128进64，科尔与巴雷均为固定四强。', 'utf8');
     expect(verifyNovelReview(join(directory, 'runtime.sqlite'), outputDirectory, 1, '验收通过', 16_000))
       .toContain(canonPath);
     await writeFile(join(outputDirectory, '第03章.md'), `${content}\n作者后续修订。`, 'utf8');
     expect(verifyNovelReview(join(directory, 'runtime.sqlite'), outputDirectory, 1, '验收通过', 16_000))
-      .toContain('必须先file.read最新');
+      .toContain('下一步先实际调用file.read');
     await writeFile(join(outputDirectory, '第03章.md'), '渡口练习。', 'utf8');
     expect(verifyNovelReview(join(directory, 'runtime.sqlite'), outputDirectory, 1, '验收通过', 16_000))
       .toContain('实际汉字数不足2000');

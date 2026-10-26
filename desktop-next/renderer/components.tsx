@@ -11,6 +11,7 @@ export function Avatar({ name, id, large = false }: { name: string; id: number; 
   return <span className={`avatar color-${id % 5} ${large ? 'large' : ''}`}>{Array.from(name).slice(0, 2).join('')}</span>;
 }
 export function stateText(contact: Contact): string {
+  if (contact.status === 'dismissed') return '已解雇';
   if (contact.status === 'paused') return '已暂停';
   if (contact.status === 'cancelled') return '已停止';
   if (contact.approvals.length) return '等待处理';
@@ -145,7 +146,7 @@ export function GroupModal({ contacts, onClose, onCreated }: {
       <label>群名称<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={100} required placeholder="例如：项目讨论" /></label>
       <fieldset><legend>选择成员（你已在群中）</legend><div className="member-options">{contacts.map((contact) =>
         <label key={contact.id}><input type="checkbox" checked={ids.includes(contact.id)}
-          disabled={contact.status === 'cancelled' || workspace !== undefined && workspace !== contact.workspaceId}
+          disabled={['cancelled', 'dismissed'].includes(contact.status) || workspace !== undefined && workspace !== contact.workspaceId}
           onChange={(event) => setIds((previous) => event.target.checked ? [...previous, contact.id] : previous.filter((id) => id !== contact.id))} />
           <span>{contact.name}<small>{contact.workspace ?? '未挂载工作区'}</small></span></label>)}</div></fieldset>
       <label>参与方式<select value={participation} onChange={(event) => setParticipation(event.target.value as CreateGroup['participation'])}>

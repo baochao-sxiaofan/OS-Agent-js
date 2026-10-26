@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,7 +38,7 @@ it('DeepSeek 原生工具调用完成实际读写、独立总结和重启恢复'
         expect(body.tool_choice).toEqual({ type: 'function', function: { name: 'submit_summary' } });
         expect(body.thinking.type).toBe('disabled');
         expect(body.tools).toHaveLength(1);
-        const payload = JSON.parse(body.messages[1]!.content) as { sourceRef: string };
+        const payload = readRuntimeRequest(body) as { sourceRef: string };
         message = toolCall('submit_summary', summary(payload.sourceRef));
       } else {
         expect(body.thinking.type).toBe('enabled');
@@ -49,11 +50,11 @@ it('DeepSeek 原生工具调用完成实际读写、独立总结和重启恢复'
           message = toolCall(name, { path: 'workspace://current/input.txt' });
         } else if (ordinary === 2) {
           expect(body.messages.find((item) => item.role === 'tool')?.content).toContain('可核对的输入资料');
-          sawReadResult = body.messages[1]!.content.includes('可核对的输入资料');
+          sawReadResult = JSON.stringify(readRuntimeRequest(body)).includes('可核对的输入资料');
           const name = body.tools.find((tool) => tool.function.description.startsWith('Create a new UTF-8'))!.function.name;
           message = toolCall(name, { path: 'workspace://current/output.txt', content: '真实工具写入的测试结果' });
         } else {
-          expect(body.messages[1]!.content).toContain('bytesWritten');
+          expect(JSON.stringify(readRuntimeRequest(body))).toContain('bytesWritten');
           message = toolCall('context_idle', {});
         }
       }

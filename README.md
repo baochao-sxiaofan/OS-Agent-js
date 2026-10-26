@@ -12,10 +12,12 @@ OS-Agent-js 是一个使用 TypeScript 开发、借鉴操作系统设计思想�
 - 工具权限与副作用隔离；
 - 可恢复的任务快照和事件历史。
 
-当前版本：`3.0.0`（2026-10-23）。
+当前版本：`3.1.0`（2026-10-26）。
 
-3.0.0 交付长期 Agent Runtime、独立会话与记忆、原生工具协议和 OS Agent Next 桌面。
-版本变化、兼容说明及验证结果见[发布说明](docs/release-3.0.0.md)。
+3.1.0 重构模型请求体：工具定义固定，稳定的 L1/L2/L3 上下文置前，工作记录、
+工具调用和真实回执在末尾增量追加，提升重复前缀的缓存复用；新增桌面与 HTTP 解雇员工。
+DeepSeek 实测输入缓存命中率79.91%，统计范围与限制见[发布说明](docs/release-3.1.0.md)。
+请求格式和恢复边界见[请求布局说明](docs/request-layout.md)。
 
 Mac 桌面应用为 **OS Agent Next**，安装后可直接双击打开，无需单独启动服务器。
 首次使用、配置模型及文件权限见[桌面使用说明](docs/desktop-next.md#在-mac-上直接使用)。
@@ -63,14 +65,17 @@ L1/L2/L3 是一个 Agent 内部的上下文层级，层级推进不会创建其�
 执行 `npx tsx examples/server-live-smoke.ts`；默认测试不请求付费 API。
 
 真实协作回归使用作者小白和只读编辑小黑，读取小说目录已有校对稿与审读清单，
-逐章写作、审稿、修改前十章：
+由两名 Agent 自行协作生成前十章。该任务是技术实验，宿主只监控请求、权限、工具与运行错误，
+以十章文件交付为验收，不阅读剧情、不追加内容指令或要求宿主终审：
 
 ```bash
 npm run test:novel:live -- "/你的小说工作区"
 ```
 
-运行前从环境提供 `MINIMAX_API_KEY`，默认模型为 `MiniMax-M3`。每次创建新的两名
-Agent、独立数据库和小说输出目录；普通 `npm test` 不请求付费 API。
+默认从环境提供 `MINIMAX_API_KEY`，模型为 `MiniMax-M3`。使用 DeepSeek 时设置
+`NOVEL_PROVIDER=deepseek`、`NOVEL_KEY_FILE=<工作区外的密钥文件>`，默认模型为
+`deepseek-flash`，可用 `DEEPSEEK_MODEL` 覆盖。每次创建新的两名 Agent、独立数据库和
+小说输出目录；普通 `npm test` 不请求付费 API。
 第二个参数可指定运行目录；再次使用同一目录会恢复两名原 Agent 和消息现场。
 运行目录中 `control.json` 给出本机监控地址，`status.json` 包含状态、字数、
 文件哈希、最近消息、暂停原因及未知副作用，`messages.json` 保留真实群消息。
@@ -85,15 +90,17 @@ Agent、独立数据库和小说输出目录；普通 `npm test` 不请求付费
 文件读取返回实际汉字数和字符数；创建、覆盖与补丁分别返回 UTF-8 字节数、
 UTF-16 字符数及汉字数，避免把工具回执长度当成正文篇幅。
 Runtime 可通过 `toolResultInlineCharacters` 调整单个工具结果的完整投递额度，默认
-4000字符，超出后保留分页。本次小说联调设为16000字符，使几千字章节完整进入
-模型当前上下文；长资料仍按 `artifactRef` 与 `nextOffset` 继续读取。
+4000字符，超出后保留分页。本次小说联调设为16000字符，同时校验序列化后的 UTF-8 投递字节数，
+超限结果按 `artifactRef` 与 `nextOffset` 继续读取，完整原文保留。
 联调通过 Runtime 的可选 `messageGuard` 检查编辑读稿证据：未读取当前哈希或未读完
 分页时拒绝发出审稿消息并有限纠正。终审要求十章齐备且在第十章落盘后实际重读，
 验收另核对每章至少2000汉字。联调协作群发送前要求明确点名对方，避免正文
 写了@姓名却漏掉 `mentions` 导致双方等待；私聊沿用自己的投递规则。
-存在 `运行校对口径.md` 时，审新稿前必须重新读取其当前版本，避免沿用错误的历史摘要。
-普通写审请求同时实时附加该口径；独立总结只使用其封存来源，维持原有来源校验。
-检查过程不生成正文或验收结论。
+存在 `运行校对口径.md` 时，编辑须读取其当前版本，未变化的完整读取证据可以复用。
+资料通过真实文件工具结果进入工作记录，不实时插入请求前缀。独立总结只使用封存来源。
+这些检查只核对实际读取，不生成正文或验收结论；宿主不以内容终审作为实验结束门槛。
+`status.json` 记录供应商返回的缓存命中与未命中输入 Token；实测结果及限制见
+[DeepSeek 协作实测](docs/deepseek-novel-validation-2026-10-26.md)。
 普通MiniMax限流或过载缺少重试期限时至少等待30秒；业务码2056表示Token Plan或
 账户额度耗尽，即使HTTP状态为429也直接暂停，补充额度后再从保留现场继续。
 可通过 `MINIMAX_TIMEOUT_MS` 调整真实联调的请求超时，默认360秒。
@@ -550,7 +557,7 @@ npm run desktop:build
 
 推送到 `main` 后，`.github/workflows/windows-desktop.yml` 在 Windows Runner 上
 执行检查和测试，分别生成旧桌面的 `OS-Agent-Setup-2.2.1-x64.exe` 和新桌面的
-`OS-Agent-Next-Setup-3.0.0-x64.exe`。也可以在 GitHub Actions 页面手动触发。
+`OS-Agent-Next-Setup-3.1.0-x64.exe`。也可以在 GitHub Actions 页面手动触发。
 macOS 本地安装与新链路验证见[桌面说明](docs/desktop-next.md)。
 
 ### 最小 Gemini 网络验证

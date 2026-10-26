@@ -59,6 +59,7 @@ export class ConversationStore {
       CREATE TABLE IF NOT EXISTS chat_batches (id TEXT PRIMARY KEY, agent_id INTEGER NOT NULL,
         conversation_id TEXT NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL);
       CREATE UNIQUE INDEX IF NOT EXISTS chat_active_batch ON chat_batches(agent_id) WHERE status!='done';
+      CREATE TABLE IF NOT EXISTS chat_dismissed_agents (id INTEGER PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS chat_phases (id TEXT PRIMARY KEY, sent INTEGER NOT NULL DEFAULT 0);
     `);
   }
@@ -107,13 +108,17 @@ export class ConversationStore {
   send(conversationId: string, sender: ConversationMember, input: SendConversationMessage, phase?: string,
     maxDeliveryBytes = Infinity): ConversationMessage {
     const conversation = this.get(conversationId);
+    if (sender.kind === 'agent' && this.isDismissed(sender.id)) throw new RuntimeFault('permission', 'Agent 已解雇。');
+    if (conversation.kind === 'direct' && conversation.members.some((member) => member.kind === 'agent' && this.isDismissed(member.id))) {
+      throw new RuntimeFault('permission', 'Agent 已解雇，私聊仅保留历史。');
+    }
     if (!isMember(conversation, sender)) throw new RuntimeFault('permission', '发送者不是会话成员。');
     if (!input.content.trim() || Buffer.byteLength(input.content) > 12000 ||
         !input.idempotencyKey.trim() || input.idempotencyKey.length > 300) {
       throw new RuntimeFault('protocol', '消息内容或幂等键无效；正文最多 12000 字节。', true);
     }
     const mentions = [...new Set(input.mentions ?? [])].sort((a, b) => a - b);
-    if (mentions.some((id) => !isMember(conversation, { kind: 'agent', id }))) {
+    if (mentions.some((id) => this.isDismissed(id) || !isMember(conversation, { kind: 'agent', id }))) {
       throw new RuntimeFault('permission', '只能点名本会话的 Agent。');
     }
     const reply = input.replyTo ? this.message(input.replyTo) : undefined;
@@ -147,7 +152,7 @@ export class ConversationStore {
       this.#db.prepare('UPDATE chat_messages SET body=? WHERE id=?').run(JSON.stringify(message), id);
       this.#db.prepare('INSERT INTO chat_outbox VALUES (?,?,?)').run(key, fingerprint, id);
       for (const member of conversation.members) {
-        if (member.kind !== 'agent' || memberKey(member) === memberKey(sender)) continue;
+        if (member.kind !== 'agent' || this.isDismissed(member.id) || memberKey(member) === memberKey(sender)) continue;
         const addressed = mentions.includes(member.id) || reply?.sender.kind === 'agent' && reply.sender.id === member.id;
         if (conversation.kind === 'group' && conversation.participation === 'mentioned' && !addressed) continue;
         const quiet = conversation.kind === 'direct' || addressed ? this.policy.quietMs : this.policy.groupQuietMs;
@@ -176,6 +181,7 @@ export class ConversationStore {
     return row?.due == null ? undefined : Number(row.due);
   }
   seal(agentId: number, maxBytes: number): ConversationBatch | undefined {
+    if (this.isDismissed(agentId)) return undefined;
     if (this.active(agentId)) return this.active(agentId);
     const row = this.#db.prepare(`SELECT * FROM chat_mailboxes WHERE agent_id=? AND due_at<=?
       ORDER BY priority DESC,first_at,conversation_id LIMIT 1`).get(agentId, Date.now());
@@ -228,10 +234,22 @@ export class ConversationStore {
   mailboxes(conversationId: string): ConversationMailbox[] {
     return this.#db.prepare('SELECT * FROM chat_mailboxes WHERE conversation_id=?').all(conversationId).map((row) => ({
       agentId: Number(row.agent_id), conversationId, processedSequence: Number(row.processed),
-      state: this.active(Number(row.agent_id))?.conversationId === conversationId
+      state: this.isDismissed(Number(row.agent_id)) ? 'dismissed' : this.active(Number(row.agent_id))?.conversationId === conversationId
         ? 'processing' : row.due_at != null ? 'aggregating' : 'processed',
       dueAt: row.due_at == null ? null : Number(row.due_at),
     }));
+  }
+  isDismissed(agentId: number): boolean {
+    return !!this.#db.prepare('SELECT id FROM chat_dismissed_agents WHERE id=?').get(agentId);
+  }
+  dismiss(agentId: number): void {
+    this.#transaction(() => {
+      this.#db.prepare('INSERT OR IGNORE INTO chat_dismissed_agents VALUES (?)').run(agentId);
+      const batch = this.active(agentId);
+      if (batch) this.#saveBatch({ ...batch, status: 'done' });
+      // Preserve the actual processed cursor; unprocessed messages are never acknowledged as work.
+      this.#db.prepare('UPDATE chat_mailboxes SET first_at=NULL,due_at=NULL,priority=0 WHERE agent_id=?').run(agentId);
+    });
   }
   #saveBatch(batch: ConversationBatch): void {
     this.#db.prepare('UPDATE chat_batches SET status=?,body=? WHERE id=?').run(batch.status, JSON.stringify(batch), batch.id);

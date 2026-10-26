@@ -46,7 +46,7 @@ export type ConversationMailbox = {
   readonly agentId: number;
   readonly conversationId: string;
   readonly processedSequence: number;
-  readonly state: 'processed' | 'aggregating' | 'processing';
+  readonly state: 'processed' | 'aggregating' | 'processing' | 'dismissed';
   readonly dueAt: number | null;
 };
 

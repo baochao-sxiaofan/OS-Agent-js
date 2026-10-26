@@ -26,7 +26,7 @@ function requireStringField(
       error: `${field} must be a non-empty string.`,
     };
   }
-  if (!value.startsWith(CURRENT_WORKSPACE_RESOURCE)) {
+  if (value !== 'workspace://current' && !value.startsWith(CURRENT_WORKSPACE_RESOURCE)) {
     return {
       valid: false,
       error: `${field} must start with ${CURRENT_WORKSPACE_RESOURCE}.`,

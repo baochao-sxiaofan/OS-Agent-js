@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -112,7 +113,7 @@ it('内部层交付不进入用户聊天，L1 完成计划后可显式发言或�
         { kind: 'context', decision: { type: 'plan', objectives: ['内部阶段'] } },
         { kind: 'context', decision: { type: 'advance' } },
         { kind: 'output', content: '内部层的交付' },
-        { kind: 'send_message', conversationId: (JSON.parse(String(request.messages[1]?.content)) as {
+        { kind: 'send_message', conversationId: (readRuntimeRequest(request) as {
           conversation: { id: string };
         }).conversation.id, content: '面向用户的最终结果', finish: true },
       ];

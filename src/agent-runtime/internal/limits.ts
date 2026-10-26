@@ -69,8 +69,8 @@ export function trackedRequester(options: {
       const version = options.store.metadata<number>(`protocol-version:${key}`) ?? 1;
       const native = version >= 2;
       if (completed) return native ? completed : migrateSavedCompletion(completed, options.store.request(key));
-      // 已完成的原生回复继续幂等恢复；未完成旧请求重建以修复嵌套工具结构。
-      if (version < 3 && options.store.request(key)) options.store.repairRequest(key);
+      // 已完成回复继续幂等恢复；未完成旧请求归档后按固定工具和增量布局重建。
+      if (version < 4 && options.store.request(key)) options.store.repairRequest(key);
       const limits = options.limits();
       let saved = options.store.request(key);
       if (saved && (saved.maxOutputTokens === undefined || !requestFitsLimits(saved, limits))) {
@@ -97,7 +97,7 @@ export function trackedRequester(options: {
       const release = options.admission.acquire(tokens);
       try {
         options.store.putRequest(key, request);
-        options.store.putMetadata(`protocol-version:${key}`, 3);
+        options.store.putMetadata(`protocol-version:${key}`, 4);
         const result = await abortable(() => {
           // 准入和取消检查通过后通知轮次计数；缓存重放与未发送请求不消耗总结尝试。
           beforeSend();
@@ -118,6 +118,8 @@ export function trackedRequester(options: {
         options.store.event(agent.control.agentId, 'model_completed', {
           roundKey: key, provider: result.provider, model: result.model,
           inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens,
+          ...(result.usage.cacheHitTokens === undefined ? {} : { cacheHitTokens: result.usage.cacheHitTokens }),
+          ...(result.usage.cacheMissTokens === undefined ? {} : { cacheMissTokens: result.usage.cacheMissTokens }),
         });
         return result;
       } finally { release(); }
@@ -169,7 +171,7 @@ function modelFaultMessage(error: ModelRequesterError): string {
   else if (error.code === 'invalid_response') {
     const reasons = {
       missing_tool_calls: '缺少原生 tool_calls；请调用本轮声明的函数，正文 JSON 不会被执行。',
-      unexpected_tool: '返回了本轮未允许的函数；请只调用当前 tools 中允许的函数。',
+      unexpected_tool: '返回了本轮未允许的函数；必须逐字使用当前 tools 声明的函数名。message_send 不带任何后缀；不能把业务工具的哈希后缀拼到其他函数名上。',
       duplicate_call_id: '工具调用 ID 重复；请为每个调用提供唯一 ID。',
       invalid_arguments: '工具参数不完整或不是 JSON 对象；请按函数 schema 重新提交完整参数。',
       invalid_envelope: '模型响应结构无效；请正常结束并提交原生工具调用。',

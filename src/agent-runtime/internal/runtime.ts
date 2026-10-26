@@ -117,11 +117,16 @@ class Runtime implements AgentRuntime {
     this.#executor = new ToolExecutor({
       store: this.#store, scheduler: this.#scheduler, tools: this.#tools, limits: this.#limits,
       inlineCharacters,
+      maxDeliveryBytes: (id) => this.#live(id).context.checkpoint().policy.maxDeliveryBytes,
       workspace: (agent) => this.#workspaces.get(agent.workspaceId)!,
       agent: (id) => this.#live(id).data, update: (agent) => this.#update(agent),
       onFault: (id, kind, message) => this.#interrupt(id, '', kind, message, 'feedback', null),
       onUnknown: (id) => this.#pauseUnknown(id),
       onReconciled: (operation, ref) => {
+        if (this.#live(operation.agentId).data.status === 'dismissed') {
+          this.#event(operation.agentId, 'dismissed_operation_reconciled', { operationId: operation.id, resultRef: ref });
+          return true;
+        }
         // 可靠调度事件处理收件箱背压；确认标记仅在 Context 已持久接收后清除。
         const eventRef = `reconciliation-event:${operation.id}`;
         this.#store.putMetadata(eventRef, { resultRef: ref, target: operation.target,
@@ -148,6 +153,14 @@ class Runtime implements AgentRuntime {
     // 在启动任何可重试操作前，全局隔离旧写入，避免逐 Agent 恢复的时序空隙。
     this.#executor.isolateRestoredOperations();
     for (const [id, live] of this.#agents) {
+      if (live.data.status === 'dismissed') {
+        this.#conversations.dismiss(id);
+        this.#scheduler.suspend(id, { reason: 'Agent 已解雇', resumeAt: null });
+        this.#scheduler.cancelOperations(id, 'Agent 已解雇');
+        this.#executor.dismiss(id);
+        this.#executor.notifyReconciliations(id);
+        continue;
+      }
       await this.#executor.recover(id);
       for (const input of this.#store.inputs(id)) this.#notify(id, input.id);
       if (live.data.status !== 'active') {
@@ -248,7 +261,7 @@ class Runtime implements AgentRuntime {
     if (!this.#workspaces.has(input.workspaceId) || !input.ownerId.trim() || !input.objective.trim()) {
       throw new Error('宿主、工作区或目标无效。');
     }
-    if (this.#agents.size >= this.#limits.maxAgents) throw new Error('Agent 数量超过上限。');
+    if ([...this.#agents.values()].filter((live) => live.data.status !== 'dismissed').length >= this.#limits.maxAgents) throw new Error('Agent 数量超过上限。');
     const character = this.#characters.get(input.character);
     const ceiling = parsed.capabilities.map(normalizeCapabilityInput);
     if (this.#characters.capabilityOutsideCeiling(character.id, ceiling)) throw new Error('能力超过角色上限。');
@@ -321,9 +334,7 @@ class Runtime implements AgentRuntime {
       workBatch: () => this.#conversations.active(data.control.agentId)?.id,
       prepare: (input) => {
         if (input.tools?.some((tool) => tool.name.startsWith('submit_'))) {
-          return live.data.lastError ? { ...input, messages: input.messages.map((message, index) =>
-            index === 0 && message.role === 'system'
-              ? { ...message, content: `${message.content}\n本次纠错反馈：${live.data.lastError}` } : message) } : input;
+          return input;
         }
         const id = data.control.agentId;
         const budget = workBudget(this.#store, id, this.#conversations.active(id)?.id);
@@ -410,7 +421,7 @@ class Runtime implements AgentRuntime {
   provideFeedback(agentId: number, ownerId: string, content: string, idempotencyKey: string): void {
     const live = this.#owned(agentId, ownerId);
     if (!content.trim() || Buffer.byteLength(content) > 12_000 || !idempotencyKey.trim() ||
-      idempotencyKey.length > 200 || live.data.status === 'cancelled') throw new Error('宿主反馈无效。');
+      idempotencyKey.length > 200 || ['cancelled', 'dismissed'].includes(live.data.status)) throw new Error('宿主反馈无效。');
     const key = `host-feedback:${agentId}:${idempotencyKey}`;
     const hash = createHash('sha256').update(content).digest('hex');
     const previous = this.#store.metadata<{ contentHash: string; createdAt: number;
@@ -441,7 +452,7 @@ class Runtime implements AgentRuntime {
         if (member.id !== input.ownerId) throw new Error('当前宿主不支持加入其他用户。');
       } else {
         const agent = this.#owned(member.id, input.ownerId).data;
-        if (agent.workspaceId !== input.workspaceId || agent.status === 'cancelled') throw new Error('成员工作区或状态无效。');
+        if (agent.workspaceId !== input.workspaceId || ['cancelled', 'dismissed'].includes(agent.status)) throw new Error('成员工作区或状态无效。');
       }
     }
     return this.#conversations.create(input);
@@ -532,8 +543,8 @@ class Runtime implements AgentRuntime {
     const live = this.#owned(agentId, ownerId);
     return structuredClone({ ...live.data, control: live.acb.snapshot() });
   }
-  list(ownerId: string): RuntimeAgent[] {
-    return [...this.#agents.values()].filter((item) => item.data.ownerId === ownerId)
+  list(ownerId: string, options: { includeDismissed?: boolean } = {}): RuntimeAgent[] {
+    return [...this.#agents.values()].filter((item) => item.data.ownerId === ownerId && (options.includeDismissed || item.data.status !== 'dismissed'))
       .map((item) => this.inspect(item.data.control.agentId, ownerId));
   }
   events(id: number, owner: string, after = 0) { this.#owned(id, owner); return this.#store.events(id, after); }
@@ -561,6 +572,7 @@ class Runtime implements AgentRuntime {
   }
   async pause(id: number, owner: string): Promise<void> {
     const live = this.#owned(id, owner);
+    if (live.data.status === 'dismissed') throw new Error('Agent 已解雇，不能重新启用。');
     this.#update({ ...live.data, status: 'paused' });
     this.#scheduler.suspend(id, { reason: '宿主暂停', resumeAt: null });
     live.controller?.abort(new Error('宿主暂停。'));
@@ -569,6 +581,7 @@ class Runtime implements AgentRuntime {
   }
   resume(id: number, owner: string): void {
     const live = this.#owned(id, owner);
+    if (live.data.status === 'dismissed') throw new Error('Agent 已解雇，不能重新启用。');
     if (this.#executor.approvals(id).some((item) => item.state === 'unknown')) {
       throw new Error('仍有副作用结果未知的操作，必须先对账。');
     }
@@ -612,8 +625,26 @@ class Runtime implements AgentRuntime {
     await this.pause(id, owner);
     this.#scheduler.cancelOperations(id, '宿主取消。');
     const live = this.#live(id);
+    if (live.data.status === 'dismissed') return;
     this.#update({ ...live.data, status: 'cancelled' });
     this.#interrupt(id, '', 'cancelled', '宿主取消自动执行。', 'stop', null);
+  }
+
+  async dismiss(id: number, owner: string): Promise<void> {
+    const live = this.#owned(id, owner);
+    // Persist the tombstone first so recovery and concurrent controls cannot restart this identity.
+    if (live.data.status !== 'dismissed') {
+      this.#update({ ...live.data, status: 'dismissed', grants: [] });
+      this.#event(id, 'agent_dismissed', { createdBy: 'user' });
+    }
+    this.#scheduler.suspend(id, { reason: 'Agent 已解雇', resumeAt: null });
+    live.controller?.abort(new Error('Agent 已解雇。'));
+    this.#scheduler.cancelOperations(id, 'Agent 已解雇。');
+    this.#executor.dismiss(id);
+    this.#conversations.dismiss(id);
+    await this.#jobs.get(id);
+    this.#scheduler.suspend(id, { reason: 'Agent 已解雇', resumeAt: null });
+    this.#refreshMail();
   }
 
   async #work(live: LiveAgent, round: AgentWorkRound): Promise<WorkActionResult> {
@@ -647,6 +678,7 @@ class Runtime implements AgentRuntime {
       capabilities: live.data.ceiling,
       repairAttempt: this.#store.metadata<number>(`retries:${round.idempotencyKey}`) ?? 0,
     });
+    round.signal?.throwIfAborted();
     const hash = createHash('sha256').update(JSON.stringify(action)).digest('hex');
     const marker = `action:${round.idempotencyKey}`;
     if (!this.#store.metadata<boolean>(marker)) {
@@ -657,6 +689,8 @@ class Runtime implements AgentRuntime {
       this.#update({ ...live.data, lastAction: hash, repeatedActions: repeated, lastError: null });
       this.#store.putMetadata(marker, true);
     }
+    // A repaired action reuses the same idempotency key, so its marker may already exist.
+    if (live.data.lastError) this.#update({ ...live.data, lastError: null });
     this.#event(id, 'action', { kind: action.kind,
       ...(action.kind === 'context' ? { decision: action.decision.type } : {}),
       level: live.context.snapshot().level3?.level ?? live.context.snapshot().level2?.level ?? 1 });
@@ -779,18 +813,20 @@ class Runtime implements AgentRuntime {
   }
   #deliveryLimit(conversation: RuntimeConversation): number {
     return Math.min(...conversation.members.flatMap((member) => member.kind === 'agent'
-      ? [this.#live(member.id).context.checkpoint().policy.maxDeliveryBytes] : []));
+      && this.#live(member.id).data.status !== 'dismissed' ? [this.#live(member.id).context.checkpoint().policy.maxDeliveryBytes] : []));
   }
   #conversationPrompt(live: LiveAgent) {
     const id = live.data.control.agentId;
     const batch = this.#conversations.active(id);
     const destinations = this.#conversations.list(live.data.ownerId, { kind: 'agent', id })
-      .map(({ id, kind, title, members }) => ({ id, kind, title, members }));
+      .filter((item) => item.kind !== 'direct' || !item.members.some((member) => member.kind === 'agent' && this.#live(member.id).data.status === 'dismissed'))
+      .map(({ id, kind, title, members }) => ({ id, kind, title, members: members.filter((member) => member.kind !== 'agent' || this.#live(member.id).data.status !== 'dismissed') }));
     for (const peer of this.#agents.values()) if (this.#canMessage(live.data, peer.data)) {
       destinations.push({ id: `peer:${peer.data.control.agentName}`, kind: 'direct', title: this.#displayName(peer.data.control.agentId),
         members: [{ kind: 'agent', id }, { kind: 'agent', id: peer.data.control.agentId }] });
     }
-    return { destinations, ...(batch ? { conversation: this.#conversations.get(batch.conversationId),
+    return { destinations, ...(batch ? { conversation: { ...this.#conversations.get(batch.conversationId),
+      members: this.#conversations.get(batch.conversationId).members.filter((member) => member.kind !== 'agent' || this.#live(member.id).data.status !== 'dismissed') },
       currentBatch: { id: batch.id, messageIds: batch.messages.map((message) => message.id) } } : {}) };
   }
   #messageDestination(live: LiveAgent, destination: string): RuntimeConversation {
@@ -956,7 +992,7 @@ class Runtime implements AgentRuntime {
   #canMessage(sender: RuntimeAgent, recipient: RuntimeAgent): boolean {
     return sender.control.agentId !== recipient.control.agentId &&
       sender.ownerId === recipient.ownerId && sender.workspaceId === recipient.workspaceId &&
-      recipient.status !== 'cancelled';
+      !['cancelled', 'dismissed'].includes(recipient.status);
   }
   #requestKey(live: LiveAgent, batchId: string): string {
     const pending = live.context.checkpoint().pendingSummary;
@@ -993,7 +1029,7 @@ class Runtime implements AgentRuntime {
   }
   #pauseUnknown(id: number): void {
     const live = this.#live(id);
-    if (live.data.status === 'cancelled') return;
+    if (['cancelled', 'dismissed'].includes(live.data.status)) return;
     this.#update({ ...live.data, status: 'paused', lastError: '操作副作用未知，等待宿主对账。' });
     this.#scheduler.suspend(id, { reason: '操作副作用未知，等待宿主对账。', resumeAt: null });
     live.controller?.abort(new Error('副作用结果未知。'));

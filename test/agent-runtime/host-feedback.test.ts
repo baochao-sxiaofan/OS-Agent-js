@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +20,7 @@ it('可信宿主反馈进入当前子层，幂等投递且不消费普通消息�
     database: join(directory, 'runtime.sqlite'), workspaces: { work: directory },
     requester: { provider: 'minimax', model: 'test', async request(request) {
       requests.push(request);
-      const payload = JSON.parse(String(request.messages[1]?.content)) as {
+      const payload = readRuntimeRequest(request) as {
         purpose?: string; sourceRef?: string; context?: { frames: { level: number }[] };
       };
       let action: object;
@@ -30,7 +31,7 @@ it('可信宿主反馈进入当前子层，幂等投递且不消费普通消息�
         await gate;
         action = { kind: 'context', decision: { type: 'continue' } };
       } else if (payload.context?.frames.at(-1)?.level === 2) {
-        sawFeedback = String(request.messages[1]?.content).includes('现在检查已生成文件');
+        sawFeedback = JSON.stringify(readRuntimeRequest(request)).includes('现在检查已生成文件');
         action = { kind: 'context', decision: { type: 'complete' } };
       } else action = { kind: 'context', decision: { type: 'finish_turn' } };
       return { provider: 'minimax', model: 'test', finishReason: 'stop',
@@ -60,8 +61,8 @@ it('可信宿主反馈进入当前子层，幂等投递且不消费普通消息�
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     expect(sawFeedback).toBe(true);
-    expect(requests.filter((request) => String(request.messages[1]?.content).includes('宿主现场反馈：现在检查已生成文件'))
-      .every((request) => String(request.messages[1]?.content).split('宿主现场反馈：现在检查已生成文件').length === 2)).toBe(true);
+    expect(requests.filter((request) => JSON.stringify(readRuntimeRequest(request)).includes('宿主现场反馈：现在检查已生成文件'))
+      .every((request) => JSON.stringify(readRuntimeRequest(request)).split('宿主现场反馈：现在检查已生成文件').length === 2)).toBe(true);
     expect(runtime.messages(1, 'owner')).toEqual([]);
     expect(runtime.conversationMailboxes(runtime.directConversation(1, 'owner').id, 'owner')[0]?.processedSequence).toBe(0);
     expect(runtime.interrupts(1, 'owner')).toEqual([]);

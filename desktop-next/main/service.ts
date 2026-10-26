@@ -100,7 +100,7 @@ export class DesktopService {
     if (!runtime.isReady()) return { ready: false, contacts: [], conversations: [], inspector: null, settings: this.#model.view() };
     const inspectAgentId = inspectValue === undefined ? undefined : idSchema.parse(inspectValue);
     const workspaces = this.#store.workspaces();
-    const contacts: Contact[] = runtime.list(OWNER).map((agent) => {
+    const contacts: Contact[] = runtime.list(OWNER, { includeDismissed: true }).map((agent) => {
       const id = agent.control.agentId;
       const profile = this.#store.profile(id);
       return { id, alias: agent.control.agentName, name: profile?.name ?? agent.control.agentName,
@@ -198,7 +198,7 @@ export class DesktopService {
   }
   async control(value: unknown, action: unknown): Promise<void> {
     const id = idSchema.parse(value);
-    const operation = z.enum(['pause', 'resume', 'cancel']).parse(action);
+    const operation = z.enum(['pause', 'resume', 'cancel', 'dismiss']).parse(action);
     await this.#engine()[operation](id, OWNER);
   }
   approve(value: unknown, operation: unknown, allowed: unknown): void {

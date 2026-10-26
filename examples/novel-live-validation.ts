@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, join, resolve } from 'node:path';
 import { createAgentRuntime } from '../src/agent-runtime/index.js';
 import { CharacterRegistry } from '../src/character/character-registry.js';
-import { createModelRequester, type JsonValue } from '../src/model-requester/index.js';
+import { createModelRequester, type JsonValue, type ModelRequesterOptions } from '../src/model-requester/index.js';
 import { verifyNovelReview } from './novel-review-guard.js';
 
 // 手动真实联调入口：每次新建两名角色，普通单测不会连接付费模型。
@@ -16,13 +16,17 @@ const runDirectory = resolve(process.argv[3] ?? join('.tmp', `novel-live-${Date.
 const outputName = `前十章_${basename(runDirectory)}`;
 const outputDirectory = join(workspace, outputName);
 const ownerId = 'local-novel-validation';
-const apiKey = process.env.MINIMAX_API_KEY;
-if (!apiKey) throw new Error('请通过环境变量提供 MINIMAX_API_KEY。');
-const thinking = process.env.MINIMAX_THINKING;
+const provider = process.env.NOVEL_PROVIDER ?? 'minimax';
+if (provider !== 'deepseek' && provider !== 'minimax') throw new Error('NOVEL_PROVIDER 必须是 deepseek 或 minimax。');
+const keyFile = process.env.NOVEL_KEY_FILE;
+const apiKey = keyFile ? (await readFile(keyFile, 'utf8')).trim()
+  : provider === 'deepseek' ? process.env.DEEPSEEK_API_KEY : process.env.MINIMAX_API_KEY;
+if (!apiKey) throw new Error('请通过 NOVEL_KEY_FILE 或对应供应商环境变量提供密钥。');
+const thinking = provider === 'minimax' ? process.env.MINIMAX_THINKING : undefined;
 if (thinking !== undefined && thinking !== 'adaptive' && thinking !== 'disabled') {
   throw new Error('MINIMAX_THINKING 必须是 adaptive 或 disabled。');
 }
-const authorThinking = process.env.MINIMAX_AUTHOR_THINKING;
+const authorThinking = provider === 'minimax' ? process.env.MINIMAX_AUTHOR_THINKING : undefined;
 if (authorThinking !== undefined && authorThinking !== 'adaptive' && authorThinking !== 'disabled') {
   throw new Error('MINIMAX_AUTHOR_THINKING 必须是 adaptive 或 disabled。');
 }
@@ -38,13 +42,17 @@ const characters = new CharacterRegistry([
     visibleToolIds: ['file.read', 'directory.list', 'workspace.search'],
     capabilityCeiling: readonlyCapabilities, requestableCapabilities: [], allowedChildCharacters: [] },
 ]);
-const modelOptions = {
-  provider: 'minimax' as const, model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3', apiKey,
+const modelOptions: ModelRequesterOptions = provider === 'deepseek' ? {
+  provider, model: process.env.DEEPSEEK_MODEL ?? 'deepseek-flash', apiKey,
+  timeoutMs: Number(process.env.DEEPSEEK_TIMEOUT_MS ?? 360_000), thinking: 'enabled', reasoningEffort: 'high',
+} : {
+  provider, model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3', apiKey,
   timeoutMs: Number(process.env.MINIMAX_TIMEOUT_MS ?? 360_000),
   ...(process.env.MINIMAX_BASE_URL ? { baseUrl: process.env.MINIMAX_BASE_URL } : {}),
+  ...(thinking ? { thinking } : {}),
 };
-const requester = createModelRequester({ ...modelOptions, ...(thinking ? { thinking } : {}) });
-const authorRequester = authorThinking
+const requester = createModelRequester(modelOptions);
+const authorRequester = authorThinking && modelOptions.provider === 'minimax'
   ? createModelRequester({ ...modelOptions, thinking: authorThinking }) : requester;
 let authorId = 0;
 let editorId = 0;
@@ -53,26 +61,15 @@ const runtime = createAgentRuntime({
   database: join(runDirectory, 'runtime.sqlite'), workspaces: { novel: workspace }, characters,
   requester: {
     provider: requester.provider, model: requester.model,
-    async request(request, signal) {
+    request(request, signal) {
       const target = request.tools?.some((tool) => tool.name === 'file.create') ? authorRequester : requester;
-      // 独立总结严格使用其封存来源，普通写审轮实时补入宿主已校对的权威资料。
-      if (request.tools?.some((tool) => tool.name === 'submit_summary')) return target.request(request, signal);
-      let canon: string;
-      try { canon = await readFile(join(outputDirectory, '运行校对口径.md'), 'utf8'); }
-      catch (error) {
-        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return target.request(request, signal);
-        throw error;
-      }
-      const reference = `本轮实时读取的权威小说口径如下。历史摘要或同伴意见与它冲突时按它写审；仍须实际执行文件工具和审稿，不能将计划或发送说明当作已经落盘。\n<current_novel_canon>\n${canon}\n</current_novel_canon>`;
-      const first = request.messages[0];
-      const messages = first?.role === 'system'
-        ? [{ ...first, content: `${first.content}\n\n${reference}` }, ...request.messages.slice(1)]
-        : [{ role: 'system' as const, content: reference }, ...request.messages];
-      return target.request({ ...request, messages }, signal);
+      // Send exactly the Runtime request; source updates arrive through real file reads and feedback.
+      return target.request(request, signal);
     },
   },
   // 十章真实审改使用独立且有限的总额度，普通运行与单测默认值不变。
-  limits: { maxRounds: 768, maxRetries: 4, maxConcurrentRequests: 2, requestsPerMinute: 12, maxTotalTokens: 30_000_000 },
+  limits: { maxRounds: 768, maxRetries: 4, maxConcurrentRequests: 2,
+    requestsPerMinute: Number(process.env.NOVEL_REQUESTS_PER_MINUTE ?? 30), maxTotalTokens: 30_000_000 },
   // 几千字章节完整投递，较长资料继续使用分页，不让读取成功被误当成已读全文。
   toolResultInlineCharacters: 16_000,
   messageGuard: ({ agentId, conversationId, content, mentions }) => {
@@ -98,6 +95,7 @@ if (!agents.length) {
       instructions: [
         prompt,
         `请遵循 workspace://current/${outputName}/协作任务书.md。`,
+        `校对依据在 workspace://current/${outputName}/运行校对口径.md，首次工作及审稿时实际读取；疑点先向编辑确认。`,
         '每次只处理当前来信需要的阶段；需要对方回应时先结束自己本轮，使新来信可被投递。',
         '本次联调从根层直接执行文件工具与消息，不安装 plan/replan/advance 或 L3 步骤计划。章节方案写在文件里即可。',
         '每轮一项交付：读资料后写方案；读方案后发裁定；写一章后发路径；读一章后发具体意见；改一章后请复查。',
@@ -127,7 +125,7 @@ if (!agents.length) {
 
 本次是作者小白与编辑小黑的真实协作。作者编号 ${author.control.agentId}，编辑编号 ${editor.control.agentId}。
 共同工作群 conversationId：${group.id}。工作沟通在此群中通过 message_send，mentions 点名对方；无需礼貌确认。
-原始资料保留不改：故事大纲.rtf、故事大纲_原文.txt、故事大纲_校对稿.md、大纲审读与待确认.md。
+原始资料保留不改：故事大纲.txt；使用故事大纲_校对稿.md和大纲审读与待确认.md辅助核对。
 输出目录：workspace://current/${outputName}/（宿主已创建）。
 
 先读校对稿中第一部开篇和审读清单，提出十章方案和最小命名，写入章节方案与新增设定.md，交编辑确认。
@@ -136,7 +134,7 @@ if (!agents.length) {
 凯恩/莱恩暂按审读清单处理；原稿未定的家庭、城名、主角和六皇子姓名只做最小新增并列明，不自定核心身份。
 新生赛128人单败：1至4轮后剩8人；第五轮八进四对六皇子；第六轮半决赛对伊蕾娜，注意休息间隔和狂武代价。
 
-正文固定文件名：第01章.md 至 第10章.md，一级标题内写章名。每章至少2000中文字符，建议2000至3500。
+正文固定文件名：第01章.md 至 第10章.md，一级标题内写章名。每章约2800至3300中文字符，十章总计约30000字；不是逐字卡上下限。
 写章节是主要任务，方案控制在1500中文字符以内，使用表格与简短设定，不反复列问答。
 小白、小黑本轮直接在根层用文件工具处理实际工作，群里提交后finish=true休眠；不要为单次工作创建三级计划。
 初稿连续性护栏：伊蕾娜不给具体等级，不得超过“六皇子唯一一级巅峰”；前四轮较轻松获胜。
@@ -171,6 +169,17 @@ async function snapshot(): Promise<void> {
   snapshotInFlight = true;
   try {
     const messages = runtime.conversationMessages(conversation.id, ownerId);
+    const completed = runtime.list(ownerId).flatMap((agent) => runtime.events(agent.control.agentId, ownerId))
+      .filter((event) => event.type === 'model_completed').sort((a, b) => a.sequence - b.sequence);
+    const usage = completed.map((event) => event.data).filter((data): data is Record<string, JsonValue> =>
+      data !== null && typeof data === 'object' && !Array.isArray(data));
+    const sum = (key: string) => usage.reduce((total, data) => total + (typeof data[key] === 'number' ? data[key] : 0), 0);
+    const inputTokens = sum('inputTokens');
+    const measured = usage.filter((data) => typeof data.cacheHitTokens === 'number');
+    const measuredInputTokens = measured.reduce((total, data) => total + (typeof data.inputTokens === 'number' ? data.inputTokens : 0), 0);
+    const cache = { requests: completed.length, measuredRequests: measured.length, measuredInputTokens,
+      inputTokens, outputTokens: sum('outputTokens'), hitTokens: sum('cacheHitTokens'), missTokens: sum('cacheMissTokens'),
+      hitRate: measuredInputTokens ? sum('cacheHitTokens') / measuredInputTokens : null, recent: completed.slice(-4) };
     // 通过管理读取保存两人的私聊证据，不加入用户群聊或修改收件游标。
     const privateChats = runtime.agentConversations(agents[0]!.control.agentId, ownerId)
       .filter((chat) => chat.id !== conversation.id &&
@@ -188,7 +197,7 @@ async function snapshot(): Promise<void> {
     }
     const status = {
       at: new Date().toISOString(), ready: runtime.isReady(), runDirectory, outputDirectory,
-      conversationId: conversation.id, files, messageCount: messages.length,
+      conversationId: conversation.id, provider: requester.provider, model: requester.model, cache, files, messageCount: messages.length,
       agents: runtime.list(ownerId).map((agent) => ({
         id: agent.control.agentId, name: agent.control.agentName, status: agent.status, state: agent.control.state,
         rounds: agent.rounds, tokens: agent.totalTokens, lastError: agent.lastError,

@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ it('认证 API 按宿主隔离，只接受预注册 profile，并优雅停机', 
   const runtime = createAgentRuntime({ database: join(path, 'runtime.sqlite'), workspaces: { work: path },
     requester: { provider: 'minimax', model: 'test', async request(request) {
       const summarizing = String(request.messages[0]?.content).includes('独立总结轮');
-      const source = summarizing ? JSON.parse(String(request.messages[1]?.content)) as { sourceRef: string } : null;
+      const source = summarizing ? readRuntimeRequest(request) as { sourceRef: string } : null;
       return { provider: 'minimax', model: 'test', finishReason: 'stop',
         message: nativeMessage(source ? summary(source.sourceRef) : { kind: 'context', decision: { type: 'idle' } }),
       usage: { inputTokens: 10, outputTokens: 10, totalTokens: 20 } };

@@ -72,10 +72,10 @@ it.each(['required', { name: 'file.read' }] as const)('兼容强制工具契约�
   expect(fetcher).toHaveBeenCalledOnce();
 });
 
-it('指定工具时只暴露该工具，返回其他已声明工具也拒绝', async () => {
+it('指定工具保持完整定义，返回其他已声明工具仍拒绝', async () => {
   const model = requester(async (_url, init) => {
     const wire = JSON.parse(String(init?.body)) as Wire;
-    expect(wire.tools).toHaveLength(1);
+    expect(wire.tools).toHaveLength(2);
     expect(wire.tools[0]?.function.name).toMatch(/^file_read__/u);
     expect(wire.thinking.type).toBe('disabled');
     expect(wire.reasoning_effort).toBeUndefined();
@@ -205,4 +205,12 @@ it('型号发现处理空列表、无效响应与认证失败，MiniMax 列表�
   expect(minimax.source).toBe('builtin');
   expect(minimax.models.length).toBeGreaterThan(1);
   expect(fetcher).not.toHaveBeenCalled();
+});
+
+it.each([{ prompt_cache_hit_tokens: 8, prompt_cache_miss_tokens: 4 },
+  { prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 12 }, {}])('cache usage preserves zero and absence: %j', async (cache) => {
+  const model = requester(async () => Response.json({ ...response(), usage: { prompt_tokens: 12, completion_tokens: 1, total_tokens: 13, ...cache } }));
+  const result = await model.request({ messages: request.messages });
+  if ('prompt_cache_hit_tokens' in cache) expect(result.usage).toMatchObject({ cacheHitTokens: cache.prompt_cache_hit_tokens, cacheMissTokens: cache.prompt_cache_miss_tokens });
+  else expect(result.usage).not.toHaveProperty('cacheHitTokens');
 });

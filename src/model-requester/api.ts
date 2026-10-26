@@ -65,6 +65,9 @@ export type ModelTokenUsage = {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  /** Missing cache usage remains absent, distinct from an explicit zero. */
+  cacheHitTokens?: number;
+  cacheMissTokens?: number;
 };
 
 export type ModelCompletion = {

@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,7 @@ const response = (content: object) => ({
 });
 function summarizing(request: ModelCompletionRequest): { sourceRef: string } | null {
   return String(request.messages[0]?.content).includes('独立总结轮')
-    ? JSON.parse(String(request.messages[1]?.content)) as { sourceRef: string } : null;
+    ? readRuntimeRequest(request) as { sourceRef: string } : null;
 }
 async function directory() {
   const path = await mkdtemp(join(tmpdir(), 'runtime-recovery-'));

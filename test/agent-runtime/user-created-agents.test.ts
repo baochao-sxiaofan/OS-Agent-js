@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,7 @@ async function setup(work: (request: ModelCompletionRequest) => ModelAssistantMe
     database: join(path, 'runtime.sqlite'), workspaces: { work: path }, limits: { maxRetries: 0 },
     requester: { provider: 'minimax', model: 'test', async request(request) {
       const ref = String(request.messages[0]?.content).includes('独立总结轮')
-        ? (JSON.parse(String(request.messages[1]?.content)) as { sourceRef: string }).sourceRef : null;
+        ? (readRuntimeRequest(request) as { sourceRef: string }).sourceRef : null;
       return { provider: 'minimax', model: 'test', finishReason: 'stop',
         message: ref ? text(summary(ref)) : work(request),
         usage: { inputTokens: 10, outputTokens: 10, totalTokens: 20 } };
@@ -67,7 +68,7 @@ it.each(attempts)('模型伪造创建动作被拒绝，用户创建入口是唯�
 it('同工作区消息不会把发送方的写权限转授给接收方', async () => {
   const calls = new Map<string, number>();
   const { runtime, path } = await setup((request) => {
-    const data = JSON.parse(String(request.messages[1]?.content)) as {
+    const data = readRuntimeRequest(request) as {
       context: { frames: { objective: string }[] };
     };
     const objective = data.context.frames[0]!.objective;

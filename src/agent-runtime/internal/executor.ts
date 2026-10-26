@@ -24,6 +24,7 @@ export class ToolExecutor {
   constructor(readonly options: {
     store: RuntimeStore; scheduler: AgentScheduler; tools: ToolRegistry; limits: RuntimeLimits;
     inlineCharacters: number;
+    maxDeliveryBytes: (agentId: number) => number;
     workspace: (agent: RuntimeAgent) => string; agent: (id: number) => RuntimeAgent;
     update: (agent: RuntimeAgent) => void; onFault: (id: number, kind: 'permission' | 'tool', message: string) => void;
     onUnknown: (agentId: number) => void;
@@ -173,18 +174,31 @@ export class ToolExecutor {
       : undefined;
     const attachments = inputArtifactRef ? [artifactRef, inputArtifactRef] : [artifactRef];
     const text = JSON.stringify(operation.result);
-    const previewCharacters = Math.min(3000, this.options.inlineCharacters);
+    let previewCharacters = Math.min(3000, this.options.inlineCharacters);
     const createdAt = operation.schedulerOperation?.startedAt ?? 0;
-    return [
-      { id: `${resultRef}:result`, createdAt, kind: 'tool_result',
-        callId: operation.id, toolName: operation.toolName,
-        output: text.length > this.options.inlineCharacters ? { artifactRef, ...(inputArtifactRef ? { inputArtifactRef } : {}),
-          preview: text.slice(0, previewCharacters), truncated: true, totalCharacters: text.length, nextOffset: previewCharacters }
-          : { artifactRef, ...(inputArtifactRef ? { inputArtifactRef } : {}), result: operation.result } },
+    const preview = () => ({ artifactRef, ...(inputArtifactRef ? { inputArtifactRef } : {}),
+      preview: text.slice(0, previewCharacters), truncated: true, totalCharacters: text.length, nextOffset: previewCharacters });
+    const result = {
+      id: `${resultRef}:result`, createdAt, kind: 'tool_result' as const, callId: operation.id, toolName: operation.toolName,
+      output: text.length > this.options.inlineCharacters ? preview()
+        : { artifactRef, ...(inputArtifactRef ? { inputArtifactRef } : {}), result: operation.result },
+    };
+    const entries: ContextEntry[] = [result,
       { id: `${resultRef}:source`, createdAt, kind: 'message', role: 'assistant',
         content: `工具 ${operation.toolName} 结果状态：${operation.state}${inputArtifactRef ? '；inputArtifactRef可分页读取原调用参数，不必从摘要重新生成。' : ''}`,
         attachmentRefs: attachments },
     ];
+    const bytes = () => Buffer.byteLength(JSON.stringify({
+      key: `operation:${operation.schedulerOperation?.operationId ?? operation.id}`, target: operation.target, entries,
+    }));
+    // Context delivery limits count serialized UTF-8 bytes, not UTF-16 characters.
+    const limit = this.options.maxDeliveryBytes(operation.agentId);
+    if (bytes() > limit) result.output = preview();
+    while (bytes() > limit && previewCharacters > 0) {
+      previewCharacters = Math.floor(previewCharacters / 2);
+      result.output = preview();
+    }
+    return entries;
   }
 
   nativeResult(operation: ExecutionOperation): JsonValue | undefined {
@@ -197,6 +211,12 @@ export class ToolExecutor {
   resume(agentId: number): void {
     for (const operation of this.options.store.operations(agentId)) {
       if (operation.state === 'registered') this.launch(operation);
+    }
+  }
+  dismiss(agentId: number): void {
+    for (const operation of this.options.store.operations(agentId)) {
+      this.#controllers.get(operation.id)?.abort(new Error('Agent dismissed.'));
+      if (operation.state === 'registered' || operation.state === 'approval') this.#expire(operation);
     }
   }
   async stop(): Promise<void> {

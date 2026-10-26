@@ -47,7 +47,7 @@ export type RuntimeAgent = {
   readonly contextKey: string;
   readonly ceiling: readonly CapabilityRequest[];
   readonly grants: readonly RuntimeCapabilityGrant[];
-  readonly status: 'active' | 'paused' | 'cancelled';
+  readonly status: 'active' | 'paused' | 'cancelled' | 'dismissed';
   /** 长期累计请求统计，不作为单次工作轮数限制。 */
   readonly rounds: number;
   readonly totalTokens: number;
@@ -152,7 +152,7 @@ export interface AgentRuntime {
   /** 可信宿主向当前执行层投递现场纠错；不冒充聊天、跳过邮箱或改变任务状态。 */
   provideFeedback(agentId: number, ownerId: string, content: string, idempotencyKey: string): void;
   inspect(agentId: number, ownerId: string): RuntimeAgent;
-  list(ownerId: string): readonly RuntimeAgent[];
+  list(ownerId: string, options?: { includeDismissed?: boolean }): readonly RuntimeAgent[];
   events(agentId: number, ownerId: string, after?: number): readonly RuntimeEvent[];
   messages(agentId: number, ownerId: string): readonly RuntimeMessage[];
   interrupts(agentId: number, ownerId: string): readonly RuntimeInterrupt[];
@@ -163,6 +163,8 @@ export interface AgentRuntime {
   pause(agentId: number, ownerId: string): Promise<void>;
   resume(agentId: number, ownerId: string): void;
   cancel(agentId: number, ownerId: string): Promise<void>;
+  /** Permanently retire this identity; retain history and unresolved side effects for inspection. */
+  dismiss(agentId: number, ownerId: string): Promise<void>;
   close(): Promise<void>;
 }
 

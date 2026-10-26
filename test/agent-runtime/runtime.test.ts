@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +19,7 @@ function requester(actions: object[], onRequest?: (request: ModelCompletionReque
       onRequest?.(request);
       const system = request.messages[0];
       const summarizing = typeof system?.content === 'string' && system.content.includes('独立总结轮');
-      const source = summarizing ? JSON.parse(String(request.messages[1]?.content)) as { sourceRef: string } : null;
+      const source = summarizing ? readRuntimeRequest(request) as { sourceRef: string } : null;
       const content = JSON.stringify(source ? summary(source.sourceRef) : actions.shift());
       if (!content) throw new Error('测试动作耗尽。');
       return { provider: 'minimax', model: 'test', finishReason: 'stop',
@@ -61,13 +62,13 @@ describe('服务器 Runtime 真实协议闭环', () => {
       context('finish_turn'),
     ], (request) => {
       if (!request.tools?.some((tool) => tool.name === 'context_finish_turn' || tool.name === 'context_complete')) return;
-      const payload = JSON.parse(String(request.messages[1]?.content)) as {
+      const payload = readRuntimeRequest(request) as {
         completedPlan: boolean; completedPlanNextAction: string | null;
         context: { frames: { level: number }[] };
       };
       if (payload.completedPlan && payload.context.frames.at(-1)?.level !== 1) {
         expect(payload.completedPlanNextAction).toBe('complete');
-        expect(request.toolChoice).toEqual({ name: 'context_complete' });
+        expect(request.toolChoice).toBe('required');
       }
       if (newBatch) {
         expect(payload.completedPlan).toBe(true);

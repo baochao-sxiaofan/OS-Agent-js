@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ function completion(action: object) {
 }
 function source(request: ModelCompletionRequest): string | null {
   return String(request.messages[0]?.content).includes('独立总结轮')
-    ? (JSON.parse(String(request.messages[1]?.content)) as { sourceRef: string }).sourceRef : null;
+    ? (readRuntimeRequest(request) as { sourceRef: string }).sourceRef : null;
 }
 async function until(check: () => boolean) {
   const end = Date.now() + 3000;
@@ -74,7 +75,7 @@ it('用户创建的长期 Agent 通过持久消息协作，重启后回复仍唤
   const requester: ModelRequester = { provider: 'minimax', model: 'test', async request(request) {
     const ref = source(request);
     if (ref) return completion(summary(ref));
-    const input = JSON.parse(String(request.messages[1]?.content)) as {
+    const input = readRuntimeRequest(request) as {
       context: { frames: { objective: string }[] }; peers: string[];
     };
     const objective = input.context.frames[0]!.objective;

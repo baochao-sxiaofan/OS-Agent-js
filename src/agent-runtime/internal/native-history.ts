@@ -2,37 +2,45 @@ import { createHash } from 'node:crypto';
 import { estimateContextTokens } from '../../agent-context/index.js';
 import type { ModelCompletionRequest, ModelMessage } from '../../model-requester/index.js';
 import type { JsonValue } from '../../types/json.js';
+import { readRuntimeRequest, requestChanges } from '../request-view.js';
 import type { RuntimeStore } from './store.js';
 
-/** 原生续接记录只保存在宿主日志，不进入语义 Context 或跨会话记忆。 */
+/** Retain complete persisted requests, then append the real response, receipts and current delta. */
 export function withNativeHistory(options: {
   store: RuntimeStore; key: string; scope: string; request: ModelCompletionRequest; maxInput: number;
   receipt: (key: string) => boolean;
   result: (key: string, index: number) => JsonValue | undefined;
 }): ModelCompletionRequest {
   const { store, key, request } = options;
-  const marker = `native-history:${createHash('sha256').update(options.scope).digest('hex')}`;
+  const marker = `native-history:v3:${createHash('sha256').update(options.scope).digest('hex')}`;
   const rounds = store.metadata<string[]>(marker) ?? [];
-  const groups: ModelMessage[][] = [];
-  let available = Math.min(12_000, Math.max(0, options.maxInput - estimateContextTokens(request) - 64));
-  for (const round of rounds.filter((id) => id !== key).reverse()) {
-    if (!options.receipt(round)) continue;
-    const completion = store.completion(round);
-    if (!completion?.message.toolCalls.length) continue;
-    const results = completion.message.toolCalls.map((_, index) => options.result(round, index));
-    // 未完成的一组调用整体省略，绝不发送悬空 tool 消息或伪造成功回执。
+  const boundary = request.messages.findIndex((message) => message.role === 'user' &&
+    typeof message.content === 'string' && message.content.startsWith('{"kind":"runtime_update"'));
+  let selected = request;
+  for (const previousKey of rounds.filter((id) => id !== key).reverse()) {
+    if (!options.receipt(previousKey)) continue;
+    const previous = store.request(previousKey);
+    const completion = store.completion(previousKey);
+    if (!previous || !completion?.message.toolCalls.length) continue;
+    // A role/configuration, layer summary or plan change starts a new stable prefix.
+    if (boundary < 0 || JSON.stringify(previous.tools) !== JSON.stringify(request.tools) ||
+        JSON.stringify(previous.messages.slice(0, boundary)) !== JSON.stringify(request.messages.slice(0, boundary))) break;
+    const results = completion.message.toolCalls.map((_, index) => options.result(previousKey, index));
     if (results.some((result) => result === undefined)) continue;
-    const group: ModelMessage[] = [completion.message, ...completion.message.toolCalls.map((call, index) => ({
-      role: 'tool' as const, callId: call.id, content: results[index]!,
-    }))];
-    const size = estimateContextTokens(group);
-    if (size > available) break;
-    available -= size;
-    groups.unshift(group);
+    const current = readRuntimeRequest(request);
+    const before = readRuntimeRequest(previous);
+    const messages: ModelMessage[] = [...previous.messages, completion.message,
+      ...completion.message.toolCalls.map((call, index): ModelMessage => ({
+        role: 'tool', callId: call.id, content: results[index]!,
+      })),
+      { role: 'user', content: JSON.stringify({ kind: 'runtime_update', changes: requestChanges(before, current) }) },
+      ...request.messages.slice(boundary + 1),
+    ];
+    const candidate = { ...request, messages };
+    // Rebase at a capacity boundary instead of evicting the beginning on every round.
+    if (estimateContextTokens(candidate) + 64 <= options.maxInput) selected = candidate;
+    break;
   }
-  store.putMetadata(marker, [...rounds.filter((id) => id !== key), key].slice(-8));
-  return groups.length ? { ...request, messages: [
-    ...request.messages, ...groups.flat(),
-    { role: 'user', content: '以上为已执行调用及真实回执。按本次上下文快照、可用函数和错误反馈继续，不要重复执行已完成操作。' },
-  ] } : request;
+  store.putMetadata(marker, [...rounds.filter((id) => id !== key), key].slice(-16));
+  return selected;
 }

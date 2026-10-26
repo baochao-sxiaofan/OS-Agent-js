@@ -38,7 +38,8 @@ export const completionSchema = z.object({
   id: z.string().optional(), provider: vendorSchema, model: z.string().min(1),
   message: assistantSchema, finishReason: z.enum(['stop', 'tool_calls', 'length', 'content_filter', 'unknown']),
   usage: z.object({ inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(),
-    totalTokens: z.number().int().nonnegative() }).strict(),
+    totalTokens: z.number().int().nonnegative(),
+    cacheHitTokens: z.number().int().nonnegative().optional(), cacheMissTokens: z.number().int().nonnegative().optional() }).strict(),
 }).strict();
 export const requestSchema = z.object({
   messages: z.array(z.union([
@@ -148,7 +149,7 @@ export const runtimeAgentSchema = z.object({
   }).strict(),
   ownerId: z.string().min(1), workspaceId: z.string().min(1), contextKey: z.string().min(1),
   ceiling: z.array(capabilitySchema), grants: z.array(grantSchema),
-  status: z.enum(['active', 'paused', 'cancelled']), rounds: z.number().int().nonnegative(),
+  status: z.enum(['active', 'paused', 'cancelled', 'dismissed']), rounds: z.number().int().nonnegative(),
   totalTokens: z.number().int().nonnegative(), costUsd: z.number().finite().nonnegative(),
   lastAction: z.string(), repeatedActions: z.number().int().nonnegative(), lastError: z.string().nullable(),
 }).strict();

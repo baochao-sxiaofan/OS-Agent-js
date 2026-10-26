@@ -98,6 +98,14 @@ describe('builtin workspace tools', () => {
     expect(read.content).toBe('first line');
   });
 
+  it('lists the same mounted root with or without its trailing slash', async () => {
+    writeFileSync(join(workspace, 'outline.txt'), 'outline', 'utf8');
+    const bare = await run(directoryListTool, { path: 'workspace://current' }, workspace);
+    const slash = await run(directoryListTool, { path: 'workspace://current/' }, workspace);
+    for (const result of [bare, slash]) expect(result).toMatchObject({ entries: [{ name: 'outline.txt', kind: 'file' }] });
+    expect(directoryListTool.validateInput({ path: 'workspace://current-elsewhere' }).valid).toBe(false);
+  });
+
   it('区分UTF-8字节、UTF-16字符和汉字数量，覆盖中文与表情', async () => {
     const path = `${CURRENT_WORKSPACE_RESOURCE}counts.txt`;
     const created = await run(fileCreateTool, { path, content: '小白A🐰\n' }, workspace);

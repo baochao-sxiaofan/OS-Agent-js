@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { setTimeout } from 'node:timers/promises';
 import { z } from 'zod';
 import type { ModelCompletion, ModelCompletionRequest, ModelRequester } from '../../src/model-requester/index.js';
@@ -26,7 +27,7 @@ export class DemoRequester implements ModelRequester {
   async request(request: ModelCompletionRequest, signal?: AbortSignal): Promise<ModelCompletion> {
     await setTimeout(240, undefined, { signal });
     const summaryRound = request.tools?.some((tool) => tool.name === 'submit_summary');
-    const payload: unknown = JSON.parse(String(request.messages[1]?.content));
+    const payload: unknown = readRuntimeRequest(request);
     let content: string;
     if (request.tools?.some((tool) => tool.name === 'submit_conversation_summary')) {
       const input = z.object({ conversationId: z.string(),

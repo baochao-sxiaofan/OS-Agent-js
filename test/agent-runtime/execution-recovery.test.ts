@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -44,7 +45,7 @@ function configuration(path: string, execute: () => Promise<import('../../src/ty
     }]),
     requester: { provider: 'minimax', model: 'test', async request(request) {
       const ref = String(request.messages[0]?.content).includes('独立总结轮')
-        ? (JSON.parse(String(request.messages[1]?.content)) as { sourceRef: string }).sourceRef : null;
+        ? (readRuntimeRequest(request) as { sourceRef: string }).sourceRef : null;
       return response(ref ? summary(ref) : actions.shift() ?? { kind: 'context', decision: { type: 'idle' } });
     } },
   };

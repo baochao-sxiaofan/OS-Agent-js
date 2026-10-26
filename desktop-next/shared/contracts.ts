@@ -28,7 +28,7 @@ export type Conversation = {
   id: string; title: string; kind: 'direct' | 'group'; createdAt: number;
   members: readonly { id: number; name: string }[]; includesUser: boolean;
   participation: 'all' | 'mentioned'; messages: readonly ChatMessage[]; unread: number;
-  mailboxes: readonly { agentId: number; state: 'processed' | 'aggregating' | 'processing'; processedSequence: number }[];
+  mailboxes: readonly { agentId: number; state: 'processed' | 'aggregating' | 'processing' | 'dismissed'; processedSequence: number }[];
 };
 export type LegacyMessage = {
   id: string; createdAt: number; role: 'user' | 'assistant' | 'agent'; sender: string | null; content: string;
@@ -42,7 +42,7 @@ export type Approval = {
 export type Contact = {
   id: number; alias: string; name: string; objective: string; character: string;
   state: 'READY' | 'RUNNING' | 'BLOCKED' | 'SLEEPING';
-  status: 'active' | 'paused' | 'cancelled';
+  status: 'active' | 'paused' | 'cancelled' | 'dismissed';
   createdAt: number; workspaceId: string; workspace: string | null; capabilities: readonly string[];
   directConversationId: string;
   rounds: number; totalTokens: number; error: string | null;
@@ -80,7 +80,7 @@ export interface DesktopApi {
   chooseWorkspace(): Promise<Workspace | null>;
   send(conversationId: string, content: string, key: string, mentions?: readonly number[]): Promise<void>;
   markRead(conversationId: string): Promise<void>;
-  control(id: number, action: 'pause' | 'resume' | 'cancel'): Promise<void>;
+  control(id: number, action: 'pause' | 'resume' | 'cancel' | 'dismiss'): Promise<void>;
   approve(id: number, operationId: string, allowed: boolean): Promise<void>;
   reconcile(id: number, operationId: string, outcome: 'succeeded' | 'failed', result: string): Promise<void>;
   saveModel(input: SaveModel): Promise<void>;

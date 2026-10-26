@@ -158,6 +158,10 @@ export function createAgentServer(options: AgentServerOptions): AgentServer {
     if (!Number.isSafeInteger(id)) throw new Error('身份无效。');
     const action = match[2];
     options.runtime.inspect(id, principal.ownerId);
+    if (!action && request.method === 'DELETE') {
+      await options.runtime.dismiss(id, principal.ownerId);
+      reply(response, 200, { agent: options.runtime.inspect(id, principal.ownerId) }); return;
+    }
     if (!action && request.method === 'GET') {
       reply(response, 200, { agent: options.runtime.inspect(id, principal.ownerId) }); return;
     }
@@ -186,6 +190,7 @@ export function createAgentServer(options: AgentServerOptions): AgentServer {
       options.runtime.submit(id, principal.ownerId, input.content, input.idempotencyKey);
     } else if (action === 'pause') await options.runtime.pause(id, principal.ownerId);
     else if (action === 'resume') options.runtime.resume(id, principal.ownerId);
+    else if (action === 'dismiss') await options.runtime.dismiss(id, principal.ownerId);
     else if (action === 'cancel') await options.runtime.cancel(id, principal.ownerId);
     else if (action === 'approvals') {
       const input = z.object({ operationId: z.string().min(1), allowed: z.boolean() }).strict().parse(await body(request));

@@ -11,7 +11,7 @@ export function validateRestoredAgents(agents: readonly RuntimeAgent[], characte
   const manager = new CapabilityManager();
   const toolIds = new Set(tools.descriptors().map((tool) => tool.name));
   const fail = () => { throw new Error('恢复数据的身份或用户授权与宿主配置不一致。'); };
-  if (byId.size !== agents.length || agents.length > limits.maxAgents) fail();
+  if (byId.size !== agents.length || agents.filter((agent) => agent.status !== 'dismissed').length > limits.maxAgents) fail();
   for (const agent of agents) {
     const id = agent.control.agentId;
     const subject = `agent:${id}`;

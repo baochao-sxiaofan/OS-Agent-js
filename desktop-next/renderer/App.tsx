@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowUp, Check, ChevronRight, CircleHelp, Eye, FolderOpen, Info, MessageCircle, Pause, Play, Plus, Search, Settings2, ShieldCheck, Sparkles, Square, Users, X } from 'lucide-react';
+import { ArrowUp, Check, ChevronRight, CircleHelp, Eye, FolderOpen, Info, MessageCircle, Pause, Play, Plus, Search, Settings2, ShieldCheck, Sparkles, Square, UserMinus, Users, X } from 'lucide-react';
 import { roles, type Contact, type Snapshot } from '../shared/contracts.js';
-import { Avatar, CreateModal, GroupModal, SettingsModal, errorMessage, stateText } from './components.js';
+import { Avatar, CreateModal, GroupModal, SettingsModal, Modal, errorMessage, stateText } from './components.js';
 import { MemoryModal } from './memory.js';
 
 const time = (value: number) => new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
@@ -18,6 +18,9 @@ export function App() {
   const [inspectedConversation, setInspectedConversation] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [modal, setModal] = useState<'create' | 'group' | 'settings' | null>(null);
+  const [showDismissed, setShowDismissed] = useState(false);
+  const [dismissTarget, setDismissTarget] = useState<Contact | null>(null);
+  const [dismissing, setDismissing] = useState(false);
   const [details, setDetails] = useState(false);
   const [memoryTab, setMemoryTab] = useState<'summary' | 'history' | 'notes' | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
@@ -63,16 +66,17 @@ export function App() {
     if (!conversation || sending || readOnly || !draft.content.trim()) return;
     const id = conversation.id;
     const content = draft.content.trim();
-    const fingerprint = JSON.stringify([content, draft.mentions]);
+    const mentions = draft.mentions.filter((id) => snapshot?.contacts.find((item) => item.id === id)?.status !== 'dismissed');
+    const fingerprint = JSON.stringify([content, mentions]);
     let pending = pendingSends.current.get(id);
     if (!pending || pending.fingerprint !== fingerprint) {
       pending = { fingerprint, key: crypto.randomUUID() }; pendingSends.current.set(id, pending);
     }
     setSending(true);
     try {
-      await window.agents.send(id, content, pending.key, draft.mentions);
+      await window.agents.send(id, content, pending.key, mentions);
       pendingSends.current.delete(id);
-      setDrafts((previous) => JSON.stringify([previous[id]?.content.trim(), previous[id]?.mentions]) === fingerprint
+      setDrafts((previous) => JSON.stringify([previous[id]?.content.trim(), previous[id]?.mentions.filter((id) => snapshot?.contacts.find((item) => item.id === id)?.status !== 'dismissed')]) === fingerprint
         ? { ...previous, [id]: { content: '', mentions: [] } } : previous);
       await refresh();
     } catch (reason) { onError(reason); } finally { setSending(false); }
@@ -81,7 +85,11 @@ export function App() {
     (b.messages.at(-1)?.createdAt ?? b.createdAt) - (a.messages.at(-1)?.createdAt ?? a.createdAt));
   const matches = (text: string) => text.toLowerCase().includes(search.toLowerCase());
   const contacts = snapshot?.contacts ?? [];
-  const blocked = conversation?.members.some((member) => contacts.find((item) => item.id === member.id)?.status === 'cancelled');
+  const visibleContacts = contacts.filter((item) => showDismissed || item.status !== 'dismissed');
+  const blocked = conversation?.members.some((member) => {
+    const status = contacts.find((item) => item.id === member.id)?.status;
+    return status === 'cancelled' || conversation.kind === 'direct' && status === 'dismissed';
+  });
   return <div className="app">
     <div className="titlebar"><span>OS Agent <b>Next</b></span><span className="titlebar-note">你的长期协作空间</span></div>
     <nav className="rail" aria-label="主导航">
@@ -92,11 +100,12 @@ export function App() {
     </nav>
     <aside className="sidebar">
       <header className="sidebar-header"><button className="add-button" title="创建 Agent" aria-label="创建 Agent" onClick={() => setModal('create')}><Plus size={20} /></button><h1>{view === 'chats' ? '我的对话' : 'Agent'}</h1>
-        {view === 'chats' && <button className="icon-button" title="创建群聊" aria-label="创建群聊" disabled={!contacts.length} onClick={() => setModal('group')}><Users size={19} /></button>}
+        {view === 'chats' && <button className="icon-button" title="创建群聊" aria-label="创建群聊" disabled={!contacts.some((item) => !['dismissed', 'cancelled'].includes(item.status))} onClick={() => setModal('group')}><Users size={19} /></button>}
       </header>
       <div className="search"><Search size={16} /><input aria-label="搜索" placeholder={view === 'chats' ? '搜索会话' : '搜索 Agent'} value={search} onChange={(event) => setSearch(event.target.value)} />{search && <button aria-label="清除搜索" onClick={() => setSearch('')}><X size={14} /></button>}</div>
       <div className="list-label">{view === 'chats' ? '我参与的会话' : '用户创建的长期 AGENT'}<span>{view === 'chats' ? '私聊与群聊' : '管理与只读查看'}</span></div>
       <div className="contact-list">
+        {view === 'agents' && contacts.some((item) => item.status === 'dismissed') && <button className="secondary compact" onClick={() => setShowDismissed(!showDismissed)}>{showDismissed ? '隐藏已解雇员工' : '查看已解雇员工'}</button>}
         {view === 'chats' ? conversations.filter((item) => matches(item.title)).map((item) =>
           <button key={item.id} className={`contact-item ${item.id === selected ? 'selected' : ''}`} onClick={() => setSelected(item.id)}>
             <Avatar name={item.kind === 'group' ? '群聊' : item.title} id={item.members[0]?.id ?? 0} />
@@ -104,11 +113,11 @@ export function App() {
               <p>{item.messages.at(-1)?.content ?? '发送第一条消息，开始协作'}</p>
               <div className="contact-meta"><span>{item.kind === 'group' ? `${item.members.length + 1} 人群聊` : '私聊'}</span>{item.unread > 0 && <b>{item.unread > 99 ? '99+' : item.unread}</b>}</div>
             </div>
-          </button>) : contacts.filter((item) => matches(`${item.name} ${item.objective} ${item.alias}`)).map((item) =>
+          </button>) : visibleContacts.filter((item) => matches(`${item.name} ${item.objective} ${item.alias}`)).map((item) =>
           <button key={item.id} className={`contact-item ${item.id === agentId ? 'selected' : ''}`} onClick={() => { setAgentId(item.id); setInspectedConversation(null); }}>
             <Avatar name={item.name} id={item.id} /><div className="contact-copy"><div><strong>{item.name}</strong></div><p>{item.objective}</p><div className="contact-meta">{stateText(item)} · {item.alias}</div></div>
           </button>)}
-        {!(view === 'chats' ? conversations.filter((item) => matches(item.title)).length : contacts.filter((item) => matches(`${item.name} ${item.objective} ${item.alias}`)).length) &&
+        {!(view === 'chats' ? conversations.filter((item) => matches(item.title)).length : visibleContacts.filter((item) => matches(`${item.name} ${item.objective} ${item.alias}`)).length) &&
           <div className="list-empty">{search ? '没有匹配的结果' : '还没有协作伙伴'}<span>点击左上角 ＋ 创建 Agent</span></div>}
       </div>
       <button className="model-indicator" onClick={() => setModal('settings')}>
@@ -123,9 +132,10 @@ export function App() {
           <div><h2>{readOnly ? `${contact?.name}的会话` : conversation?.title}</h2><p>{readOnly ? '只读查看 · 不会触发 Agent 或改变你的未读' : conversation?.kind === 'group'
             ? `${conversation.members.length + 1} 位成员 · ${conversation.participation === 'all' ? '自主判断是否发言' : '仅被点名时处理'}` : '独立私聊 · 按需要回复'}</p></div>
           <div className="chat-actions">{contact && <>
-            <button className="secondary compact" onClick={() => void act(() => window.agents.control(contact.id, contact.status === 'active' ? 'pause' : 'resume'))}>
-              {contact.status === 'active' ? <Pause size={14} /> : <Play size={14} />}{contact.status === 'active' ? '暂停' : '继续'}</button>
-            {readOnly && <button className="secondary compact" onClick={() => { setView('chats'); setSelected(contact.directConversationId); }}>与它私聊</button>}
+            <button disabled={contact.status === 'dismissed'} className="secondary compact" onClick={() => void act(() => window.agents.control(contact.id, contact.status === 'active' ? 'pause' : 'resume'))}>
+              {contact.status === 'active' ? <Pause size={14} /> : <Play size={14} />}{contact.status === 'dismissed' ? '已解雇' : contact.status === 'active' ? '暂停' : '继续'}</button>
+            {contact.status !== 'dismissed' && <button className="secondary compact danger" onClick={() => setDismissTarget(contact)}><UserMinus size={14} />解雇</button>}
+            {readOnly && <button className="secondary compact" onClick={() => { setView('chats'); setSelected(contact.directConversationId); }}>{contact.status === 'dismissed' ? '查看私聊历史' : '与它私聊'}</button>}
           </>}<button className="secondary compact" onClick={() => setMemoryTab('summary')}>会话记忆</button>
           <button className="icon-button" title="搜索历史消息" aria-label="搜索历史消息" onClick={() => setMemoryTab('history')}><Search size={18} /></button>
           <button className={`icon-button ${details ? 'on' : ''}`} title="查看详情" aria-label="查看详情" onClick={() => setDetails(!details)}><Info size={20} /></button></div>
@@ -153,7 +163,7 @@ export function App() {
                 const member = contacts.find((item) => item.id === mailbox.agentId);
                 const lastIncoming = conversation.messages.findLast((message) =>
                   message.sender.kind !== 'agent' || message.sender.id !== mailbox.agentId);
-                const label = member?.status === 'paused' ? '已暂停' : member?.status === 'cancelled' ? '已停止'
+                const label = member?.status === 'dismissed' ? '已解雇' : member?.status === 'paused' ? '已暂停' : member?.status === 'cancelled' ? '已停止'
                   : mailbox.state === 'aggregating' ? '等待合并处理' : mailbox.state === 'processing' ? '正在处理此会话'
                     : lastIncoming && lastIncoming.sequence > mailbox.processedSequence ? '新消息未触发处理'
                     : mailbox.processedSequence > 0 ? '已处理' : '暂无待处理消息';
@@ -169,9 +179,9 @@ export function App() {
           {contact?.error && <div className="error-banner"><CircleHelp size={16} /><span>{contact.error}</span></div>}
           {contact?.approvals.map((approval) => <ApprovalCard key={approval.operationId} contact={contact} approval={approval} act={act} />)}
           {readOnly ? <div className="readonly-banner"><Eye size={15} />Agent 视角 · 只读查看</div> : conversation && <>
-            {blocked && <div className="paused-banner">会话中有已停止的 Agent，请在 Agent 视角恢复后发送。</div>}
+            {blocked && <div className="paused-banner">{contact?.status === 'dismissed' ? '员工已解雇，此私聊仅保留历史。' : '会话中有已停止的 Agent，请在 Agent 视角恢复后发送。'}</div>}
             <div className="composer">
-              {conversation.kind === 'group' && <div className="mentions"><span>点名</span>{conversation.members.map((member) =>
+              {conversation.kind === 'group' && <div className="mentions"><span>点名</span>{conversation.members.filter((member) => contacts.find((item) => item.id === member.id)?.status !== 'dismissed').map((member) =>
                 <button key={member.id} className={draft.mentions.includes(member.id) ? 'selected' : ''} aria-pressed={draft.mentions.includes(member.id)}
                   onClick={() => updateDraft({ mentions: draft.mentions.includes(member.id) ? draft.mentions.filter((id) => id !== member.id) : [...draft.mentions, member.id] })}>@{member.name}</button>)}</div>}
               <textarea aria-label={`发消息给${conversation.title}`} placeholder={`发消息给 ${conversation.title}…`}
@@ -185,10 +195,10 @@ export function App() {
             {contact ? <><Avatar name={contact.name} id={contact.id} large /><h3>{contact.name}</h3><span className="alias">{contact.alias} · {stateText(contact)}</span>
               <div className="detail-memory"><button className="secondary" onClick={() => setMemoryTab('notes')}>{readOnly ? '查看 Agent 的备注' : '编辑我的长备注'}</button></div>
               <label>长期职责</label><p>{contact.objective}</p><label><FolderOpen size={13} />工作区</label><p className="path">{contact.workspace ?? '未挂载工作区'}</p>
-              <label><ShieldCheck size={13} />已授予权限</label><p>{contact.capabilities.join('、') || '无文件访问权限'}</p>
+              <label><ShieldCheck size={13} />{contact.status === 'dismissed' ? '历史授权（已撤销）' : '已授予权限'}</label><p>{contact.capabilities.join('、') || '无文件访问权限'}</p>
               <label>运行记录</label><div className="stats"><div><strong>{contact.rounds}</strong><span>模型请求</span></div><div><strong>{contact.totalTokens.toLocaleString()}</strong><span>计量 Tokens</span></div></div>
               <p className="detail-note">处理结束不一定发送消息。身份和各会话记忆会保留。用量缺失时按请求上限保守计量。</p>
-              <button className="secondary danger" onClick={() => void act(() => window.agents.control(contact.id, 'cancel'))}><Square size={13} />停止自动执行</button>
+              {contact.status !== 'dismissed' && <button className="secondary danger" onClick={() => void act(() => window.agents.control(contact.id, 'cancel'))}><Square size={13} />停止自动执行</button>}
             </> : <><p>我</p>{conversation?.members.map((member) => <button key={member.id} className="member-detail" onClick={() => { setView('agents'); setAgentId(member.id); setInspectedConversation(conversation.id); }}><Avatar name={member.name} id={member.id} /><span>{member.name}<small>{roles.find((role) => role.id === contacts.find((item) => item.id === member.id)?.character)?.name}</small></span></button>)}</>}
           </aside>}
         </div>
@@ -198,12 +208,22 @@ export function App() {
       setModal(null); setView('chats');
       void window.agents.snapshot().then((next) => { setSnapshot(next); setSelected(next.contacts.find((item) => item.id === id)?.directConversationId ?? null); }).catch(onError);
     }} />}
-    {modal === 'group' && <GroupModal contacts={contacts} onClose={() => setModal(null)} onCreated={(id) => { setSelected(id); setView('chats'); setModal(null); void refresh(); }} />}
+    {modal === 'group' && <GroupModal contacts={contacts.filter((item) => item.status !== 'dismissed')} onClose={() => setModal(null)} onCreated={(id) => { setSelected(id); setView('chats'); setModal(null); void refresh(); }} />}
     {modal === 'settings' && snapshot && <SettingsModal settings={snapshot.settings} onClose={() => setModal(null)} onSaved={() => { setModal(null); void refresh(); }} />}
     {memoryTab && <MemoryModal initialTab={memoryTab} conversation={conversation}
       conversations={readOnly ? inspector?.conversations ?? [] : snapshot?.conversations ?? []}
       contacts={contacts} inspectAgentId={inspectorId} targetId={readOnly ? undefined : contact?.id}
       onClose={() => setMemoryTab(null)} />}
+    {dismissTarget && <Modal title={`解雇 ${dismissTarget.name}`} onClose={() => { if (!dismissing) setDismissTarget(null); }}>
+      <p className="modal-intro">解雇后将停止工作、移出在职员工列表，且不能继续启用。聊天记录、工作产物和待核对的执行结果会保留；其他员工继续工作。</p>
+      <footer><button className="secondary" disabled={dismissing} onClick={() => setDismissTarget(null)}>保留员工</button>
+        <button className="primary danger" disabled={dismissing} onClick={() => {
+          setDismissing(true);
+          void window.agents.control(dismissTarget.id, 'dismiss').then(async () => {
+            setDismissTarget(null); setDetails(false); setAgentId(null); await refresh();
+          }).catch(onError).finally(() => setDismissing(false));
+        }}>{dismissing ? '正在解雇…' : '确认解雇'}</button></footer>
+    </Modal>}
     {error && <div className="toast" role="alert"><CircleHelp size={18} /><span>{error}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setError('')}><X size={17} /></button></div>}
   </div>;
 }

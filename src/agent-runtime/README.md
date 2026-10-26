@@ -61,3 +61,8 @@ MCP、Docker 后端分别位于 integrations/mcp-client.ts 和 docker-sandbox.ts
 
 HTTP 服务用法见 [服务器部署说明](../../docs/server-runtime.md)，验收状态见
 [交付清单](../../docs/server-runtime-checklist.md)。
+
+`dismiss(id, owner)` 永久解雇员工；只有用户控制面可调用。状态为 `dismissed`，默认 `list`
+不返回该身份，`list(owner, { includeDismissed: true })` 与 `inspect` 可用于历史管理。
+暂停、继续不能重新启用离职身份；会话、原文、产物及未知副作用对账记录保留。
+普通请求采用固定工具和完整历史前缀，详见[请求布局](../../docs/request-layout.md)。

@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,7 @@ async function options(work: (request: ModelCompletionRequest) => object): Promi
   return { database: join(path, 'runtime.sqlite'), workspaces: { work: path },
     requester: { provider: 'minimax', model: 'test', async request(request) {
       const ref = String(request.messages[0]?.content).includes('独立总结轮')
-        ? (JSON.parse(String(request.messages[1]?.content)) as { sourceRef: string }).sourceRef : null;
+        ? (readRuntimeRequest(request) as { sourceRef: string }).sourceRef : null;
       return { provider: 'minimax', model: 'test', finishReason: 'stop',
         message: nativeMessage(ref ? summary(ref) : work(request)),
       usage: { inputTokens: 10, outputTokens: 10, totalTokens: 20 } };
@@ -100,7 +101,7 @@ it('用户创建数量受全局上限限制，休眠和重启不重置长期身�
 it.each(['other-owner', 'other-workspace', 'self', 'cancelled'])('平等 Agent 通信拒绝越界或无效收件人：%s', async (boundary) => {
   let receiverCalls = 0;
   const config = await options((request) => {
-    const data = JSON.parse(String(request.messages[1]?.content)) as {
+    const data = readRuntimeRequest(request) as {
       context: { frames: { objective: string }[] }; peers: string[];
     };
     if (data.context.frames[0]!.objective === '发送端') {

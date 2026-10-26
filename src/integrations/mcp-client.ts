@@ -28,7 +28,7 @@ export class RuntimeMcpClient implements McpClientPort {
     const connection = this.connections[id];
     if (!connection) throw new Error('MCP 服务器未注册。');
     const promise = (async () => {
-      const client = new Client({ name: 'os-agent-js', version: '3.0.0' });
+      const client = new Client({ name: 'os-agent-js', version: '3.1.0' });
       let disconnected = false;
       client.onclose = () => {
         disconnected = true;

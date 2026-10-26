@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,7 +54,7 @@ function complete(action: object): ModelCompletion {
 }
 
 function payload(request: ModelCompletionRequest): { currentBatch: { id: string }; previousError: string | null } {
-  return JSON.parse(String(request.messages[1]?.content)) as {
+  return readRuntimeRequest(request) as {
     currentBatch: { id: string }; previousError: string | null;
   };
 }
@@ -346,7 +347,7 @@ it('总结多次准入等待不消耗总结尝试、工作轮数或累计额度�
     conversationPolicy: { quietMs: 1, maxWaitMs: 1 },
     requester: { provider: 'deepseek', model: 'fixture', async request(request) {
       calls++;
-      const view = JSON.parse(String(request.messages[1]?.content)) as { sourceRef?: string };
+      const view = readRuntimeRequest(request) as { sourceRef?: string };
       return complete(view.sourceRef ? summary(view.sourceRef) : { kind: 'context', decision: { type: 'idle' } });
     } },
   });

@@ -1,3 +1,4 @@
+import { readRuntimeRequest } from '../../src/agent-runtime/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,13 +23,13 @@ const inputSchema = z.object({
   self: z.object({ id: z.number() }), conversation: z.object({ id: z.string(), members: z.array(z.object({ kind: z.string() })) }),
   currentBatch: z.object({ messageIds: z.array(z.string()) }), context: z.unknown(), crossConversationMemory: z.unknown(),
 });
-function input(request: ModelCompletionRequest) { return inputSchema.parse(JSON.parse(String(request.messages[1]?.content))); }
+function input(request: ModelCompletionRequest) { return inputSchema.parse(readRuntimeRequest(request)); }
 const summaryInput = z.object({
   purpose: z.literal('conversation_compaction'), conversationId: z.string(), throughSequence: z.number(),
   previous: digestSchema.passthrough().nullable(), messages: z.array(z.object({ id: z.string(), content: z.string() })),
 });
 function digest(request: ModelCompletionRequest) {
-  const data = summaryInput.parse(JSON.parse(String(request.messages[1]?.content)));
+  const data = summaryInput.parse(readRuntimeRequest(request));
   const first = data.messages[0]!;
   const ref = { conversationId: data.conversationId, messageId: first.id };
   return { overview: first.content.slice(0, 100), unresolved: [],
