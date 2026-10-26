@@ -134,7 +134,6 @@ export function App() {
           <div className="chat-actions">{contact && <>
             <button disabled={contact.status === 'dismissed'} className="secondary compact" onClick={() => void act(() => window.agents.control(contact.id, contact.status === 'active' ? 'pause' : 'resume'))}>
               {contact.status === 'active' ? <Pause size={14} /> : <Play size={14} />}{contact.status === 'dismissed' ? '已解雇' : contact.status === 'active' ? '暂停' : '继续'}</button>
-            {contact.status !== 'dismissed' && <button className="secondary compact danger" onClick={() => setDismissTarget(contact)}><UserMinus size={14} />解雇</button>}
             {readOnly && <button className="secondary compact" onClick={() => { setView('chats'); setSelected(contact.directConversationId); }}>{contact.status === 'dismissed' ? '查看私聊历史' : '与它私聊'}</button>}
           </>}<button className="secondary compact" onClick={() => setMemoryTab('summary')}>会话记忆</button>
           <button className="icon-button" title="搜索历史消息" aria-label="搜索历史消息" onClick={() => setMemoryTab('history')}><Search size={18} /></button>
@@ -198,7 +197,10 @@ export function App() {
               <label><ShieldCheck size={13} />{contact.status === 'dismissed' ? '历史授权（已撤销）' : '已授予权限'}</label><p>{contact.capabilities.join('、') || '无文件访问权限'}</p>
               <label>运行记录</label><div className="stats"><div><strong>{contact.rounds}</strong><span>模型请求</span></div><div><strong>{contact.totalTokens.toLocaleString()}</strong><span>计量 Tokens</span></div></div>
               <p className="detail-note">处理结束不一定发送消息。身份和各会话记忆会保留。用量缺失时按请求上限保守计量。</p>
-              {contact.status !== 'dismissed' && <button className="secondary danger" onClick={() => void act(() => window.agents.control(contact.id, 'cancel'))}><Square size={13} />停止自动执行</button>}
+              {contact.status !== 'dismissed' && <footer className="detail-actions">
+                <button className="secondary" onClick={() => void act(() => window.agents.control(contact.id, 'cancel'))}><Square size={13} />停止自动执行</button>
+                <button className="secondary danger" onClick={() => setDismissTarget(contact)}><UserMinus size={14} />解雇</button>
+              </footer>}
             </> : <><p>我</p>{conversation?.members.map((member) => <button key={member.id} className="member-detail" onClick={() => { setView('agents'); setAgentId(member.id); setInspectedConversation(conversation.id); }}><Avatar name={member.name} id={member.id} /><span>{member.name}<small>{roles.find((role) => role.id === contacts.find((item) => item.id === member.id)?.character)?.name}</small></span></button>)}</>}
           </aside>}
         </div>
